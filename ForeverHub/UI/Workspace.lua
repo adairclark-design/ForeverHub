@@ -625,6 +625,9 @@ function Workspace.RefreshIfShown()
 end
 
 function Workspace.Show(tabKey)
+  if ns.UI and ns.UI.MinimapButton and type(ns.UI.MinimapButton.DismissWelcomeToast) == "function" then
+    ns.UI.MinimapButton.DismissWelcomeToast()
+  end
   local f = Workspace.EnsureCreated()
   if not f then
     return

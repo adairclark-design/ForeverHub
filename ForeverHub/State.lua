@@ -150,6 +150,7 @@ function State.Init(isAddonLoad)
   State.EnsureGoldFarmProgressInitialized(isAddonLoad)
   State.EnsureArrowSettingsInitialized()
   State.EnsureWorldMapPinSettingsInitialized()
+  State.EnsureMinimapSettingsInitialized()
   State.EnsureWorkspaceUIStateInitialized(isAddonLoad)
 end
 
@@ -1107,6 +1108,62 @@ function State.GetWorkspaceUIState()
     db.uiWorkspace = State.MigrateWorkspaceUIState(db.uiWorkspace, db.settings)
   end
   return db.uiWorkspace
+end
+
+function State.EnsureMinimapSettingsInitialized()
+  local db = _G.ForeverHubDB
+  if type(db) ~= "table" then
+    return nil
+  end
+  db.settings = type(db.settings) == "table" and db.settings or {}
+  local raw = type(db.settings.minimapButton) == "table" and db.settings.minimapButton or {}
+  local deg = tonumber(raw.angleDeg) or 220
+  deg = deg % 360
+  if deg < 0 then
+    deg = deg + 360
+  end
+  db.settings.minimapButton = {
+    hidden = (raw.hidden == true),
+    angleDeg = math.floor(deg * 10 + 0.5) / 10,
+  }
+  if type(db.onboardingSeen) ~= "boolean" then
+    db.onboardingSeen = false
+  end
+  return db.settings.minimapButton
+end
+
+function State.GetMinimapSettings()
+  local db = State.GetDB()
+  if type(db.settings) ~= "table" or type(db.settings.minimapButton) ~= "table" then
+    State.EnsureMinimapSettingsInitialized()
+  end
+  return db.settings.minimapButton
+end
+
+function State.SetMinimapHidden(hidden)
+  local mm = State.GetMinimapSettings()
+  mm.hidden = (hidden == true)
+  return mm
+end
+
+function State.SetMinimapAngle(angleDeg)
+  local mm = State.GetMinimapSettings()
+  local deg = (tonumber(angleDeg) or 220) % 360
+  if deg < 0 then
+    deg = deg + 360
+  end
+  mm.angleDeg = math.floor(deg * 10 + 0.5) / 10
+  return mm
+end
+
+function State.HasSeenOnboarding()
+  local db = State.GetDB()
+  return db.onboardingSeen == true
+end
+
+function State.MarkOnboardingSeen(seen)
+  local db = State.GetDB()
+  db.onboardingSeen = (seen ~= false)
 end
 
 function State.GetCompiledRivergladesRoute()

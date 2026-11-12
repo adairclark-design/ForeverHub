@@ -1998,8 +1998,41 @@ local function handleSlashCommand(msg)
   elseif cmd == "arrow" then
     Events.HandleArrowCommand(rest)
     return
+  elseif cmd == "minimap" or cmd == "mm" then
+    local sub = string.lower(string.gsub(tostring(rest or ""), "^%s*(.-)%s*$", "%1"))
+    local mmUI = ns.UI and ns.UI.MinimapButton
+    if sub == "reset" then
+      if mmUI and mmUI.ResetPosition then
+        mmUI.ResetPosition()
+      end
+      ns.Compat.Print("Minimap button restored to default position.")
+    elseif sub == "hide" or sub == "off" then
+      if mmUI and mmUI.SetHidden then
+        mmUI.SetHidden(true)
+      elseif ns.State and ns.State.SetMinimapHidden then
+        ns.State.SetMinimapHidden(true)
+      end
+      ns.Compat.Print("Minimap button hidden. Type /fh minimap to show it again.")
+    elseif sub == "show" or sub == "on" then
+      if mmUI and mmUI.SetHidden then
+        mmUI.SetHidden(false)
+      elseif ns.State and ns.State.SetMinimapHidden then
+        ns.State.SetMinimapHidden(false)
+      end
+      ns.Compat.Print("Minimap button shown.")
+    else
+      local cur = (ns.State and ns.State.GetMinimapSettings and ns.State.GetMinimapSettings()) or { hidden = false }
+      local nextHidden = not (cur.hidden == true)
+      if mmUI and mmUI.SetHidden then
+        mmUI.SetHidden(nextHidden)
+      elseif ns.State and ns.State.SetMinimapHidden then
+        ns.State.SetMinimapHidden(nextHidden)
+      end
+      ns.Compat.Print(nextHidden and "Minimap button hidden. Type /fh minimap to show it again." or "Minimap button shown.")
+    end
+    return
   else
-    ns.Compat.Print("Commands: /fh | /fh arrow [on|off|lock|unlock|scale <0.6-2.0>|style <auto|custom|classic>|reset] | /fh gold [...] | /fh rg [...] | /fh mount | /fh doctor | /fh selftest")
+    ns.Compat.Print("Commands: /fh | /fh minimap [show|hide|reset] | /fh arrow [on|off|lock|unlock|scale <0.6-2.0>|style <auto|custom|classic>|reset] | /fh gold [...] | /fh rg [...] | /fh mount | /fh doctor | /fh selftest")
   end
 end
 
@@ -2063,7 +2096,18 @@ if eventFrame then
         ns.UI.WorldMapPins.EnsureHooksInstalled()
         ns.UI.WorldMapPins.RequestRefresh()
       end
+      if ns.UI and ns.UI.MinimapButton and ns.UI.MinimapButton.EnsureCreated then
+        ns.UI.MinimapButton.EnsureCreated()
+      end
     elseif event == "PLAYER_ENTERING_WORLD" then
+      if ns.UI and ns.UI.MinimapButton then
+        if ns.UI.MinimapButton.RefreshVisibility then
+          ns.UI.MinimapButton.RefreshVisibility()
+        end
+        if ns.UI.MinimapButton.ShowWelcomeToastIfNeeded then
+          ns.UI.MinimapButton.ShowWelcomeToastIfNeeded()
+        end
+      end
       ns.State.CaptureSessionMoneyBaselineIfUnset()
       if ns.Providers and ns.Providers.Auctionator then
         ns.Providers.Auctionator.RegisterDBUpdateCallback(function()
