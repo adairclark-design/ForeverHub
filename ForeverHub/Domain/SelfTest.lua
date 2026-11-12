@@ -118,6 +118,11 @@ local function snapshotAndIsolateNavigation(charDB)
     snap.hydratedFromSaved = nav.hydratedFromSaved
     snap.lastStatus = deepCopyTable(nav.lastStatus)
     snap.pendingDeferredSync = nav.pendingDeferredSync
+    snap.watchedQuestRef = nav.watchedQuestRef
+    snap.watchedQuestActionID = nav.watchedQuestActionID
+    snap.watchedQuestFingerprint = nav.watchedQuestFingerprint
+    snap.questWatchdogAccum = nav.questWatchdogAccum
+    snap.questWatchdogActive = nav.questWatchdogActive
 
     -- Detach live ticker, live HUD, live controller, live arrow, AND live owner WITHOUT cancelling the live C_Timer handle or touching live waypoints!
     nav.travelTicker = nil
@@ -131,6 +136,11 @@ local function snapshotAndIsolateNavigation(charDB)
     nav.suppressHUDCreation = true
     nav.hydratedFromSaved = true
     nav.pendingDeferredSync = false
+    nav.watchedQuestRef = nil
+    nav.watchedQuestActionID = nil
+    nav.watchedQuestFingerprint = nil
+    nav.questWatchdogAccum = 0
+    nav.questWatchdogActive = false
     nav.owner = {
       ownerContext = nil,
       generation = 0,
@@ -195,6 +205,11 @@ local function restoreNavigationSnapshot(snap, charDB)
     nav.hydratedFromSaved = snap.hydratedFromSaved
     nav.lastStatus = snap.lastStatus
     nav.pendingDeferredSync = snap.pendingDeferredSync
+    nav.watchedQuestRef = snap.watchedQuestRef
+    nav.watchedQuestActionID = snap.watchedQuestActionID
+    nav.watchedQuestFingerprint = snap.watchedQuestFingerprint
+    nav.questWatchdogAccum = snap.questWatchdogAccum
+    nav.questWatchdogActive = snap.questWatchdogActive
   end
   if charDB then
     charDB.navigationOwner = snap.savedDBNavOwner
@@ -1158,7 +1173,7 @@ function SelfTest.RunRivergladesSuite()
     assertTrue(string.find(text, "^#forever\n") ~= nil, "RXP export must begin with #forever header")
     assertTrue(string.find(text, "%.goto 2548,66%.72,81%.07", 1) ~= nil, "RXP export must emit numeric .goto 2548,66.72,81.07")
     assertTrue(string.find(text, "%.accept 94879", 1) ~= nil, "RXP export must emit verified .accept 94879")
-    assertTrue(string.find(text, "94890", 1, true) == nil, "Quarantined quest 94890 must NEVER appear in RXP export")
+    assertTrue(string.find(text, "95562", 1, true) == nil, "Quarantined quest 95562 must NEVER appear in RXP export")
     assertTrue(string.find(text, "%.accept 94980", 1) == nil, "Unverified 94980 must NEVER emit .accept/.turnin in RXP export")
   end)
 
@@ -1760,6 +1775,9 @@ function SelfTest.RunRivergladesSuite()
       assertTrue(eval3.nextAction.actionID == "rg_pf_accept_95261", "Freeing a slot after Trapclaw at Powderfuse must immediately offer local dock pickup It Takes Guts (95261)")
       completedPrior[95261] = true
       completedPrior[95267] = true
+      completedPrior[95288] = true
+      completedPrior[95293] = true
+      completedPrior[95294] = true
       local eval3b = RouteProgress.Reconcile(
         route,
         prog,
@@ -2383,6 +2401,51 @@ function SelfTest.RunRivergladesSuite()
         "WANTED: Blademaster Kaijo (95912) must turn in at Ember Bladewhisper (260080)"
       )
       assertTrue(
+        byID["rg_hb_obj_94925"]
+          and byID["rg_hb_obj_94925"].npcID == 259055
+          and math.abs(byID["rg_hb_obj_94925"].destination.x01 - 0.6152) < 1e-4
+          and math.abs(byID["rg_hb_obj_94925"].destination.y01 - 0.5003) < 1e-4,
+        "A Fur Trade (94925) objective must target Wildplains Huntress (259055) @ (61.52, 50.03), NEVER Plains Prowler (268831)"
+      )
+      assertTrue(
+        byID["rg_hb_obj_foremans_plight"]
+          and math.abs(byID["rg_hb_obj_foremans_plight"].destination.x01 - 0.5110) < 1e-4
+          and math.abs(byID["rg_hb_obj_foremans_plight"].destination.y01 - 0.5710) < 1e-4,
+        "Foreman's Plight (95943) objective must point to Foreman's Crate @ (51.10, 57.10)"
+      )
+      assertTrue(
+        byID["rg_pf_obj_96063"]
+          and math.abs(byID["rg_pf_obj_96063"].destination.x01 - 0.6240) < 1e-4
+          and math.abs(byID["rg_pf_obj_96063"].destination.y01 - 0.5720) < 1e-4,
+        "Gaseous Gold (96063) objective must point to Marsh Gas Vents @ (62.40, 57.20)"
+      )
+      assertTrue(
+        byID["rg_hb_obj_94843"]
+          and math.abs(byID["rg_hb_obj_94843"].destination.x01 - 0.3880) < 1e-4
+          and math.abs(byID["rg_hb_obj_94843"].destination.y01 - 0.6270) < 1e-4,
+        "From Seed to Sprout (94843) objective must point to Loamy Soil @ (38.80, 62.70)"
+      )
+      assertTrue(
+        byID["rg_el_obj_94890"]
+          and byID["rg_el_obj_94890"].npcID == 256881
+          and math.abs(byID["rg_el_obj_94890"].destination.x01 - 0.2580) < 1e-4
+          and math.abs(byID["rg_el_obj_94890"].destination.y01 - 0.4340) < 1e-4
+          and byID["rg_wf_obj_94891"] == nil
+          and byID["rg_wf_turnin_94891"]
+          and byID["rg_wf_turnin_94891"].npcID == 257591
+          and route.questsByID[94891].zeroObjectives == true,
+        "Bring Me His Head (94890) -> Overlord Kilgar (25.8, 43.4) & News to Farholde (94891) zero-obj -> Ashe Amberhall (257591)"
+      )
+      assertTrue(
+        byID["rg_hb_accept_94961"]
+          and byID["rg_hb_accept_94961"].npcID == 259158
+          and math.abs(byID["rg_hb_accept_94961"].destination.x01 - 0.4730) < 1e-4
+          and math.abs(byID["rg_hb_accept_94961"].destination.y01 - 0.5130) < 1e-4
+          and byID["rg_hb_obj_94961"]
+          and byID["rg_hb_obj_94961"].npcID == 254560,
+        "Biting the Hand (94961) must start/turn in at Fuzzle (47.3, 51.3) and farm Twilight Shadowmancers (254560)"
+      )
+      assertTrue(
         type(route.npcDirectoryByID) == "table" and route.npcDirectoryByID[263367] ~= nil and route.npcDirectoryByID[7941] ~= nil,
         "198-entry NPC directory must include Sleebo Fizzlespout (263367) and Mardrack Greenwell (7941)"
       )
@@ -2527,6 +2590,291 @@ function SelfTest.RunRivergladesSuite()
     ns.Compat.InvalidateQuestStateCaches()
     if not okGate15 then
       error(errGate15, 2)
+    end
+  end)
+
+  -- RG-16. The Monster Surfaces (95267 @ 74.3, 72.4), Anti-Misdirection Selection Guardrails & Field Telemetry
+  check("RG-16. The Monster Surfaces (74.3, 72.4), Selection Guardrails & Field Telemetry", function()
+    local savedSelOv = ns.State.overrideSelectedQuest
+    local savedPosOv = ns.State.overridePlayerPosition
+    local savedActiveOv = ns.State.overrideActiveQuests
+    local savedCompOv = ns.State.overrideCompletedQuests
+    local savedCaps = (_G.ForeverHubDB and type(_G.ForeverHubDB.fieldCaptures) == "table")
+      and deepCopyTable(_G.ForeverHubDB.fieldCaptures)
+      or nil
+    local savedCharRG = charDB and deepCopyTable(charDB.routeProgress) or nil
+
+    local okGate16, errGate16 = pcall(function()
+      local byID = {}
+      for _, a in ipairs(route.actions) do
+        byID[a.actionID] = a
+      end
+
+      -- 1. Verify 95267 (The Monster Surfaces) static route coordinates & chain
+      local msAccept = byID["rg_pf_accept_95267"]
+      local msObj = byID["rg_pf_obj_95267"]
+      local msTurnin = byID["rg_pf_turnin_95267"]
+      assertTrue(msAccept and msAccept.npcID == 260231, "95267 accept must point to Argo Brinewhistle (260231)")
+      assertTrue(
+        msObj
+          and msObj.destination
+          and msObj.destination.uiMapID == 2548
+          and math.abs(msObj.destination.x01 - 0.7430) < 1e-4
+          and math.abs(msObj.destination.y01 - 0.7240) < 1e-4
+          and msObj.destination.coordConfidence == "artifact_verified",
+        "95267 objective must point to verified Fresh Wreckage at (74.3, 72.4)"
+      )
+      assertTrue(
+        msTurnin
+          and msTurnin.npcID == 260231
+          and math.abs(msTurnin.destination.x01 - 0.7954) < 1e-4
+          and math.abs(msTurnin.destination.y01 - 0.5246) < 1e-4,
+        "95267 turn-in must point to Argo Brinewhistle at (79.54, 52.46)"
+      )
+
+      -- Verify newly reconciled Riverglades quests from WDB + QuestieDB
+      assertTrue(byID["rg_hb_obj_95064"] and byID["rg_hb_obj_95064"].npcID == 256749, "Preventative Measures (95064) must target Rog'mar Trainee (256749)")
+      assertTrue(byID["rg_hb_obj_95984"] and byID["rg_hb_obj_95984"].npcID == 263348, "Song of the Strider (95984) must target Roving Tallstrider (263348)")
+      assertTrue(byID["rg_fk_obj_96082"] and byID["rg_fk_obj_96082"].npcID == 263614, "Doctor's Orderly (96082) must target Wounded Soldier (263614)")
+      assertTrue(byID["rg_pf_turnin_95957"] and byID["rg_pf_turnin_95957"].npcID == 263120, "Drink Up! (95957) must turn in to Gray Dawnbright (263120)")
+      assertTrue(byID["rg_pf_obj_96067"] and byID["rg_pf_obj_96067"].npcID == 263369, "Rock 'em and Sock 'em (96067) must target G45-B4G (263369)")
+
+      -- 2. Verify WorldMapPins Selection Sync & Anti-Misdirection Notice Banner
+      local pinProg = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
+      local pinCtx = makeMockCtx({
+        level = 42,
+        questLogFull = true,
+        active = {
+          ["title:wanted: trapclaw"] = true,
+          [95267] = true,
+          [95123] = true, -- A Blast Ye Scurvy Dogs! (quarantined objective: Powder Keg spawns unpinned)
+        },
+        objectives = {
+          ["title:wanted: trapclaw"] = false,
+          [95267] = false,
+          [95123] = false,
+        },
+      })
+
+      -- 2a. Selecting 95267 (The Monster Surfaces) highlights its (74.3, 72.4) pin and emits NO unverified warning
+      ns.State.overrideSelectedQuest = { questID = 95267, title = "The Monster Surfaces", level = 42 }
+      local entriesMapped, countsMapped = ns.UI.WorldMapPins.CollectPinEntries(
+        2548,
+        route,
+        pinProg,
+        { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
+        pinCtx,
+        { status = "ok", uiMapID = 2548, x01 = 0.8030, y01 = 0.5440 }
+      )
+      assertTrue(countsMapped.selectedQuestNotice == nil, "Mapped quest 95267 must NOT emit an unverified warning banner")
+      local sawSelected95267 = false
+      for _, e in ipairs(entriesMapped) do
+        if e.actionID == "rg_pf_obj_95267" then
+          assertTrue(
+            e.isSelectedQuest == true
+              and math.abs(e.x01 - 0.7430) < 1e-4
+              and math.abs(e.y01 - 0.7240) < 1e-4,
+            "95267 map pin must be at (74.3, 72.4) and marked isSelectedQuest=true"
+          )
+          sawSelected95267 = true
+        end
+      end
+      assertTrue(sawSelected95267, "WorldMapPins must render objective pin for 95267 at (74.3, 72.4)")
+
+      -- 2b. Selecting quarantined 95123 (A Blast Ye Scurvy Dogs!) while WANTED: Trapclaw owns the arrow emits anti-misdirection warning!
+      ns.State.overrideSelectedQuest = { questID = 95123, title = "A Blast Ye Scurvy Dogs!", level = 44 }
+      local _, countsQuar = ns.UI.WorldMapPins.CollectPinEntries(
+        2548,
+        route,
+        pinProg,
+        { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
+        pinCtx,
+        { status = "ok", uiMapID = 2548, x01 = 0.8030, y01 = 0.5440 }
+      )
+      assertTrue(
+        countsQuar.selectedQuestNotice ~= nil
+          and countsQuar.selectedQuestNotice.status == "quarantined_objective"
+          and string.find(countsQuar.selectedQuestNotice.bannerText, "A Blast Ye Scurvy Dogs!", 1, true) ~= nil
+          and string.find(countsQuar.selectedQuestNotice.bannerText, "Location unverified", 1, true) ~= nil
+          and string.find(countsQuar.selectedQuestNotice.bannerText, "Arrow: WANTED: Trapclaw", 1, true) ~= nil,
+        "Selecting quarantined quest must warn player that it has no FH pin and explicitly name the quest owning the arrow"
+      )
+
+      -- 3. Verify Field-Capture Telemetry (State.RecordFieldCapture & /fh rg mark)
+      if _G.ForeverHubDB then
+        _G.ForeverHubDB.fieldCaptures = {}
+      end
+      ns.State.overridePlayerPosition = { status = "ok", uiMapID = 2548, x01 = 0.74304, y01 = 0.72398 }
+      ns.State.overrideSelectedQuest = { questID = 95267, title = "The Monster Surfaces", level = 42 }
+      local okCap, rec = ns.Events.CaptureQuestFieldTelemetry("manual_mark", nil, "Fresh Wreckage")
+      assertTrue(
+        okCap == true
+          and rec ~= nil
+          and rec.questID == 95267
+          and rec.uiMapID == 2548
+          and math.abs(rec.x01 - 0.7430) < 1e-6
+          and math.abs(rec.y01 - 0.7240) < 1e-6
+          and rec.note == "Fresh Wreckage",
+        "CaptureQuestFieldTelemetry must persist 4-decimal coordinates and note into ForeverHubDB.fieldCaptures"
+      )
+
+      -- 4. Verify Real-Time Objective & Turn-In Completion Truth Sync (QUEST_REMOVED quirk, CHAT_MSG_SYSTEM, Cross-Provider & 1Hz Watchdog)
+      local savedObjOv = ns.State.overrideQuestObjectives
+      local savedLvl16 = ns.State.overridePlayerLevel
+      local savedFac16 = ns.State.overridePlayerFaction
+      local savedFull16 = ns.State.overrideQuestLogFull
+      local savedSizes16 = ns.State.overrideMapWorldSizes
+      local savedNativeWp16 = ns.State.overrideNativeWaypointState
+      local savedTomTom16 = _G.TomTom
+      local savedCQ16 = _G.C_QuestLog
+      local savedGetNum16 = _G.GetNumQuestLogEntries
+      local savedGetTitle16 = _G.GetQuestLogTitle
+      local savedGetNumLB16 = _G.GetNumQuestLeaderBoards
+      local savedGetLB16 = _G.GetQuestLogLeaderBoard
+      local savedTurnInID16 = deepCopyTable(ns.Compat.recentQuestTurnedInByID or {})
+      local savedTurnInTitle16 = deepCopyTable(ns.Compat.recentQuestTurnedInByTitle or {})
+      local savedAcceptID16 = deepCopyTable(ns.Compat.recentQuestAcceptedByID or {})
+      local savedAcceptTitle16 = deepCopyTable(ns.Compat.recentQuestAcceptedByTitle or {})
+
+      local okSyncSub, errSyncSub = pcall(function()
+        -- 4a. Abandoned quest (`IsQuestFlaggedCompleted == false`) MUST NOT be promoted to completed on QUEST_REMOVED
+        if charDB and charDB.routeProgress then
+          charDB.routeProgress.observedCompletedQuestIds = {}
+          charDB.routeProgress.observedCompletedQuestTitles = {}
+        end
+        ns.Compat.RecordRecentQuestAccepted(95254, "WANTED: Trapclaw")
+        ns.State.overrideCompletedQuests = { [95254] = false }
+        local promotedAbandon = ns.Compat.RecordRecentQuestRemoved(95254)
+        assertTrue(promotedAbandon == false, "Abandoned quest (server flag false) must NOT be marked completed on QUEST_REMOVED")
+        assertTrue(ns.Compat.recentQuestAcceptedByTitle["wanted: trapclaw"] == nil, "QUEST_REMOVED must clear recentQuestAcceptedByTitle")
+
+        -- 4b. Forever server quirk: QUEST_REMOVED without QUEST_TURNED_IN when server flag is true promotes completion!
+        ns.State.overrideCompletedQuests = { [95254] = true }
+        local promotedTurnIn = ns.Compat.RecordRecentQuestRemoved(95254)
+        assertTrue(promotedTurnIn == true, "QUEST_REMOVED with server completion flag true must promote to completed")
+        assertTrue(
+          ns.State.IsObservedCompletedQuestId(95254) and ns.State.IsObservedCompletedQuestTitle("wanted: trapclaw"),
+          "Promoted QUEST_REMOVED must record both numeric ID and normalized title completion"
+        )
+
+        -- 4c. CHAT_MSG_SYSTEM quest completion parser accepts known route quests and rejects arbitrary system chatter
+        ns.State.overrideCompletedQuests = nil
+        local badQid, badTitle = ns.Compat.ParseSystemQuestCompletedMessage("Duel starting: 3...")
+        assertTrue(badQid == nil and badTitle == nil, "Non-quest system messages must be ignored")
+        local unmappedQid, unmappedTitle = ns.Compat.ParseSystemQuestCompletedMessage("Imaginary Unrelated Quest completed.")
+        assertTrue(unmappedQid == nil and unmappedTitle == nil, "Unknown untracked titles must not pollute completion state")
+        local trapQid, trapRaw, trapNorm = ns.Compat.ParseSystemQuestCompletedMessage("WANTED: Trapclaw completed.")
+        assertTrue(
+          trapQid == 95254 and trapRaw == "WANTED: Trapclaw" and trapNorm == "wanted: trapclaw",
+          "Known route quest completion message must resolve questID 95254 and normalized title"
+        )
+
+        -- 4d. Cross-provider objective truth: stale C_QuestLog.GetQuestObjectives (0/1) yields to completed Classic leaderboard (1/1)
+        ns.State.overrideQuestObjectives = nil
+        _G.C_QuestLog = {
+          GetQuestObjectives = function(qid)
+            if qid == 95254 then
+              return { { text = "0/1 Trapclaw's Pincer", finished = false, numFulfilled = 0, numRequired = 1 } }
+            end
+            return {}
+          end,
+        }
+        _G.GetNumQuestLogEntries = function() return 2, 1 end
+        _G.GetQuestLogTitle = function(idx)
+          if idx == 1 then return "Riverglades", 0, nil, true, false, nil, nil, 0 end
+          if idx == 2 then return "WANTED: Trapclaw", 42, nil, false, false, false, nil, 95254 end
+          return nil
+        end
+        _G.GetNumQuestLeaderBoards = function(idx) return idx == 2 and 1 or 0 end
+        _G.GetQuestLogLeaderBoard = function(objIdx, qIdx)
+          if qIdx == 2 and objIdx == 1 then
+            return "Trapclaw's Pincer: 1/1", "item", true
+          end
+          return nil
+        end
+        ns.Compat.InvalidateQuestStateCaches()
+        local crossObj = ns.Compat.GetQuestObjectivesResult(95254)
+        assertTrue(
+          crossObj.status == "ok" and crossObj.allFinished == true and crossObj.provider == "classic_leaderboards",
+          "Completed Classic leaderboard must override lagging 0/1 C_QuestLog.GetQuestObjectives"
+        )
+
+        -- 4e. 1 Hz Active-Step Truth Watchdog catches silent 0/1 -> 1/1 completion with zero WoW events fired!
+        _G.C_QuestLog = nil
+        _G.GetNumQuestLogEntries = nil
+        _G.GetQuestLogTitle = nil
+        _G.GetNumQuestLeaderBoards = nil
+        _G.GetQuestLogLeaderBoard = nil
+        if charDB then
+          charDB.routeProgress = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
+        end
+        ns.State.overridePlayerLevel = 42
+        ns.State.overridePlayerFaction = "Alliance"
+        ns.State.overrideQuestLogFull = true
+        ns.State.overrideNativeWaypointState = { supported = false }
+        _G.TomTom = nil
+        ns.State.overrideMapWorldSizes = { [2548] = { width = 3600, height = 2400 } }
+        ns.State.overridePlayerPosition = { status = "ok", uiMapID = 2548, x01 = 0.8030, y01 = 0.5440 }
+        ns.State.overrideActiveQuests = { [95254] = true }
+        ns.State.overrideCompletedQuests = { [95254] = false }
+        ns.State.overrideQuestObjectives = {
+          [95254] = { { text = "0/1 Trapclaw's Pincer", finished = false, numFulfilled = 0, numRequired = 1 } },
+        }
+        ns.Events.FlushRouteReconcileNow()
+        assertTrue(
+          ns.UI.Navigation.watchedQuestActionID == "rg_pf_obj_wanted_trapclaw",
+          "Initial active step at (80.3, 54.4) must watch rg_pf_obj_wanted_trapclaw, got: " .. tostring(ns.UI.Navigation.watchedQuestActionID)
+        )
+        assertTrue(
+          ns.UI.Navigation.TickActiveStepWatchdog(1.05) == false,
+          "Steady-state watchdog tick with unchanged quest state must be a no-op"
+        )
+        -- Silently flip Trapclaw objective 0/1 -> 1/1 WITHOUT firing any event:
+        ns.State.overrideQuestObjectives = {
+          [95254] = { { text = "1/1 Trapclaw's Pincer", finished = true, numFulfilled = 1, numRequired = 1 } },
+        }
+        local didReconcile = ns.UI.Navigation.TickActiveStepWatchdog(1.05)
+        assertTrue(didReconcile == true, "1 Hz watchdog must detect silent 0/1 -> 1/1 objective completion")
+        assertTrue(
+          ns.UI.Navigation.watchedQuestActionID == "rg_pf_turnin_wanted_trapclaw",
+          "Watchdog reconcile must immediately advance active step to rg_pf_turnin_wanted_trapclaw"
+        )
+      end)
+
+      ns.State.overrideQuestObjectives = savedObjOv
+      ns.State.overridePlayerLevel = savedLvl16
+      ns.State.overridePlayerFaction = savedFac16
+      ns.State.overrideQuestLogFull = savedFull16
+      ns.State.overrideMapWorldSizes = savedSizes16
+      ns.State.overrideNativeWaypointState = savedNativeWp16
+      _G.TomTom = savedTomTom16
+      _G.C_QuestLog = savedCQ16
+      _G.GetNumQuestLogEntries = savedGetNum16
+      _G.GetQuestLogTitle = savedGetTitle16
+      _G.GetNumQuestLeaderBoards = savedGetNumLB16
+      _G.GetQuestLogLeaderBoard = savedGetLB16
+      ns.Compat.recentQuestTurnedInByID = savedTurnInID16
+      ns.Compat.recentQuestTurnedInByTitle = savedTurnInTitle16
+      ns.Compat.recentQuestAcceptedByID = savedAcceptID16
+      ns.Compat.recentQuestAcceptedByTitle = savedAcceptTitle16
+      if not okSyncSub then
+        error(errSyncSub, 2)
+      end
+    end)
+
+    ns.State.overrideSelectedQuest = savedSelOv
+    ns.State.overridePlayerPosition = savedPosOv
+    ns.State.overrideActiveQuests = savedActiveOv
+    ns.State.overrideCompletedQuests = savedCompOv
+    if _G.ForeverHubDB then
+      _G.ForeverHubDB.fieldCaptures = savedCaps or {}
+    end
+    if charDB then
+      charDB.routeProgress = savedCharRG
+    end
+    ns.Compat.InvalidateQuestStateCaches()
+    if not okGate16 then
+      error(errGate16, 2)
     end
   end)
 

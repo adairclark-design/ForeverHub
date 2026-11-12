@@ -233,6 +233,7 @@ function Events.RunDoctor()
 end
 
 Events.reconcilePending = false
+Events.objectiveVerifySeq = 0
 
 function Events.FlushRouteReconcileNow()
   Events.reconcilePending = false
@@ -245,13 +246,13 @@ function Events.FlushRouteReconcileNow()
   local progress = ns.State.GetRouteProgress()
   local eval = ns.Domain.RouteProgress.Reconcile(nil, progress)
   if progress and progress.mode ~= "paused" and ns.UI and ns.UI.Navigation then
-    ns.UI.Navigation.SyncFromEvaluation(eval, progress)
+    pcall(ns.UI.Navigation.SyncFromEvaluation, eval, progress)
   end
   if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
-    ns.UI.WorldMapPins.RequestRefresh()
+    pcall(ns.UI.WorldMapPins.RequestRefresh)
   end
   if ns.UI and ns.UI.Workspace and ns.UI.Workspace.RefreshIfShown then
-    ns.UI.Workspace.RefreshIfShown()
+    pcall(ns.UI.Workspace.RefreshIfShown)
   end
   return eval
 end
@@ -270,6 +271,31 @@ function Events.ScheduleRouteReconcile()
     end
   else
     Events.FlushRouteReconcileNow()
+  end
+end
+
+function Events.ScheduleObjectiveVerificationReconciles()
+  Events.ScheduleRouteReconcile()
+  if not (C_Timer and type(C_Timer.After) == "function") then
+    return
+  end
+  local progress = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
+  if not progress or progress.mode == "paused" then
+    return
+  end
+  Events.objectiveVerifySeq = (Events.objectiveVerifySeq or 0) + 1
+  local seq = Events.objectiveVerifySeq
+  for _, delaySec in ipairs({ 0.60, 1.40 }) do
+    pcall(C_Timer.After, delaySec, function()
+      if seq ~= Events.objectiveVerifySeq then
+        return
+      end
+      local curProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
+      if curProg and curProg.mode ~= "paused" then
+        Events.CaptureQuestFieldTelemetry("objective_scan")
+        Events.FlushRouteReconcileNow()
+      end
+    end)
   end
 end
 
@@ -349,14 +375,15 @@ function Events.RunRivergladesDoctor()
   )
   ns.Compat.Print(
     string.format(
-      "Map 2548: valid=%s (%s) | CanSetUserWaypoint=%s (%s) | TomTom=%s | RXP=%s (selected=%s)",
+      "Map 2548: valid=%s (%s) | CanSetUserWaypoint=%s (%s) | TomTom=%s | RXP=%s (selected=%s) | FieldCaptures=%d",
       tostring(mapValid.value),
       tostring(mapValid.status),
       tostring(canWp.value),
       tostring(canWp.status),
       ttAvail and "OK" or "Missing",
       rxpAvail and "OK" or "Missing",
-      tostring(rxpSel)
+      tostring(rxpSel),
+      #(ns.State.GetFieldCaptures and ns.State.GetFieldCaptures() or {})
     )
   )
   if qAudit.available then
@@ -491,9 +518,10 @@ local resyncActiveNavigationContext
 
 function Events.HandleRivergladesSubcommand(subRaw)
   local cleaned = string.gsub(tostring(subRaw or ""), "^%s*(.-)%s*$", "%1")
-  local sub, arg = string.match(cleaned, "^(%S*)%s*(.-)$")
+  local sub, argRaw = string.match(cleaned, "^(%S*)%s*(.-)$")
   sub = string.lower(sub or "")
-  arg = string.lower(string.gsub(tostring(arg or ""), "^%s*(.-)%s*$", "%1"))
+  argRaw = string.gsub(tostring(argRaw or ""), "^%s*(.-)%s*$", "%1")
+  local arg = string.lower(argRaw)
 
   local function refreshRivergladesUIIfShown()
     if ns.UI and ns.UI.Riverglades and ns.UI.Riverglades.RefreshIfShown then
@@ -808,11 +836,34 @@ function Events.HandleRivergladesSubcommand(subRaw)
       ns.Compat.Print("Usage: /fh rg export rxp")
     end
     return
+  elseif sub == "mark" or sub == "capture" then
+    local okCap, recOrErr = Events.CaptureQuestFieldTelemetry("manual_mark", nil, argRaw)
+    if not okCap then
+      ns.Compat.Print("Field capture failed (" .. tostring(recOrErr) .. ") — ensure player map coordinates are available.")
+      return
+    end
+    local allCaps = ns.State.GetFieldCaptures and ns.State.GetFieldCaptures() or {}
+    local qDesc = recOrErr.questTitle
+      or (recOrErr.questID and ("Quest #" .. tostring(recOrErr.questID)))
+      or "Unselected Quest"
+    local noteSuffix = recOrErr.note and (" [" .. tostring(recOrErr.note) .. "]") or ""
+    ns.Compat.Print(
+      string.format(
+        "Recorded field capture #%d [manual_mark] for %s at uiMapID=%d (%.2f, %.2f)%s -> ForeverHubDB.fieldCaptures.",
+        #allCaps,
+        tostring(qDesc),
+        tonumber(recOrErr.uiMapID) or 0,
+        (tonumber(recOrErr.x01) or 0) * 100.0,
+        (tonumber(recOrErr.y01) or 0) * 100.0,
+        noteSuffix
+      )
+    )
+    return
   elseif sub == "doctor" then
     Events.RunRivergladesDoctor()
     return
   else
-    ns.Compat.Print("Riverglades commands: /fh rg | /fh rg start | /fh rg pause | /fh rg next | /fh rg prev | /fh rg stop [reset] | /fh rg unresolved | /fh rg confirm <quest|all> | /fh rg pins [on|off|available|reset] | /fh rg elites [on|off] | /fh rg group [on|off] | /fh rg export rxp | /fh rg doctor")
+    ns.Compat.Print("Riverglades commands: /fh rg | /fh rg start | /fh rg pause | /fh rg next | /fh rg prev | /fh rg stop [reset] | /fh rg mark [note] | /fh rg unresolved | /fh rg confirm <quest|all> | /fh rg pins [on|off|available|reset] | /fh rg elites [on|off] | /fh rg group [on|off] | /fh rg export rxp | /fh rg doctor")
   end
 end
 
@@ -1505,6 +1556,220 @@ local function recordInventoryTraceIfEnabled(sourceEvent)
   ns.Domain.Diagnostics.RecordInventoryObservation(sourceEvent, bagCounts, bankCounts)
 end
 
+Events.lastObjectiveProgressByQuest = Events.lastObjectiveProgressByQuest or {}
+Events.objectiveBaselineSeeded = Events.objectiveBaselineSeeded or false
+
+local function collectCandidateActiveQuestRefs()
+  local refs = {}
+  local seen = {}
+  local function addRef(qRef, title)
+    local key = tostring(qRef)
+    if qRef ~= nil and not seen[key] then
+      seen[key] = true
+      table.insert(refs, { questRef = qRef, title = title })
+    end
+  end
+  if ns.Compat and ns.Compat.ScanLiveQuestLog then
+    local scan = ns.Compat.ScanLiveQuestLog(false)
+    if scan and scan.available and type(scan.byID) == "table" then
+      for qid, row in pairs(scan.byID) do
+        addRef(tonumber(qid) or qid, row and row.title or nil)
+      end
+    end
+  end
+  local route = ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute() or nil
+  if type(route) == "table" and ns.Compat and ns.Compat.IsOnQuestResult then
+    for qid, meta in pairs(route.questsByID or {}) do
+      local nQid = tonumber(qid)
+      if nQid and not seen[tostring(nQid)] then
+        local onRes = ns.Compat.IsOnQuestResult(nQid)
+        if type(onRes) == "table" and onRes.status == "ok" and onRes.value == true then
+          addRef(nQid, meta and meta.name or nil)
+        end
+      end
+    end
+    for qKey, meta in pairs(route.questsByTitleKey or {}) do
+      local kQid = meta and tonumber(meta.knownQuestID) or nil
+      local effRef = kQid or qKey
+      if not seen[tostring(effRef)] then
+        local onRes = ns.Compat.IsOnQuestResult(qKey)
+        if type(onRes) == "table" and onRes.status == "ok" and onRes.value == true then
+          addRef(effRef, meta and meta.name or nil)
+        end
+      end
+    end
+  end
+  return refs
+end
+
+local function snapshotObjectiveState(objRes)
+  local snap = {
+    allFinished = false,
+  }
+  if type(objRes) == "table" and objRes.status == "ok" then
+    snap.allFinished = (objRes.allFinished == true)
+    if type(objRes.objectives) == "table" then
+      for idx, row in ipairs(objRes.objectives) do
+        snap[idx] = {
+          fulfilled = tonumber(row.numFulfilled) or ((row.finished == true) and 1 or 0),
+          finished = (row.finished == true),
+          text = row.text,
+        }
+      end
+    end
+  end
+  return snap
+end
+
+function Events.SeedObjectiveTelemetryBaseline()
+  Events.lastObjectiveProgressByQuest = {}
+  if not ns.Compat or not ns.Compat.GetQuestObjectivesResult then
+    Events.objectiveBaselineSeeded = true
+    return
+  end
+  for _, item in ipairs(collectCandidateActiveQuestRefs()) do
+    local objRes = ns.Compat.GetQuestObjectivesResult(item.questRef)
+    Events.lastObjectiveProgressByQuest[tostring(item.questRef)] = snapshotObjectiveState(objRes)
+  end
+  Events.objectiveBaselineSeeded = true
+end
+
+function Events.CaptureQuestFieldTelemetry(kind, explicitQuestID, noteText)
+  if not ns.State or type(ns.State.RecordFieldCapture) ~= "function" or not ns.Compat then
+    return false, "telemetry_unavailable"
+  end
+  local posStatus, mapID, x01, y01, posReason = ns.Compat.GetPlayerPosition01Raw()
+  if posStatus ~= "ok" or not mapID or not x01 or not y01 then
+    return false, posReason or "position_unavailable"
+  end
+
+  local dialog = ns.Compat.lastDialogQuest
+  local now = ns.Compat.NowSeconds and ns.Compat.NowSeconds() or 0
+  local freshDialog = (type(dialog) == "table" and (now - (tonumber(dialog.capturedAt) or 0)) <= 8.0) and dialog or nil
+
+  if kind == "manual_mark" then
+    local sel = ns.Compat.GetSelectedQuestInfo and ns.Compat.GetSelectedQuestInfo() or { available = false }
+    local qid = sel.available and tonumber(sel.questID) or tonumber(explicitQuestID)
+    local qTitle = sel.available and sel.title or nil
+    if not qid and not qTitle then
+      local progress = ns.State.GetRouteProgress and ns.State.GetRouteProgress() or nil
+      if progress and progress.mode == "standalone" and ns.Domain and ns.Domain.RouteProgress and ns.Domain.RouteProgress.Evaluate then
+        local eval = ns.Domain.RouteProgress.Evaluate(nil, progress)
+        local act = eval and eval.nextAction or nil
+        if act then
+          local meta = ns.Compat.LookupRouteQuestMeta and ns.Compat.LookupRouteQuestMeta(act.questKey or act.questID) or nil
+          qid = tonumber(act.questID) or (meta and tonumber(meta.knownQuestID)) or nil
+          qTitle = (meta and meta.name) or act.title
+        end
+      end
+    end
+    if qid and not qTitle and ns.Compat.LookupRouteQuestMeta then
+      local meta = ns.Compat.LookupRouteQuestMeta(qid)
+      qTitle = meta and meta.name or nil
+    end
+    return ns.State.RecordFieldCapture({
+      kind = "manual_mark",
+      questID = qid,
+      questTitle = qTitle,
+      note = noteText,
+      uiMapID = mapID,
+      x01 = x01,
+      y01 = y01,
+    })
+  elseif kind == "quest_accepted" or kind == "quest_turned_in" then
+    local qid = tonumber(explicitQuestID) or (freshDialog and tonumber(freshDialog.questID)) or nil
+    local meta = qid and ns.Compat.LookupRouteQuestMeta and ns.Compat.LookupRouteQuestMeta(qid) or nil
+    local qTitle = (meta and meta.name)
+      or (freshDialog and freshDialog.rawTitle)
+      or nil
+    if qid and kind == "quest_accepted" then
+      Events.lastObjectiveProgressByQuest[tostring(qid)] = {}
+      Events.objectiveBaselineSeeded = true
+    elseif qid and kind == "quest_turned_in" then
+      Events.lastObjectiveProgressByQuest[tostring(qid)] = nil
+    end
+    return ns.State.RecordFieldCapture({
+      kind = kind,
+      questID = qid,
+      questTitle = qTitle,
+      npcID = freshDialog and tonumber(freshDialog.npcID) or nil,
+      npcName = freshDialog and freshDialog.npcName or nil,
+      uiMapID = mapID,
+      x01 = x01,
+      y01 = y01,
+    })
+  elseif kind == "objective_scan" then
+    if not Events.objectiveBaselineSeeded then
+      Events.SeedObjectiveTelemetryBaseline()
+      return false, "seeded_baseline"
+    end
+    local recordedCount = 0
+    local lastRec = nil
+    for _, item in ipairs(collectCandidateActiveQuestRefs()) do
+      local qKey = tostring(item.questRef)
+      local qid = tonumber(item.questRef)
+      local meta = ns.Compat.LookupRouteQuestMeta and ns.Compat.LookupRouteQuestMeta(item.questRef) or nil
+      local qTitle = item.title or (meta and meta.name) or nil
+      local objRes = ns.Compat.GetQuestObjectivesResult and ns.Compat.GetQuestObjectivesResult(item.questRef) or nil
+      local curSnap = snapshotObjectiveState(objRes)
+      local prevSnap = Events.lastObjectiveProgressByQuest[qKey]
+      if prevSnap ~= nil then
+        local questRecordedThisTick = false
+        for idx, curRow in ipairs(curSnap) do
+          local prevRow = prevSnap[idx]
+          local prevFulfilled = prevRow and prevRow.fulfilled or 0
+          local prevFinished = prevRow and prevRow.finished or false
+          if curRow.fulfilled > prevFulfilled or (curRow.finished and not prevFinished) then
+            local ok, rec = ns.State.RecordFieldCapture({
+              kind = "objective_progress",
+              questID = qid,
+              questTitle = qTitle,
+              objectiveIndex = idx,
+              objectiveText = curRow.text,
+              uiMapID = mapID,
+              x01 = x01,
+              y01 = y01,
+            })
+            if ok then
+              recordedCount = recordedCount + 1
+              lastRec = rec
+              questRecordedThisTick = true
+            end
+          end
+        end
+        if not questRecordedThisTick and curSnap.allFinished == true and prevSnap.allFinished ~= true then
+          local fallbackIdx = 1
+          local fallbackText = "Ready to turn in"
+          for idx, prevRow in ipairs(prevSnap) do
+            if prevRow and not prevRow.finished then
+              fallbackIdx = idx
+              fallbackText = prevRow.text or fallbackText
+              break
+            end
+          end
+          local ok, rec = ns.State.RecordFieldCapture({
+            kind = "objective_progress",
+            questID = qid,
+            questTitle = qTitle,
+            objectiveIndex = fallbackIdx,
+            objectiveText = fallbackText,
+            uiMapID = mapID,
+            x01 = x01,
+            y01 = y01,
+          })
+          if ok then
+            recordedCount = recordedCount + 1
+            lastRec = rec
+          end
+        end
+      end
+      Events.lastObjectiveProgressByQuest[qKey] = curSnap
+    end
+    return (recordedCount > 0), lastRec
+  end
+  return false, "unsupported_kind"
+end
+
 local function handleSlashCommand(msg)
   local raw = string.gsub(tostring(msg or ""), "^%s*(.-)%s*$", "%1")
   local cmd, rest = string.match(raw, "^(%S+)%s*(.-)$")
@@ -1755,6 +2020,8 @@ if eventFrame then
     "QUEST_LOG_UPDATE",
     "QUEST_WATCH_UPDATE",
     "UNIT_QUEST_LOG_CHANGED",
+    "CRITERIA_UPDATE",
+    "CHAT_MSG_SYSTEM",
     "QUEST_AUTOCOMPLETE",
     "QUEST_PROGRESS",
     "QUEST_COMPLETE",
@@ -1816,6 +2083,7 @@ if eventFrame then
       if ns.Compat and ns.Compat.ScanLiveQuestLog then
         ns.Compat.ScanLiveQuestLog(true)
       end
+      Events.SeedObjectiveTelemetryBaseline()
       Events.ScheduleRouteReconcile()
       local gProg = ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
       -- Astra P1-9 & Gate 7: Telemetry ALWAYS stays paused after `/reload` until user explicitly runs `/fh gold start`.
@@ -1897,6 +2165,10 @@ if eventFrame then
       if ns.UI and ns.UI.Navigation and ns.UI.Navigation.FlushDeferredIfReady then
         ns.UI.Navigation.FlushDeferredIfReady()
       end
+      local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
+      if rProg and rProg.mode ~= "paused" then
+        Events.ScheduleObjectiveVerificationReconciles()
+      end
     elseif event == "ZONE_CHANGED_NEW_AREA" then
       if ns.UI and ns.UI.Navigation and ns.UI.Navigation.InvalidateTargetAnchor then
         ns.UI.Navigation.InvalidateTargetAnchor()
@@ -1958,19 +2230,50 @@ if eventFrame then
       if ns.Compat and ns.Compat.InvalidateQuestStateCaches then
         ns.Compat.InvalidateQuestStateCaches()
       end
-      Events.ScheduleRouteReconcile()
+      if event == "QUEST_LOG_UPDATE" or event == "QUEST_WATCH_UPDATE" then
+        Events.CaptureQuestFieldTelemetry("objective_scan")
+      end
+      Events.ScheduleObjectiveVerificationReconciles()
     elseif event == "UNIT_QUEST_LOG_CHANGED" then
       if arg1 == nil or arg1 == "player" then
         if ns.Compat and ns.Compat.InvalidateQuestStateCaches then
           ns.Compat.InvalidateQuestStateCaches()
         end
-        Events.ScheduleRouteReconcile()
+        Events.CaptureQuestFieldTelemetry("objective_scan")
+        Events.ScheduleObjectiveVerificationReconciles()
+      end
+    elseif event == "CRITERIA_UPDATE" then
+      local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
+      if rProg and rProg.mode ~= "paused" then
+        if ns.Compat and ns.Compat.InvalidateQuestStateCaches then
+          ns.Compat.InvalidateQuestStateCaches()
+        end
+        Events.CaptureQuestFieldTelemetry("objective_scan")
+        Events.ScheduleObjectiveVerificationReconciles()
+      end
+    elseif event == "CHAT_MSG_SYSTEM" then
+      if ns.Compat and ns.Compat.ParseSystemQuestCompletedMessage then
+        local sysQid, sysRawTitle, sysNormTitle = ns.Compat.ParseSystemQuestCompletedMessage(arg1)
+        if sysQid or sysNormTitle then
+          if ns.Compat.RecordRecentQuestTurnedIn then
+            ns.Compat.RecordRecentQuestTurnedIn(sysQid, sysRawTitle)
+          end
+          Events.CaptureQuestFieldTelemetry("quest_turned_in", sysQid)
+          if ns.Domain and ns.Domain.Diagnostics and ns.Domain.Diagnostics.RecordQuestEvent then
+            ns.Domain.Diagnostics.RecordQuestEvent("CHAT_MSG_SYSTEM_QUEST_COMPLETE", sysQid)
+          end
+          if ns.UI and ns.UI.Crates then
+            ns.UI.Crates.RefreshIfShown()
+          end
+          Events.ScheduleVerificationReconciles()
+        end
       end
     elseif event == "QUEST_ACCEPTED" then
       local qID = tonumber(arg2) or tonumber(arg1)
       if ns.Compat and ns.Compat.RecordRecentQuestAccepted then
         ns.Compat.RecordRecentQuestAccepted(qID, nil)
       end
+      Events.CaptureQuestFieldTelemetry("quest_accepted", qID)
       if ns.Domain and ns.Domain.Diagnostics and ns.Domain.Diagnostics.RecordQuestEvent then
         ns.Domain.Diagnostics.RecordQuestEvent(event, qID)
       end
@@ -1983,6 +2286,7 @@ if eventFrame then
       if ns.Compat and ns.Compat.RecordRecentQuestTurnedIn then
         ns.Compat.RecordRecentQuestTurnedIn(qID, nil)
       end
+      Events.CaptureQuestFieldTelemetry("quest_turned_in", qID)
       if ns.Domain and ns.Domain.Diagnostics and ns.Domain.Diagnostics.RecordQuestEvent then
         ns.Domain.Diagnostics.RecordQuestEvent(event, qID)
       end
@@ -1992,8 +2296,22 @@ if eventFrame then
       Events.ScheduleVerificationReconciles()
     elseif event == "QUEST_REMOVED" then
       local qID = tonumber(arg1)
+      local promoted = false
       if ns.Compat and ns.Compat.RecordRecentQuestRemoved then
-        ns.Compat.RecordRecentQuestRemoved(qID)
+        promoted = (ns.Compat.RecordRecentQuestRemoved(qID) == true)
+      end
+      if promoted then
+        Events.CaptureQuestFieldTelemetry("quest_turned_in", qID)
+      elseif qID and qID > 0 and C_Timer and type(C_Timer.After) == "function" then
+        pcall(C_Timer.After, 1.00, function()
+          if ns.Compat and ns.Compat.RecordRecentQuestRemoved and ns.Compat.RecordRecentQuestRemoved(qID) == true then
+            Events.CaptureQuestFieldTelemetry("quest_turned_in", qID)
+            local curProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
+            if curProg and curProg.mode ~= "paused" then
+              Events.FlushRouteReconcileNow()
+            end
+          end
+        end)
       end
       if ns.Domain and ns.Domain.Diagnostics and ns.Domain.Diagnostics.RecordQuestEvent then
         ns.Domain.Diagnostics.RecordQuestEvent(event, qID)
@@ -2048,7 +2366,7 @@ if eventFrame then
       end
       local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
       if rProg and rProg.mode ~= "paused" then
-        Events.ScheduleRouteReconcile()
+        Events.ScheduleObjectiveVerificationReconciles()
       end
     end
   end)

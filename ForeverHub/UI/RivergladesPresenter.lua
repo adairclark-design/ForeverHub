@@ -386,6 +386,36 @@ function RivergladesPresenter.Build(snapshot, uiState)
     end
   end
 
+  if type(route.quarantinedActions) == "table" and ns.Compat then
+    for _, qAct in ipairs(route.quarantinedActions) do
+      local qid = tonumber(qAct.questID)
+      if qid and qid > 0 then
+        local onRes = ns.Compat.IsOnQuestResult and ns.Compat.IsOnQuestResult(qid) or nil
+        if type(onRes) == "table" and onRes.status == "ok" and onRes.value == true then
+          local objsDone = false
+          local objRes = ns.Compat.GetQuestObjectivesResult and ns.Compat.GetQuestObjectivesResult(qid) or nil
+          if type(objRes) == "table" and objRes.status == "ok" and objRes.allFinished == true then
+            objsDone = true
+          end
+          if not objsDone then
+            table.insert(blockedOrSkipped, {
+              actionID = qAct.actionID,
+              questID = qid,
+              kind = "manual",
+              state = "quarantined_unverified",
+              title = tostring(qAct.title or ("Quest #" .. tostring(qid))),
+              subLine = tostring(qAct.reason or "Objective spawn coordinates unpinned — excluded from arrow"),
+              badgeText = "Location unverified",
+              badgeToken = "status.warning",
+              hubID = selectedHubID,
+              isSkipped = false,
+            })
+          end
+        end
+      end
+    end
+  end
+
   -- Hub row view-models
   local hubsVM = {}
   for _, h in ipairs(RivergladesPresenter.HUB_DEFINITIONS) do

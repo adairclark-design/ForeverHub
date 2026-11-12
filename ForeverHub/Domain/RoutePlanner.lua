@@ -1124,3 +1124,127 @@ function RoutePlanner.EvaluateRoute(route, progress, ctx, playerPos)
     counts = counts,
   }
 end
+
+function RoutePlanner.InspectQuestCoverage(questID, rawTitle, route, eval, ctx, progress)
+  route = route or (ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute())
+  if type(route) ~= "table" then
+    return { status = "unmapped", hasMapPin = false }
+  end
+  ctx = ctx or RoutePlanner.BuildDefaultContext()
+  progress = progress or (ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress())
+
+  local qid = tonumber(questID)
+  if qid and qid <= 0 then
+    qid = nil
+  end
+  local normTitle = ns.Compat and ns.Compat.NormalizeQuestTitle and ns.Compat.NormalizeQuestTitle(rawTitle) or nil
+  local qMeta = nil
+  if ns.Compat and ns.Compat.LookupRouteQuestMeta then
+    qMeta = ns.Compat.LookupRouteQuestMeta(qid or rawTitle)
+  end
+  if not qid and qMeta then
+    qid = tonumber(qMeta.questID) or tonumber(qMeta.knownQuestID) or nil
+  end
+  if not normTitle and qMeta and type(qMeta.name) == "string" and ns.Compat and ns.Compat.NormalizeQuestTitle then
+    normTitle = ns.Compat.NormalizeQuestTitle(qMeta.name)
+  end
+  local questKey = (qMeta and qMeta.questKey) or (normTitle and ("title:" .. normTitle)) or nil
+  local resolvedTitle = (qMeta and qMeta.name) or rawTitle or (qid and ("Quest #" .. tostring(qid))) or "Selected Quest"
+  local questLevel = qMeta and tonumber(qMeta.questLevel) or nil
+
+  local function matchesAction(act)
+    if type(act) ~= "table" then
+      return false
+    end
+    if qid and tonumber(act.questID) == qid then
+      return true
+    end
+    if questKey and type(act.questKey) == "string" and act.questKey == questKey then
+      return true
+    end
+    if qMeta and type(qMeta.questKey) == "string" and act.questKey == qMeta.questKey then
+      return true
+    end
+    return false
+  end
+
+  local qRef = (qMeta and qMeta.questKey) or qid or questKey
+  local isOnQuest = false
+  local objsComplete = false
+  if qRef ~= nil then
+    local onRes = (ctx and type(ctx.isOnQuest) == "function") and ctx.isOnQuest(qRef)
+      or (ns.Compat and ns.Compat.IsOnQuestResult and ns.Compat.IsOnQuestResult(qRef))
+    if type(onRes) == "table" and onRes.status == "ok" and onRes.value == true then
+      isOnQuest = true
+    end
+    if qMeta and qMeta.zeroObjectives == true then
+      objsComplete = true
+    else
+      local objRes = (ctx and type(ctx.getQuestObjectives) == "function") and ctx.getQuestObjectives(qRef)
+        or (ns.Compat and ns.Compat.GetQuestObjectivesResult and ns.Compat.GetQuestObjectivesResult(qRef))
+      if type(objRes) == "table" and objRes.status == "ok" and objRes.allFinished == true then
+        objsComplete = true
+      end
+    end
+  end
+
+  local matchingActionIDs = {}
+  local hasObjectiveStep = false
+  local hasTurnInStep = false
+  local hasActivePin = false
+
+  for _, act in ipairs(route.actions or {}) do
+    if matchesAction(act) then
+      table.insert(matchingActionIDs, act.actionID)
+      local ev = eval and eval.byActionID and eval.byActionID[act.actionID] or nil
+      local evState = ev and ev.state or nil
+      if act.kind == "objective" then
+        hasObjectiveStep = true
+        if evState == "available" or evState == "skipped" or (ev == nil and isOnQuest and not objsComplete) then
+          hasActivePin = true
+        end
+      elseif act.kind == "turnin" then
+        hasTurnInStep = true
+        if evState == "available" or evState == "skipped" or (ev == nil and isOnQuest and objsComplete) then
+          hasActivePin = true
+        end
+      elseif act.kind == "accept" then
+        if evState == "available" or evState == "blocked_quest_log_full" then
+          hasActivePin = true
+        end
+      end
+    end
+  end
+
+  local quarantinedReason = qMeta and qMeta.quarantineReason or nil
+  for _, qAct in ipairs(route.quarantinedActions or {}) do
+    if matchesAction(qAct) then
+      quarantinedReason = quarantinedReason or qAct.reason or qAct.title
+      break
+    end
+  end
+
+  local status = "unmapped"
+  if hasActivePin then
+    status = "mapped_active"
+  elseif quarantinedReason ~= nil or (qMeta ~= nil and isOnQuest and not objsComplete and not hasObjectiveStep) then
+    status = "quarantined_objective"
+  elseif qMeta ~= nil or #matchingActionIDs > 0 then
+    status = (hasTurnInStep and isOnQuest and objsComplete) and "mapped_active" or "mapped_inactive"
+  end
+
+  return {
+    questID = qid,
+    normTitle = normTitle,
+    questKey = questKey,
+    questTitle = resolvedTitle,
+    questLevel = questLevel,
+    isElite = (qMeta and (qMeta.isEliteBounty == true or qMeta.isElite == true)) or false,
+    isOnQuest = isOnQuest,
+    objectivesComplete = objsComplete,
+    status = status,
+    hasMapPin = hasActivePin,
+    quarantinedReason = quarantinedReason,
+    matchingActionIDs = matchingActionIDs,
+  }
+end

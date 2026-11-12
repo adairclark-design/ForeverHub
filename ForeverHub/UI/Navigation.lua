@@ -22,6 +22,11 @@ Navigation.suppressHUDCreation = false
 Navigation.activeContext = "riverglades"
 Navigation.hydratedFromSaved = false
 Navigation.pendingDeferredSync = false
+Navigation.watchedQuestRef = nil
+Navigation.watchedQuestActionID = nil
+Navigation.watchedQuestFingerprint = nil
+Navigation.questWatchdogAccum = 0
+Navigation.questWatchdogActive = false
 
 -- Single shared runtime navigation owner across Riverglades and Gold Farms (Astra P0-1).
 Navigation.owner = {
@@ -528,6 +533,7 @@ local ARROW_UPDATE_INTERVAL = 0.033
 local ARROW_ROTATION_DEADBAND = math.pi / 90 -- ~2 degrees
 local CONTROLLER_POLL_INTERVAL = 0.25 -- 4 Hz independent measurement & RXP handoff controller
 local ANCHOR_RETRY_INTERVAL = 1.00 -- bounded retry for incomplete map/world transforms
+local QUEST_TRUTH_WATCHDOG_INTERVAL = 1.00 -- 1 Hz active-step & Quest Log truth watchdog
 local CAMP_ENTER_RADIUS_YARDS = 35
 local CAMP_EXIT_RADIUS_YARDS = 42
 
@@ -1637,6 +1643,64 @@ local function hasActiveProviderOrRxpMonitorableSession()
   return false
 end
 
+function Navigation.TickActiveStepWatchdog(stepDt)
+  if Navigation.activeContext == "gold_farm" or not Navigation.questWatchdogActive then
+    return false
+  end
+  local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
+  if not rProg or rProg.mode ~= "standalone" then
+    return false
+  end
+  if not (ns.Compat and ns.Compat.GetActiveStepTruthFingerprint) then
+    return false
+  end
+  Navigation.questWatchdogAccum = (Navigation.questWatchdogAccum or 0) + (tonumber(stepDt) or 0)
+  if Navigation.questWatchdogAccum < QUEST_TRUTH_WATCHDOG_INTERVAL then
+    return false
+  end
+  Navigation.questWatchdogAccum = 0
+  local freshFp = ns.Compat.GetActiveStepTruthFingerprint(Navigation.watchedQuestRef, true)
+  if freshFp ~= Navigation.watchedQuestFingerprint then
+    Navigation.watchedQuestFingerprint = freshFp
+    if ns.Events and ns.Events.CaptureQuestFieldTelemetry then
+      pcall(ns.Events.CaptureQuestFieldTelemetry, "objective_scan")
+    end
+    if ns.Events and ns.Events.FlushRouteReconcileNow then
+      ns.Events.FlushRouteReconcileNow()
+    else
+      Navigation.SyncFromEvaluation(nil, rProg)
+    end
+    return true
+  end
+  return false
+end
+
+local function syncRivergladesQuestWatchBaseline(act, activeStandalone)
+  if not activeStandalone then
+    Navigation.questWatchdogActive = false
+    Navigation.watchedQuestRef = nil
+    Navigation.watchedQuestActionID = nil
+    Navigation.watchedQuestFingerprint = nil
+    Navigation.questWatchdogAccum = 0
+    return
+  end
+  local qref = nil
+  local actionID = nil
+  if type(act) == "table" then
+    qref = (type(act.questKey) == "string" and act.questKey ~= "" and act.questKey) or act.questID
+    actionID = act.actionID
+  end
+  Navigation.questWatchdogActive = true
+  Navigation.watchedQuestRef = qref
+  Navigation.watchedQuestActionID = actionID
+  Navigation.questWatchdogAccum = 0
+  if ns.Compat and ns.Compat.GetActiveStepTruthFingerprint then
+    Navigation.watchedQuestFingerprint = ns.Compat.GetActiveStepTruthFingerprint(qref, false)
+  else
+    Navigation.watchedQuestFingerprint = nil
+  end
+end
+
 local function onControllerFrameUpdateBody(self, elapsed)
   local dt = tonumber(elapsed) or 0
   self.elapsedAccum = (self.elapsedAccum or 0) + dt
@@ -1668,6 +1732,10 @@ local function onControllerFrameUpdateBody(self, elapsed)
         Navigation.SyncFromEvaluation(nil, rProg)
         return
       end
+    end
+    -- 1b) 1 Hz Active-Step & Quest Log Truth Watchdog: guarantees real-time advancement even if WoW: Forever drops or delays quest events
+    if Navigation.TickActiveStepWatchdog(stepDt) then
+      return
     end
   end
 
@@ -2418,7 +2486,26 @@ local function updateHUDPresentation(eval, status)
   end
 
   local counts = (eval and eval.counts) or { completed = 0, total = 0, skipped = 0 }
+  local act = eval and eval.nextAction
   local cleanHeader = "Riverglades"
+  if progress.mode ~= "rxp" and act and (act.questID or act.questKey) and ns.Compat and ns.Compat.LookupRouteQuestMeta then
+    local qMeta = ns.Compat.LookupRouteQuestMeta(act.questKey or act.questID)
+    local qName = qMeta and qMeta.name or nil
+    if type(qName) == "string" and qName ~= "" then
+      local lvl = tonumber(qMeta.questLevel)
+      local lvlPrefix = ""
+      if lvl and lvl > 0 then
+        local plus = (act.isEliteBounty == true or qMeta.isEliteBounty == true) and "+" or ""
+        lvlPrefix = string.format("[%d%s] ", lvl, plus)
+      end
+      local fullHdr = "Riverglades · " .. lvlPrefix .. qName
+      if ns.Compat.UTF8Truncate then
+        cleanHeader = ns.Compat.UTF8Truncate(fullHdr, 44)
+      else
+        cleanHeader = fullHdr
+      end
+    end
+  end
   if Navigation.activeTarget and Navigation.activeTarget.context == "riverglades" then
     Navigation.activeTarget.hudCleanHeader = cleanHeader
   end
@@ -2431,7 +2518,6 @@ local function updateHUDPresentation(eval, status)
     return
   end
 
-  local act = eval and eval.nextAction
   if not act then
     if eval and eval.blockedNotice and eval.blockedNotice.state == "blocked_quest_log_full" then
       f.stepText:SetText("Quest Log Full — clear a slot to accept next quest")
@@ -2521,6 +2607,7 @@ function Navigation.SyncFromEvaluation(eval, progress, expectedGeneration)
   local gen = Navigation.BumpGeneration()
 
   if progress.mode == "paused" then
+    syncRivergladesQuestWatchBaseline(nil, false)
     Navigation.StopTravelTicker()
     Navigation.ClearArrowTarget()
     Navigation.owner.pendingDestination = nil
@@ -2550,6 +2637,7 @@ function Navigation.SyncFromEvaluation(eval, progress, expectedGeneration)
   end
 
   if progress.mode == "rxp" then
+    syncRivergladesQuestWatchBaseline(nil, false)
     Navigation.StopTravelTicker()
     Navigation.ClearArrowTarget()
     Navigation.owner.pendingDestination = nil
@@ -2566,6 +2654,7 @@ function Navigation.SyncFromEvaluation(eval, progress, expectedGeneration)
   end
 
   local nextAct = eval and eval.nextAction
+  syncRivergladesQuestWatchBaseline(nextAct, true)
   if not nextAct or not nextAct.destination then
     Navigation.StopTravelTicker()
     Navigation.ClearArrowTarget()
@@ -2804,8 +2893,10 @@ function Navigation.SyncFromGoldFarmEvaluation(eval, progress, expectedGeneratio
   end
 
   if progress.mode ~= "paused" and Navigation.activeContext ~= "gold_farm" then
+    syncRivergladesQuestWatchBaseline(nil, false)
     Navigation.RequestContextSwitch("gold_farm")
   elseif progress.mode ~= "paused" then
+    syncRivergladesQuestWatchBaseline(nil, false)
     Navigation.activeContext = "gold_farm"
   end
 

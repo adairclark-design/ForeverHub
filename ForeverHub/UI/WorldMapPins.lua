@@ -223,8 +223,11 @@ function WorldMapPins.CollectPinEntries(targetMapID, route, progress, settings, 
 
   local activeActionID = nil
   local activeSubID = nil
+  local activeArrowQuestTitle = nil
   if progress and progress.mode == "standalone" and eval.nextAction then
     activeActionID = eval.nextAction.actionID
+    local arrowMeta = lookupQuestMeta(route, eval.nextAction)
+    activeArrowQuestTitle = (arrowMeta and (arrowMeta.name or arrowMeta.title)) or eval.nextAction.title or nil
     if RoutePlanner.ResolveActiveActionTarget then
       local _, _, sub = RoutePlanner.ResolveActiveActionTarget(eval.nextAction, progress, ctx, playerPos)
       activeSubID = sub and sub.subID or activeActionID
@@ -232,6 +235,11 @@ function WorldMapPins.CollectPinEntries(targetMapID, route, progress, settings, 
       activeSubID = activeActionID
     end
   end
+
+  local selectedQuest = (ns.Compat and ns.Compat.GetSelectedQuestInfo and ns.Compat.GetSelectedQuestInfo())
+    or { available = false }
+  local selectedQuestID = selectedQuest.available and tonumber(selectedQuest.questID) or nil
+  local selectedNormTitle = selectedQuest.available and selectedQuest.normTitle or nil
 
   local entries = {}
   local seenKeys = {}
@@ -241,6 +249,7 @@ function WorldMapPins.CollectPinEntries(targetMapID, route, progress, settings, 
     available = 0,
     total = 0,
     unresolvedTitlePickups = tonumber(eval.counts and eval.counts.blockedUnresolvedHistory) or 0,
+    selectedQuestNotice = nil,
   }
 
   for _, ev in ipairs(eval.evaluations or {}) do
@@ -347,10 +356,22 @@ function WorldMapPins.CollectPinEntries(targetMapID, route, progress, settings, 
                     and (activeSubID == nil or activeSubID == subKey or spot.isPrimary == true)
                   local isPinned = (progress ~= nil and progress.pinnedActionID == act.actionID)
                     and (progress.pinnedSubLocationID == nil or progress.pinnedSubLocationID == subKey)
+                  local entryKnownQid = tonumber(act.questID) or (qMeta and tonumber(qMeta.knownQuestID)) or nil
+                  local entryNormTitle = ns.Compat and ns.Compat.NormalizeQuestTitle and ns.Compat.NormalizeQuestTitle(questTitle) or nil
+                  local isSelectedQuest = false
+                  if selectedQuest.available then
+                    if selectedQuestID and entryKnownQid and selectedQuestID == entryKnownQid then
+                      isSelectedQuest = true
+                    elseif selectedNormTitle and entryNormTitle and selectedNormTitle == entryNormTitle then
+                      isSelectedQuest = true
+                    end
+                  end
 
                   local basePriority = (kind == "turnin" and 30) or (kind == "objective" and 20) or 10
                   if isCurrentTarget then
                     basePriority = 45
+                  elseif isSelectedQuest then
+                    basePriority = basePriority + 8
                   elseif isPinned then
                     basePriority = basePriority + 5
                   end
@@ -380,6 +401,7 @@ function WorldMapPins.CollectPinEntries(targetMapID, route, progress, settings, 
                     questLogFull = isQuestLogFull,
                     isSkipped = isSkipped,
                     isCurrentTarget = isCurrentTarget,
+                    isSelectedQuest = isSelectedQuest,
                     isPinned = isPinned,
                     reviewStatus = act.reviewStatus,
                     coordConfidence = sdest.coordConfidence or "artifact_verified",
@@ -399,6 +421,39 @@ function WorldMapPins.CollectPinEntries(targetMapID, route, progress, settings, 
       end
     end
   end
+
+  if tonumber(dstMapID) == RIVERGLADES_MAP_ID and selectedQuest.available and RoutePlanner.InspectQuestCoverage then
+    local cov = RoutePlanner.InspectQuestCoverage(
+      selectedQuest.questID,
+      selectedQuest.title,
+      route,
+      eval,
+      ctx,
+      progress
+    )
+    if cov and (cov.status == "quarantined_objective" or cov.status == "unmapped") then
+      local qLvl = tonumber(cov.questLevel) or tonumber(selectedQuest.level)
+      local lvlTag = qLvl and qLvl > 0 and string.format("[%d%s] ", qLvl, cov.isElite and "+" or "") or ""
+      local selName = tostring(cov.questTitle or selectedQuest.title or "Selected Quest")
+      local statusLabel = (cov.status == "quarantined_objective")
+        and "Location unverified (no FH pin)"
+        or "Not in Riverglades route (no FH pin)"
+      local arrowPart = ""
+      if activeArrowQuestTitle and activeArrowQuestTitle ~= "" then
+        arrowPart = " · Arrow: " .. tostring(activeArrowQuestTitle)
+      end
+      rawCounts.selectedQuestNotice = {
+        questID = cov.questID or selectedQuest.questID,
+        questTitle = selName,
+        questLevel = qLvl,
+        status = cov.status,
+        reason = cov.quarantinedReason,
+        arrowQuestTitle = activeArrowQuestTitle,
+        bannerText = string.format("Selected: %s%s — %s%s", lvlTag, selName, statusLabel, arrowPart),
+      }
+    end
+  end
+  WorldMapPins.lastSelectedQuestNotice = rawCounts.selectedQuestNotice
 
   return entries, rawCounts
 end
@@ -446,6 +501,9 @@ function WorldMapPins.BuildClusters(entries, canvasWidth, canvasHeight, canvasSc
       if entry.isCurrentTarget then
         matchedCluster.hasCurrentTarget = true
       end
+      if entry.isSelectedQuest then
+        matchedCluster.hasSelectedQuest = true
+      end
       if entry.kind == "turnin" then
         matchedCluster.hasTurnIn = true
       elseif entry.kind == "objective" then
@@ -466,6 +524,7 @@ function WorldMapPins.BuildClusters(entries, canvasWidth, canvasHeight, canvasSc
         entries = { entry },
         count = 1,
         hasCurrentTarget = (entry.isCurrentTarget == true),
+        hasSelectedQuest = (entry.isSelectedQuest == true),
         hasTurnIn = (entry.kind == "turnin"),
         hasObjective = (entry.kind == "objective"),
         hasAvailable = (entry.kind == "accept"),
@@ -604,6 +663,9 @@ local function showPinTooltip(pin)
       statusLine = statusLine .. "  " .. col("status.reserved", "· Pinned")
     elseif primary.isSkipped then
       statusLine = statusLine .. "  " .. col("text.muted", "· Skipped in tracker")
+    end
+    if primary.isSelectedQuest then
+      statusLine = statusLine .. "  " .. col("status.reserved", "· Selected in Quest Log")
     end
     local coordText = string.format(
       "(%.1f, %.1f)%s",
@@ -873,7 +935,7 @@ local function stylePinVisuals(pin, cluster, canvasScale)
 
   if cluster.hasCurrentTarget then
     ringToken = "accent.gold"
-  elseif primary.isPinned then
+  elseif cluster.hasSelectedQuest or primary.isPinned then
     ringToken = "status.reserved"
   end
 
@@ -910,7 +972,7 @@ local function stylePinVisuals(pin, cluster, canvasScale)
   end
 
   if pin.outerGlow then
-    if cluster.hasCurrentTarget then
+    if cluster.hasCurrentTarget or cluster.hasSelectedQuest then
       if type(pin.outerGlow.SetTexture) == "function" then
         pin.outerGlow:SetTexture(pinGlowPath)
         if type(pin.outerGlow.SetTexCoord) == "function" then
@@ -919,11 +981,13 @@ local function stylePinVisuals(pin, cluster, canvasScale)
       end
       pin.outerGlow:SetSize(glowSize, glowSize)
       if type(pin.outerGlow.SetVertexColor) == "function" then
+        local glowTok = cluster.hasCurrentTarget and "accent.gold" or "status.reserved"
+        local glowAlpha = cluster.hasCurrentTarget and 0.52 or 0.40
         if Theme and Theme.UnpackRGBA then
-          local r, g, b = Theme.UnpackRGBA("accent.gold")
-          pin.outerGlow:SetVertexColor(r, g, b, 0.52)
+          local r, g, b = Theme.UnpackRGBA(glowTok)
+          pin.outerGlow:SetVertexColor(r, g, b, glowAlpha)
         else
-          pin.outerGlow:SetVertexColor(0.85, 0.71, 0.42, 0.52)
+          pin.outerGlow:SetVertexColor(0.85, 0.71, 0.42, glowAlpha)
         end
       end
       pin.outerGlow:Show()
@@ -1169,6 +1233,18 @@ local function applyFilterBarCornerAnchor(bar, corner)
   else
     bar:SetPoint("BOTTOMLEFT", bar.host, "BOTTOMLEFT", 10, 10)
   end
+  if bar.selectionNoticeFrame and type(bar.selectionNoticeFrame.ClearAllPoints) == "function" then
+    bar.selectionNoticeFrame:ClearAllPoints()
+    if c == "TOPLEFT" then
+      bar.selectionNoticeFrame:SetPoint("TOPLEFT", bar, "BOTTOMLEFT", 0, -4)
+    elseif c == "TOPRIGHT" then
+      bar.selectionNoticeFrame:SetPoint("TOPRIGHT", bar, "BOTTOMRIGHT", 0, -4)
+    elseif c == "BOTTOMRIGHT" then
+      bar.selectionNoticeFrame:SetPoint("BOTTOMRIGHT", bar, "TOPRIGHT", 0, 4)
+    else
+      bar.selectionNoticeFrame:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", 0, 4)
+    end
+  end
   bar.__appliedCorner = c
 end
 
@@ -1276,6 +1352,47 @@ local function ensureFilterBar(mapFrame)
     WorldMapPins.RefreshNow()
   end)
 
+  local noticeFrame = CreateFrame("Frame", nil, host)
+  if noticeFrame then
+    noticeFrame:SetSize(534, 24)
+    if type(noticeFrame.SetFrameStrata) == "function" then
+      noticeFrame:SetFrameStrata("HIGH")
+    end
+    if type(noticeFrame.SetFrameLevel) == "function" and type(host.GetFrameLevel) == "function" then
+      noticeFrame:SetFrameLevel((host:GetFrameLevel() or 10) + 81)
+    end
+    if Widgets and type(Widgets.ApplySurface) == "function" then
+      Widgets.ApplySurface(noticeFrame, "surface.elevated", "status.warning", 0.96)
+    elseif type(noticeFrame.CreateTexture) == "function" then
+      noticeFrame.bg = noticeFrame:CreateTexture(nil, "BACKGROUND")
+      if noticeFrame.bg then
+        noticeFrame.bg:SetAllPoints(noticeFrame)
+        if type(noticeFrame.bg.SetColorTexture) == "function" then
+          noticeFrame.bg:SetColorTexture(0.18, 0.13, 0.05, 0.96)
+        end
+      end
+    end
+    if type(noticeFrame.CreateFontString) == "function" then
+      noticeFrame.label = noticeFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+      if noticeFrame.label then
+        noticeFrame.label:SetPoint("LEFT", noticeFrame, "LEFT", 8, 0)
+        noticeFrame.label:SetPoint("RIGHT", noticeFrame, "RIGHT", -8, 0)
+        if type(noticeFrame.label.SetJustifyH) == "function" then
+          noticeFrame.label:SetJustifyH("LEFT")
+        end
+        local Theme = ns.UI and ns.UI.Theme
+        if Theme and Theme.ApplyFont then
+          Theme.ApplyFont(noticeFrame.label, "dense", "status.warning")
+        elseif type(noticeFrame.label.SetTextColor) == "function" then
+          noticeFrame.label:SetTextColor(0.95, 0.77, 0.38, 1.0)
+        end
+      end
+    end
+    noticeFrame:Hide()
+    bar.selectionNoticeFrame = noticeFrame
+  end
+  applyFilterBarCornerAnchor(bar, "BOTTOMLEFT")
+
   WorldMapPins.filterBar = bar
   return bar
 end
@@ -1286,6 +1403,9 @@ local function updateFilterBarPresentation(mapFrame, mapID, rawCounts)
     return
   end
   if tonumber(mapID) ~= RIVERGLADES_MAP_ID then
+    if bar.selectionNoticeFrame then
+      bar.selectionNoticeFrame:Hide()
+    end
     bar:Hide()
     return
   end
@@ -1396,6 +1516,20 @@ local function updateFilterBarPresentation(mapFrame, mapID, rawCounts)
   placeBtn(bar.cornerBtn, 24)
   bar:SetSize(xCursor, 28)
   bar:Show()
+
+  if bar.selectionNoticeFrame then
+    local notice = (counts and counts.selectedQuestNotice) or WorldMapPins.lastSelectedQuestNotice
+    if notice and type(notice.bannerText) == "string" and notice.bannerText ~= "" then
+      if bar.selectionNoticeFrame.label then
+        bar.selectionNoticeFrame.label:SetText(notice.bannerText)
+      end
+      local bannerW = math.max(xCursor, math.min(math.max(360, hostW - 24), math.max(420, #notice.bannerText * 6 + 24)))
+      bar.selectionNoticeFrame:SetSize(bannerW, 24)
+      bar.selectionNoticeFrame:Show()
+    else
+      bar.selectionNoticeFrame:Hide()
+    end
+  end
 end
 
 function WorldMapPins.HideAllPins()
@@ -1408,6 +1542,9 @@ function WorldMapPins.HideAllPins()
   end
   WorldMapPins.activePinCount = 0
   if WorldMapPins.filterBar then
+    if WorldMapPins.filterBar.selectionNoticeFrame then
+      WorldMapPins.filterBar.selectionNoticeFrame:Hide()
+    end
     WorldMapPins.filterBar:Hide()
   end
 end
@@ -1556,6 +1693,7 @@ function WorldMapPins.EnsureHooksInstalled()
       local lastObsMap = nil
       local lastObsScale = nil
       local lastObsW = nil
+      local lastObsSelKey = nil
       updater:SetScript("OnUpdate", function(self, elapsed)
         if WorldMapPins.updaterLatchedError ~= nil then
           if self and type(self.Hide) == "function" then
@@ -1574,14 +1712,22 @@ function WorldMapPins.EnsureHooksInstalled()
             local canvas = getWorldMapCanvas(mapFrame)
             local sc = canvas and type(canvas.GetScale) == "function" and canvas:GetScale() or nil
             local cw = canvas and type(canvas.GetWidth) == "function" and canvas:GetWidth() or nil
+            local sel = (mID == RIVERGLADES_MAP_ID and ns.Compat and ns.Compat.GetSelectedQuestInfo)
+                and ns.Compat.GetSelectedQuestInfo()
+              or nil
+            local selKey = (sel and sel.available)
+                and (tostring(sel.questID or "") .. "|" .. tostring(sel.normTitle or ""))
+              or ""
             if WorldMapPins.dirty
               or mID ~= lastObsMap
               or (sc and lastObsScale and math.abs(sc - lastObsScale) > 0.001)
               or (cw and cw ~= lastObsW)
+              or (selKey ~= lastObsSelKey)
             then
               lastObsMap = mID
               lastObsScale = sc
               lastObsW = cw
+              lastObsSelKey = selKey
               WorldMapPins.RefreshNow()
             end
           end,
@@ -1633,5 +1779,12 @@ function WorldMapPins.GetLiveSnapshot()
     activePinCount = WorldMapPins.activePinCount or 0,
     entryCount = #(WorldMapPins.lastEntries or {}),
     summaryCounts = WorldMapPins.lastSummaryCounts,
+    selectedQuestNotice = WorldMapPins.lastSelectedQuestNotice,
+    selectionBannerShown = (
+      bar
+      and bar.selectionNoticeFrame
+      and type(bar.selectionNoticeFrame.IsShown) == "function"
+      and bar.selectionNoticeFrame:IsShown()
+    ) or false,
   }
 end

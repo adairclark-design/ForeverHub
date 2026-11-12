@@ -71,6 +71,7 @@ function State.Init(isAddonLoad)
   db.characters = db.characters or {}
   db.discoveredQuestIds = type(db.discoveredQuestIds) == "table" and db.discoveredQuestIds or {}
   db.discoveredQuestTitlesById = type(db.discoveredQuestTitlesById) == "table" and db.discoveredQuestTitlesById or {}
+  db.fieldCaptures = type(db.fieldCaptures) == "table" and db.fieldCaptures or {}
   for normTitle, rawQid in pairs(db.discoveredQuestIds) do
     local nQid = tonumber(rawQid)
     if type(normTitle) == "string" and normTitle ~= "" and nQid and nQid > 0 then
@@ -2272,4 +2273,54 @@ function State.GetGoldFarmSessionSnapshot(explicitNow, explicitCopper)
     contaminationReason = contaminationReason,
     cleanIntervalConfirmed = (sess.cleanIntervalConfirmed ~= false) and not contaminated,
   }
+end
+
+State.MAX_FIELD_CAPTURES = 500
+
+function State.GetFieldCaptures()
+  if type(_G.ForeverHubDB) ~= "table" then
+    _G.ForeverHubDB = {}
+  end
+  if type(_G.ForeverHubDB.fieldCaptures) ~= "table" then
+    _G.ForeverHubDB.fieldCaptures = {}
+  end
+  return _G.ForeverHubDB.fieldCaptures
+end
+
+function State.RecordFieldCapture(entry)
+  if type(entry) ~= "table" then
+    return false, "invalid_entry"
+  end
+  local mapID = tonumber(entry.uiMapID)
+  local x = tonumber(entry.x01)
+  local y = tonumber(entry.y01)
+  if not mapID or mapID <= 0 or not x or not y or x <= 0 or x >= 1 or y <= 0 or y >= 1 then
+    return false, "invalid_coordinates"
+  end
+  local rx = math.floor(x * 10000 + 0.5) / 10000
+  local ry = math.floor(y * 10000 + 0.5) / 10000
+  local list = State.GetFieldCaptures()
+  while #list >= State.MAX_FIELD_CAPTURES do
+    table.remove(list, 1)
+  end
+  local nowSec = 0
+  if ns.Compat and type(ns.Compat.NowSeconds) == "function" then
+    nowSec = math.floor(tonumber(ns.Compat.NowSeconds()) or 0)
+  end
+  local rec = {
+    kind = tostring(entry.kind or "event"),
+    questID = tonumber(entry.questID),
+    questTitle = type(entry.questTitle) == "string" and entry.questTitle ~= "" and entry.questTitle or nil,
+    objectiveIndex = tonumber(entry.objectiveIndex),
+    objectiveText = type(entry.objectiveText) == "string" and entry.objectiveText ~= "" and entry.objectiveText or nil,
+    note = type(entry.note) == "string" and entry.note ~= "" and entry.note or nil,
+    npcID = tonumber(entry.npcID),
+    npcName = type(entry.npcName) == "string" and entry.npcName ~= "" and entry.npcName or nil,
+    uiMapID = mapID,
+    x01 = rx,
+    y01 = ry,
+    recordedAt = nowSec,
+  }
+  table.insert(list, rec)
+  return true, rec
 end

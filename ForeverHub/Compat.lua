@@ -748,6 +748,7 @@ function Compat.ScanLiveQuestLog(allowCollapsedExpand)
   local totalEntriesRead = 0
   local nonNilEntryCount = 0
   local visibleQuestCount = 0
+  local digestParts = {}
 
   if canUseModern then
     local okN, numEntries, nQuests = pcall(C_QuestLog.GetNumQuestLogEntries)
@@ -778,6 +779,7 @@ function Compat.ScanLiveQuestLog(allowCollapsedExpand)
               normTitle = normTitle,
               isComplete = (info.isComplete == true or info.isComplete == 1),
             }
+            digestParts[#digestParts + 1] = string.format("%s:%s:%s", tostring(qid or 0), tostring(normTitle or ""), row.isComplete and "1" or "0")
             if qid and qid > 0 then
               result.byID[qid] = row
             end
@@ -823,6 +825,7 @@ function Compat.ScanLiveQuestLog(allowCollapsedExpand)
               normTitle = normTitle,
               isComplete = (isComplete == true or isComplete == 1),
             }
+            digestParts[#digestParts + 1] = string.format("%s:%s:%s", tostring(qid or 0), tostring(normTitle or ""), row.isComplete and "1" or "0")
             if qid and qid > 0 then
               result.byID[qid] = row
             end
@@ -842,6 +845,9 @@ function Compat.ScanLiveQuestLog(allowCollapsedExpand)
   end
 
   result.visibleQuestCount = visibleQuestCount
+  result.digest = result.available
+    and string.format("%d:%d:%s:%s", result.numQuests, visibleQuestCount, result.hasCollapsedHeaders and "1" or "0", table.concat(digestParts, ","))
+    or "unavail"
   if result.available then
     local hiddenQuestGap = (nonNilEntryCount == totalEntriesRead)
       and (result.numQuests > 0)
@@ -1330,12 +1336,111 @@ function Compat.RecordRecentQuestTurnedIn(questID, rawTitle)
   Compat.InvalidateQuestStateCaches()
 end
 
+local function escapeLuaPatternLiteral(str)
+  return (string.gsub(str, "([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1"))
+end
+
+local function isServerQuestFlaggedCompletedRaw(questID)
+  local qid = tonumber(questID)
+  if not qid or qid <= 0 then
+    return false
+  end
+  if ns.State and type(ns.State.overrideCompletedQuests) == "table" then
+    return ns.State.overrideCompletedQuests[qid] == true
+  end
+  if C_QuestLog and type(C_QuestLog.IsQuestFlaggedCompleted) == "function" then
+    local ok, done = pcall(C_QuestLog.IsQuestFlaggedCompleted, qid)
+    if ok and not Compat.IsSecretOrRestrictedValue(done) and done == true then
+      return true
+    end
+  end
+  if type(IsQuestFlaggedCompleted) == "function" then
+    local ok, done = pcall(IsQuestFlaggedCompleted, qid)
+    if ok and not Compat.IsSecretOrRestrictedValue(done) and (done == true or done == 1) then
+      return true
+    end
+  end
+  if Compat.CheckBulkQuestCompleted(qid) then
+    return true
+  end
+  return false
+end
+
 function Compat.RecordRecentQuestRemoved(questID)
   local qid = tonumber(questID)
-  if qid and qid > 0 then
+  if qid and qid <= 0 then
+    qid = nil
+  end
+  local normTitle = qid and resolveKnownTitleForQuestID(qid) or nil
+  if qid then
     Compat.recentQuestAcceptedByID[qid] = nil
   end
+  if normTitle then
+    Compat.recentQuestAcceptedByTitle[normTitle] = nil
+  end
   Compat.InvalidateQuestStateCaches()
+  if qid and isServerQuestFlaggedCompletedRaw(qid) then
+    Compat.RecordRecentQuestTurnedIn(qid, normTitle)
+    return true, normTitle
+  end
+  return false, normTitle
+end
+
+function Compat.ParseSystemQuestCompletedMessage(rawMsg)
+  if type(rawMsg) ~= "string" or rawMsg == "" or Compat.IsSecretOrRestrictedValue(rawMsg) then
+    return nil
+  end
+  local pattern = "^(.+) completed%.$"
+  local fmt = _G.ERR_QUEST_COMPLETE_S
+  if type(fmt) == "string" and fmt ~= "" and not Compat.IsSecretOrRestrictedValue(fmt) and string.find(fmt, "%s", 1, true) then
+    local pre, post = string.match(fmt, "^(.-)%%s(.-)$")
+    if pre ~= nil and post ~= nil then
+      pattern = "^" .. escapeLuaPatternLiteral(pre) .. "(.+)" .. escapeLuaPatternLiteral(post) .. "$"
+    end
+  end
+  local capturedTitle = string.match(rawMsg, pattern)
+  if type(capturedTitle) ~= "string" or capturedTitle == "" then
+    return nil
+  end
+  local normTitle = Compat.NormalizeQuestTitle(capturedTitle)
+  if not normTitle then
+    return nil
+  end
+
+  local isKnownOrTracked = (Compat.LookupRouteQuestMeta(normTitle) ~= nil)
+    or ((Compat.recentQuestAcceptedByTitle[normTitle] or 0) > 0)
+    or (Compat.lastDialogQuest and Compat.lastDialogQuest.normTitle == normTitle)
+    or (ns.State and type(ns.State.GetDiscoveredQuestId) == "function" and ns.State.GetDiscoveredQuestId(normTitle) ~= nil)
+
+  local matchedObservedQid = nil
+  for obsId, obsNorm in pairs(Compat.observedLogTitlesByID) do
+    if obsNorm == normTitle and tonumber(obsId) and tonumber(obsId) > 0 then
+      isKnownOrTracked = true
+      matchedObservedQid = tonumber(obsId)
+      break
+    end
+  end
+
+  if not isKnownOrTracked then
+    local cachedScan = Compat.liveQuestLogCache and Compat.liveQuestLogCache.data or nil
+    if cachedScan and cachedScan.byTitle and cachedScan.byTitle[normTitle] ~= nil then
+      isKnownOrTracked = true
+      local rowQid = tonumber(cachedScan.byTitle[normTitle].questID)
+      if rowQid and rowQid > 0 then
+        matchedObservedQid = rowQid
+      end
+    end
+  end
+
+  if not isKnownOrTracked then
+    return nil
+  end
+
+  local resolvedQid = Compat.ResolveQuestIdentity(normTitle)
+  if not resolvedQid and matchedObservedQid then
+    resolvedQid = matchedObservedQid
+  end
+  return resolvedQid, capturedTitle, normTitle
 end
 
 function Compat.CheckBulkQuestCompleted(questID)
@@ -1616,6 +1721,91 @@ local function buildObjectivesSummaryText(parsed, allDone)
   return table.concat(parts, " • ")
 end
 
+local function sumObjectiveProgressScore(rows)
+  local finishedCount = 0
+  local fulfilledSum = 0
+  for _, r in ipairs(rows or {}) do
+    if type(r) == "table" then
+      if r.finished == true then
+        finishedCount = finishedCount + 1
+      end
+      fulfilledSum = fulfilledSum + (tonumber(r.numFulfilled) or 0)
+    end
+  end
+  return finishedCount, fulfilledSum
+end
+
+local function readClassicLeaderboardObjectives(questID, normTitle, isZeroObjectiveQuest, identityConfidence)
+  if type(GetNumQuestLeaderBoards) ~= "function" or type(GetQuestLogLeaderBoard) ~= "function" then
+    return nil
+  end
+  local freshIndex, freshComplete = Compat.ResolveFreshQuestLogIndex(questID, normTitle)
+  if not freshIndex then
+    return nil
+  end
+  if freshComplete == true then
+    return {
+      status = "ok",
+      allFinished = true,
+      objectives = {},
+      summaryText = "Ready to turn in",
+      provider = "classic_leaderboards",
+      identityConfidence = identityConfidence,
+    }
+  end
+  local okLB, numLB = pcall(GetNumQuestLeaderBoards, freshIndex)
+  if okLB and Compat.IsSecretOrRestrictedValue(numLB) then
+    return { status = "restricted", allFinished = nil, objectives = {}, reason = "secret_value", identityConfidence = identityConfidence }
+  end
+  if okLB and type(numLB) == "number" then
+    if numLB == 0 then
+      return {
+        status = "ok",
+        allFinished = (isZeroObjectiveQuest == true),
+        objectives = {},
+        summaryText = isZeroObjectiveQuest and "Ready to turn in" or nil,
+        provider = "classic_leaderboards",
+        identityConfidence = identityConfidence,
+      }
+    end
+    local parsed = {}
+    local allDone = true
+    for j = 1, numLB do
+      local okItem, desc, _, finished = pcall(GetQuestLogLeaderBoard, j, freshIndex)
+      if okItem and Compat.IsSecretOrRestrictedValue(finished) then
+        return { status = "restricted", allFinished = nil, objectives = {}, reason = "restricted_objective_row", identityConfidence = identityConfidence }
+      end
+      local fin = (okItem and (finished == true or finished == 1)) or false
+      if not fin then
+        allDone = false
+      end
+      local cleanDesc = (type(desc) == "string" and not Compat.IsSecretOrRestrictedValue(desc)) and desc or ""
+      local nf, nr = nil, nil
+      if cleanDesc ~= "" then
+        local a, b = string.match(cleanDesc, "(%d+)%s*/%s*(%d+)")
+        nf = tonumber(a)
+        nr = tonumber(b)
+      end
+      table.insert(parsed, {
+        index = j,
+        text = cleanDesc,
+        finished = fin,
+        numFulfilled = nf,
+        numRequired = nr,
+      })
+    end
+    return {
+      status = "ok",
+      allFinished = allDone,
+      objectives = parsed,
+      summaryText = buildObjectivesSummaryText(parsed, allDone),
+      provider = "classic_leaderboards",
+      identityConfidence = identityConfidence,
+    }
+  end
+  return nil
+end
+
 function Compat.GetQuestObjectivesResult(questRef, opts)
   if questRef == nil then
     return { status = "unknown", allFinished = nil, objectives = {}, reason = "invalid_quest_id" }
@@ -1703,6 +1893,24 @@ function Compat.GetQuestObjectivesResult(questRef, opts)
           numRequired = tonumber(row.numRequired),
         })
       end
+      -- Cross-check against Classic Quest Log Leaderboards when modern GetQuestObjectives lags on WoW: Forever (stale 0/1 while leaderboard is already finished/ahead)
+      if not allDone then
+        local classicCheck = readClassicLeaderboardObjectives(questID, normTitle, isZeroObjectiveQuest, identityConfidence)
+        if classicCheck then
+          if classicCheck.status == "restricted" then
+            return classicCheck
+          elseif classicCheck.status == "ok" then
+            if classicCheck.allFinished == true then
+              return classicCheck
+            end
+            local modFin, modFul = sumObjectiveProgressScore(parsed)
+            local clsFin, clsFul = sumObjectiveProgressScore(classicCheck.objectives)
+            if clsFin > modFin or (clsFin == modFin and clsFul > modFul) then
+              return classicCheck
+            end
+          end
+        end
+      end
       return {
         status = "ok",
         allFinished = allDone,
@@ -1715,70 +1923,9 @@ function Compat.GetQuestObjectivesResult(questRef, opts)
   end
 
   -- Provider 2: Classic Quest Log Leaderboards using a freshly verified live logIndex (even when live row had questID=0)
-  if type(GetNumQuestLeaderBoards) == "function" and type(GetQuestLogLeaderBoard) == "function" then
-    local freshIndex, freshComplete = Compat.ResolveFreshQuestLogIndex(questID, normTitle)
-    if freshIndex then
-      if freshComplete == true then
-        return {
-          status = "ok",
-          allFinished = true,
-          objectives = {},
-          summaryText = "Ready to turn in",
-          provider = "classic_leaderboards",
-          identityConfidence = identityConfidence,
-        }
-      end
-      local okLB, numLB = pcall(GetNumQuestLeaderBoards, freshIndex)
-      if okLB and Compat.IsSecretOrRestrictedValue(numLB) then
-        return { status = "restricted", allFinished = nil, objectives = {}, reason = "secret_value", identityConfidence = identityConfidence }
-      end
-      if okLB and type(numLB) == "number" then
-        if numLB == 0 then
-          return {
-            status = "ok",
-            allFinished = (isZeroObjectiveQuest == true),
-            objectives = {},
-            summaryText = isZeroObjectiveQuest and "Ready to turn in" or nil,
-            provider = "classic_leaderboards",
-            identityConfidence = identityConfidence,
-          }
-        end
-        local parsed = {}
-        local allDone = true
-        for j = 1, numLB do
-          local okItem, desc, _, finished = pcall(GetQuestLogLeaderBoard, j, freshIndex)
-          if okItem and Compat.IsSecretOrRestrictedValue(finished) then
-            return { status = "restricted", allFinished = nil, objectives = {}, reason = "restricted_objective_row", identityConfidence = identityConfidence }
-          end
-          local fin = (okItem and (finished == true or finished == 1)) or false
-          if not fin then
-            allDone = false
-          end
-          local cleanDesc = (type(desc) == "string" and not Compat.IsSecretOrRestrictedValue(desc)) and desc or ""
-          local nf, nr = nil, nil
-          if cleanDesc ~= "" then
-            local a, b = string.match(cleanDesc, "(%d+)%s*/%s*(%d+)")
-            nf = tonumber(a)
-            nr = tonumber(b)
-          end
-          table.insert(parsed, {
-            index = j,
-            text = cleanDesc,
-            finished = fin,
-            numFulfilled = nf,
-            numRequired = nr,
-          })
-        end
-        return {
-          status = "ok",
-          allFinished = allDone,
-          objectives = parsed,
-          summaryText = buildObjectivesSummaryText(parsed, allDone),
-          provider = "classic_leaderboards",
-          identityConfidence = identityConfidence,
-        }
-      end
-    end
+  local classicRes = readClassicLeaderboardObjectives(questID, normTitle, isZeroObjectiveQuest, identityConfidence)
+  if classicRes then
+    return classicRes
   end
 
   if modernFallbackReason == "empty_objectives" then
@@ -1844,6 +1991,35 @@ function Compat.GetQuestEvidenceResult(questRef, opts)
       prereqConfidence = meta and meta.prereqConfidence or nil,
     },
   }
+end
+
+function Compat.GetActiveStepTruthFingerprint(questRef, forceFresh)
+  if forceFresh == true then
+    Compat.bulkCompletedCache = { expiresAt = 0, map = nil }
+    Compat.liveQuestLogCache = { expiresAt = 0, data = nil }
+  end
+  local scan = Compat.ScanLiveQuestLog(false)
+  local logDigest = (scan and scan.digest) or "unavail"
+  if questRef == nil then
+    return "idle|" .. tostring(logDigest)
+  end
+  local onRes = Compat.IsOnQuestResult(questRef)
+  local compRes = Compat.IsQuestCompletedResult(questRef)
+  local objRes = nil
+  if onRes.status == "ok" and onRes.value == true and compRes.value ~= true then
+    objRes = Compat.GetQuestObjectivesResult(questRef)
+  end
+  return string.format(
+    "%s:%s|%s:%s|%s:%s:%s|%s",
+    tostring(onRes.status),
+    tostring(onRes.value),
+    tostring(compRes.status),
+    tostring(compRes.value),
+    tostring(objRes and objRes.status or "-"),
+    tostring(objRes and objRes.allFinished or "-"),
+    tostring(objRes and objRes.summaryText or ""),
+    tostring(logDigest)
+  )
 end
 
 function Compat.IsQuestLogFullResult()
