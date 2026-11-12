@@ -1,0 +1,2608 @@
+local addonName, ns = ...
+ns = ns or _G.ForeverHub or {}
+local Compat = ns.Compat or {}
+ns.Compat = Compat
+
+function Compat.GetContainerNumSlots(bagID)
+  if C_Container and C_Container.GetContainerNumSlots then
+    return C_Container.GetContainerNumSlots(bagID) or 0
+  elseif GetContainerNumSlots then
+    return GetContainerNumSlots(bagID) or 0
+  end
+  return 0
+end
+
+function Compat.GetContainerItemInfo(bagID, slotID)
+  if C_Container and C_Container.GetContainerItemInfo then
+    local info = C_Container.GetContainerItemInfo(bagID, slotID)
+    if not info then
+      return nil
+    end
+    local itemID = info.itemID
+    if not itemID and type(info.hyperlink) == "string" then
+      itemID = tonumber(string.match(info.hyperlink, "item:(%d+)"))
+    end
+    return {
+      itemID = itemID,
+      stackCount = info.stackCount or 1,
+      hyperlink = info.hyperlink,
+      iconFileID = info.iconFileID,
+      -- Preserve nil when binding state is unknown; never coerce nil to false
+      isBound = info.isBound,
+      hasItem = true,
+    }
+  elseif GetContainerItemInfo then
+    local icon, itemCount, _, _, _, _, itemLink, _, _, itemID, isBound = GetContainerItemInfo(bagID, slotID)
+    if not icon and not itemLink and not itemID then
+      return nil
+    end
+    if not itemID and itemLink then
+      itemID = tonumber(string.match(itemLink, "item:(%d+)"))
+    end
+    return {
+      itemID = itemID,
+      stackCount = itemCount or 1,
+      hyperlink = itemLink,
+      iconFileID = icon,
+      -- Preserve nil when binding state is unknown; never coerce nil to false
+      isBound = isBound,
+      hasItem = true,
+    }
+  end
+  return nil
+end
+
+-- Capability-detected bank container enumeration (matches BagBrother caching.lua:246 & Forever BankDocumentation)
+function Compat.CanViewCharacterBank()
+  if not (ns.State and ns.State.bankOpen) then
+    return false
+  end
+  if C_Bank and type(C_Bank.CanViewBank) == "function" then
+    local ok, canView = pcall(C_Bank.CanViewBank, 0)
+    if ok then
+      return canView == true
+    end
+    return false
+  end
+  return true
+end
+
+function Compat.GetPurchasedBankTabIDs()
+  if C_Bank and type(C_Bank.FetchPurchasedBankTabData) == "function" then
+    local hasNumAPI = type(C_Bank.FetchNumPurchasedBankTabs) == "function"
+    local okNum, expectedNum = false, nil
+    if hasNumAPI then
+      okNum, expectedNum = pcall(C_Bank.FetchNumPurchasedBankTabs, 0)
+      if not okNum or type(expectedNum) ~= "number" or expectedNum < 0 then
+        return {
+          mode = "bank_tabs",
+          available = false,
+          complete = false,
+          confirmedZeroTabs = false,
+          tabIDs = {},
+          reason = "num_tabs_unavailable",
+        }
+      end
+    end
+
+    local ok, tabs = pcall(C_Bank.FetchPurchasedBankTabData, 0)
+    -- When modern bank-tab capability is present, API failure MUST return unavailable/incomplete
+    -- and MUST NOT fall back to legacy -1, 5..11 container indices.
+    if not ok or type(tabs) ~= "table" then
+      return {
+        mode = "bank_tabs",
+        available = false,
+        complete = false,
+        confirmedZeroTabs = false,
+        tabIDs = {},
+        reason = "fetch_tabs_failed",
+      }
+    end
+
+    local ids = {}
+    for _, tab in ipairs(tabs) do
+      if type(tab) == "table" and tonumber(tab.ID) then
+        table.insert(ids, tonumber(tab.ID))
+      else
+        return {
+          mode = "bank_tabs",
+          available = false,
+          complete = false,
+          confirmedZeroTabs = false,
+          tabIDs = {},
+          reason = "malformed_tab_entry",
+        }
+      end
+    end
+
+    if expectedNum ~= nil and #ids ~= expectedNum then
+      return {
+        mode = "bank_tabs",
+        available = false,
+        complete = false,
+        confirmedZeroTabs = false,
+        tabIDs = ids,
+        reason = "tab_count_mismatch",
+      }
+    end
+
+    if #ids == 0 then
+      -- Distinguish confirmed 0 purchased tabs from an unconfirmed empty table
+      if hasNumAPI and expectedNum == 0 then
+        return {
+          mode = "bank_tabs",
+          available = true,
+          complete = true,
+          confirmedZeroTabs = true,
+          tabIDs = {},
+        }
+      elseif not hasNumAPI then
+        return {
+          mode = "bank_tabs",
+          available = false,
+          complete = false,
+          confirmedZeroTabs = false,
+          tabIDs = {},
+          reason = "unconfirmed_zero_tabs",
+        }
+      end
+    end
+
+    return {
+      mode = "bank_tabs",
+      available = true,
+      complete = true,
+      confirmedZeroTabs = false,
+      tabIDs = ids,
+    }
+  end
+
+  -- Separate legacy fallback ONLY when C_Bank.FetchPurchasedBankTabData capability is absent
+  local legacyIDs = { -1 }
+  local firstBank = (tonumber(_G.NUM_BAG_SLOTS) or 4) + 1
+  local lastBank = firstBank + (tonumber(_G.NUM_BANKBAGSLOTS) or 7) - 1
+  for bagID = firstBank, lastBank do
+    table.insert(legacyIDs, bagID)
+  end
+  return {
+    mode = "legacy_bank",
+    available = true,
+    complete = true,
+    confirmedZeroTabs = false,
+    tabIDs = legacyIDs,
+  }
+end
+
+function Compat.ExtractItemID(itemLinkOrString)
+  if itemLinkOrString == nil or Compat.IsSecretOrRestrictedValue(itemLinkOrString) then
+    return nil
+  end
+  if type(itemLinkOrString) == "number" then
+    if itemLinkOrString ~= itemLinkOrString or itemLinkOrString <= 0 or itemLinkOrString >= math.huge then
+      return nil
+    end
+    return math.floor(itemLinkOrString)
+  end
+  if type(itemLinkOrString) ~= "string" then
+    return nil
+  end
+  local id = string.match(itemLinkOrString, "item:(%d+)")
+  if id then
+    local n = tonumber(id)
+    return (n and n > 0) and math.floor(n) or nil
+  end
+  local bare = string.match(itemLinkOrString, "^(%d+):") or string.match(itemLinkOrString, "^(%d+)$")
+  if bare then
+    local n = tonumber(bare)
+    return (n and n > 0) and math.floor(n) or nil
+  end
+  return nil
+end
+
+function Compat.ResolveItemName(itemID, fallbackName)
+  itemID = tonumber(itemID)
+  if not itemID then
+    return fallbackName
+  end
+  if C_Item and type(C_Item.GetItemNameByID) == "function" then
+    local ok, name = pcall(C_Item.GetItemNameByID, itemID)
+    if ok and type(name) == "string" and name ~= "" then
+      return name
+    end
+  end
+  if type(GetItemInfo) == "function" then
+    local ok, name = pcall(GetItemInfo, itemID)
+    if ok and type(name) == "string" and name ~= "" then
+      return name
+    end
+  end
+  local data = ns.Data
+  if data then
+    if data.materialToCrates and data.materialToCrates[itemID] and data.materialToCrates[itemID].name then
+      return data.materialToCrates[itemID].name
+    end
+    if data.cratesByItemID and data.cratesByItemID[itemID] and data.cratesByItemID[itemID].name then
+      return data.cratesByItemID[itemID].name
+    end
+    if data.writsByItemID and data.writsByItemID[itemID] and data.writsByItemID[itemID].name then
+      return data.writsByItemID[itemID].name
+    end
+    if data.sealedCratesByItemID and data.sealedCratesByItemID[itemID] and data.sealedCratesByItemID[itemID].name then
+      return data.sealedCratesByItemID[itemID].name
+    end
+    if data.shippingLabelsByItemID and data.shippingLabelsByItemID[itemID] and data.shippingLabelsByItemID[itemID].name then
+      return data.shippingLabelsByItemID[itemID].name
+    end
+    if data.sealedWritsByItemID and data.sealedWritsByItemID[itemID] and data.sealedWritsByItemID[itemID].name then
+      return data.sealedWritsByItemID[itemID].name
+    end
+  end
+  if type(fallbackName) == "string" and fallbackName ~= "" and not string.match(fallbackName, "^Item %d+$") then
+    return fallbackName
+  end
+  return nil
+end
+
+function Compat.GetPlayerLevel()
+  if ns.State and type(ns.State.overridePlayerLevel) == "number" then
+    return math.max(1, math.floor(ns.State.overridePlayerLevel))
+  end
+  if type(UnitLevel) == "function" then
+    local ok, lvl = pcall(UnitLevel, "player")
+    if ok and type(lvl) == "number" and lvl > 0 then
+      return math.floor(lvl)
+    end
+  end
+  return 60
+end
+
+function Compat.IsOnQuest(questID)
+  questID = tonumber(questID)
+  if not questID then
+    return false
+  end
+  if ns.State and type(ns.State.overrideActiveQuests) == "table" then
+    return ns.State.overrideActiveQuests[questID] == true
+  end
+  if C_QuestLog and type(C_QuestLog.IsOnQuest) == "function" then
+    local ok, onQuest = pcall(C_QuestLog.IsOnQuest, questID)
+    if ok then
+      return onQuest == true
+    end
+  end
+  if type(GetNumQuestLogEntries) == "function" and type(GetQuestLogTitle) == "function" then
+    local numEntries = GetNumQuestLogEntries() or 0
+    for i = 1, numEntries do
+      local _, _, _, isHeader, _, _, _, qID = GetQuestLogTitle(i)
+      if not isHeader and tonumber(qID) == questID then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+function Compat.IsInCombat()
+  if ns.State and ns.State.overrideInCombat ~= nil then
+    return ns.State.overrideInCombat == true
+  end
+  if type(InCombatLockdown) == "function" then
+    return InCombatLockdown() == true
+  end
+  return false
+end
+
+function Compat.HasCursorItem()
+  if ns.State and ns.State.overrideHasCursorItem ~= nil then
+    return ns.State.overrideHasCursorItem == true
+  end
+  if type(CursorHasItem) == "function" then
+    return CursorHasItem() == true
+  end
+  return false
+end
+
+function Compat.IsContainerItemLocked(bagID, slotID)
+  if ns.State and type(ns.State.overrideLockedSlots) == "table" then
+    local key = string.format("%d:%d", tonumber(bagID) or 0, tonumber(slotID) or 0)
+    if ns.State.overrideLockedSlots[key] ~= nil then
+      return ns.State.overrideLockedSlots[key] == true
+    end
+  end
+  if C_Container and type(C_Container.GetContainerItemInfo) == "function" then
+    local info = C_Container.GetContainerItemInfo(bagID, slotID)
+    if info and info.isLocked ~= nil then
+      return info.isLocked == true
+    end
+  elseif type(GetContainerItemInfo) == "function" then
+    local _, _, locked = GetContainerItemInfo(bagID, slotID)
+    return locked == true or locked == 1
+  end
+  return false
+end
+
+function Compat.GetItemMaxStack(itemID)
+  itemID = tonumber(itemID)
+  if not itemID then
+    return 1
+  end
+  if ns.State and type(ns.State.overrideMaxStackByItemID) == "table" and ns.State.overrideMaxStackByItemID[itemID] then
+    return math.max(1, math.floor(tonumber(ns.State.overrideMaxStackByItemID[itemID]) or 1))
+  end
+  if C_Item and type(C_Item.GetItemMaxStackSizeByID) == "function" then
+    local ok, maxStack = pcall(C_Item.GetItemMaxStackSizeByID, itemID)
+    if ok and type(maxStack) == "number" and maxStack > 0 then
+      return math.floor(maxStack)
+    end
+  end
+  if type(GetItemInfo) == "function" then
+    local ok, _, _, _, _, _, _, _, itemStackCount = pcall(GetItemInfo, itemID)
+    if ok and type(itemStackCount) == "number" and itemStackCount > 0 then
+      return math.floor(itemStackCount)
+    end
+  end
+  local data = ns.Data
+  if data then
+    if (data.cratesByItemID and data.cratesByItemID[itemID]) or (data.writsByItemID and data.writsByItemID[itemID]) then
+      return 20
+    end
+    if data.materialTransferPolicyByItemID and data.materialTransferPolicyByItemID[itemID] == "never_binds_trade_good" then
+      return 200
+    end
+  end
+  return 20
+end
+
+function Compat.UseContainerItem(bagID, slotID)
+  if ns.State and type(ns.State.overrideUseContainerItem) == "function" then
+    return ns.State.overrideUseContainerItem(bagID, slotID)
+  end
+  if C_Container and type(C_Container.UseContainerItem) == "function" then
+    C_Container.UseContainerItem(bagID, slotID)
+    return true
+  elseif type(UseContainerItem) == "function" then
+    UseContainerItem(bagID, slotID)
+    return true
+  end
+  return false
+end
+
+function Compat.IsFiniteNumber(v)
+  return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+-- Pure integer copper formatting (1g = 10000c, 1s = 100c)
+function Compat.FormatCopper(copper)
+  if not Compat.IsFiniteNumber(copper) then
+    return "unknown"
+  end
+  local c = math.floor(copper + 0.5)
+  if c < 0 then
+    c = 0
+  end
+  local gold = math.floor(c / 10000)
+  local silver = math.floor((c % 10000) / 100)
+  local remCopper = c % 100
+
+  local parts = {}
+  if gold > 0 then
+    table.insert(parts, string.format("|cffffd700%dg|r", gold))
+  end
+  if silver > 0 or (gold > 0 and remCopper > 0) then
+    table.insert(parts, string.format("|cffc7c7cf%ds|r", silver))
+  end
+  if remCopper > 0 or #parts == 0 then
+    table.insert(parts, string.format("|cffeda55f%dc|r", remCopper))
+  end
+  return table.concat(parts, " ")
+end
+
+function Compat.FormatSignedCopper(copper, includePlus)
+  if not Compat.IsFiniteNumber(copper) then
+    return "unknown"
+  end
+  local rounded = math.floor(math.abs(copper) + 0.5)
+  if copper < 0 and rounded > 0 then
+    return "|cffff6666-|r" .. Compat.FormatCopper(rounded)
+  elseif includePlus and rounded > 0 then
+    return "+" .. Compat.FormatCopper(rounded)
+  end
+  return Compat.FormatCopper(rounded)
+end
+
+function Compat.GetCharacterKey()
+  local name = (ns.State and ns.State.overrideCharName) or (UnitName and UnitName("player")) or "Unknown"
+  local realm = (ns.State and ns.State.overrideRealmName) or (GetRealmName and GetRealmName()) or "forever"
+  return name, realm, string.format("%s-%s", name, realm)
+end
+
+function Compat.GetCurrentFaction()
+  if ns.State and ns.State.overrideFaction ~= nil then
+    return ns.State.overrideFaction
+  end
+  if type(UnitFactionGroup) == "function" then
+    local f = UnitFactionGroup("player")
+    if f == "Alliance" then
+      return true
+    elseif f == "Horde" then
+      return false
+    end
+  end
+  return nil
+end
+
+function Compat.Print(msg)
+  local prefix = "|cff00ccff[ForeverHub]|r "
+  if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
+    DEFAULT_CHAT_FRAME:AddMessage(prefix .. tostring(msg))
+  else
+    print(prefix .. tostring(msg))
+  end
+end
+
+-- ============================================================================
+-- v0.4.0 Typed Capability Results (Astra P0-G / P1-G / P1-H)
+-- Never translate API failure, secret values, or uncached items into false, 0,
+-- or (0, 0) coordinates.
+-- ============================================================================
+
+function Compat.IsSecretOrRestrictedValue(v)
+  if type(_G.issecretvalue) == "function" then
+    local ok, isSecret = pcall(_G.issecretvalue, v)
+    if ok and isSecret == true then
+      return true
+    end
+  end
+  return false
+end
+
+function Compat.GetPlayerFactionString()
+  if ns.State and type(ns.State.overrideFactionString) == "string" then
+    return ns.State.overrideFactionString
+  end
+  local b = Compat.GetCurrentFaction()
+  if b == true then
+    return "Alliance"
+  elseif b == false then
+    return "Horde"
+  end
+  if type(UnitFactionGroup) == "function" then
+    local ok, f = pcall(UnitFactionGroup, "player")
+    if ok and type(f) == "string" and not Compat.IsSecretOrRestrictedValue(f) and f ~= "" then
+      return f
+    end
+  end
+  return nil
+end
+
+function Compat.GetPlayerClassAndRace()
+  local classToken = ns.State and ns.State.overridePlayerClass or nil
+  local raceToken = ns.State and ns.State.overridePlayerRace or nil
+  if not classToken and type(UnitClass) == "function" then
+    local ok, _, engClass = pcall(UnitClass, "player")
+    if ok and type(engClass) == "string" and not Compat.IsSecretOrRestrictedValue(engClass) then
+      classToken = engClass
+    end
+  end
+  if not raceToken and type(UnitRace) == "function" then
+    local ok, _, engRace = pcall(UnitRace, "player")
+    if ok and type(engRace) == "string" and not Compat.IsSecretOrRestrictedValue(engRace) then
+      raceToken = engRace
+    end
+  end
+  return {
+    classToken = classToken,
+    raceToken = raceToken,
+  }
+end
+
+Compat.recentQuestAcceptedByID = Compat.recentQuestAcceptedByID or {}
+Compat.recentQuestAcceptedByTitle = Compat.recentQuestAcceptedByTitle or {}
+Compat.recentQuestTurnedInByID = Compat.recentQuestTurnedInByID or {}
+Compat.recentQuestTurnedInByTitle = Compat.recentQuestTurnedInByTitle or {}
+Compat.observedLogTitlesByID = Compat.observedLogTitlesByID or {}
+Compat.lastDialogQuest = Compat.lastDialogQuest or { questID = nil, rawTitle = nil, normTitle = nil, capturedAt = 0 }
+Compat.bulkCompletedCache = Compat.bulkCompletedCache or { expiresAt = 0, map = nil }
+Compat.liveQuestLogCache = Compat.liveQuestLogCache or { expiresAt = 0, data = nil }
+
+local RECENT_ACCEPT_TTL_SECONDS = 3.5
+local RECENT_TURNIN_TTL_SECONDS = 8.0
+local BULK_COMPLETED_TTL_SECONDS = 2.0
+local LIVE_QUESTLOG_CACHE_TTL_SECONDS = 0.25
+
+function Compat.NowSeconds()
+  if type(GetTime) == "function" then
+    local ok, t = pcall(GetTime)
+    if ok and type(t) == "number" then
+      return t
+    end
+  end
+  if os and type(os.clock) == "function" then
+    return os.clock()
+  end
+  if type(time) == "function" then
+    return time()
+  end
+  return 0
+end
+
+function Compat.NormalizeQuestTitle(rawTitle)
+  if type(rawTitle) ~= "string" or Compat.IsSecretOrRestrictedValue(rawTitle) then
+    return nil
+  end
+  local s = rawTitle
+  if string.sub(string.lower(s), 1, 6) == "title:" then
+    s = string.sub(s, 7)
+  end
+  s = string.gsub(s, "|c%x%x%x%x%x%x%x%x", "")
+  s = string.gsub(s, "|r", "")
+  s = string.gsub(s, "^%s*%[%d+%+?%a*%]%s*", "")
+  s = string.gsub(s, "%s*%([Ee]lite%)%s*$", "")
+  s = string.gsub(s, "%s*%([Dd]ungeon%)%s*$", "")
+  s = string.gsub(s, "%s*%([Gg]roup%)%s*$", "")
+  s = string.gsub(s, "%s+", " ")
+  s = string.gsub(s, "^%s+", "")
+  s = string.gsub(s, "%s+$", "")
+  if s == "" then
+    return nil
+  end
+  return string.lower(s)
+end
+
+function Compat.InvalidateQuestStateCaches()
+  Compat.bulkCompletedCache = { expiresAt = 0, map = nil }
+  Compat.liveQuestLogCache = { expiresAt = 0, data = nil }
+end
+
+function Compat.LookupRouteQuestMeta(questRef)
+  local route = ns.RivergladesData and ns.RivergladesData.route
+  if type(route) ~= "table" then
+    return nil
+  end
+  local qid = tonumber(questRef)
+  if qid and type(route.questsByID) == "table" and type(route.questsByID[qid]) == "table" then
+    return route.questsByID[qid]
+  end
+  if type(questRef) == "string" and type(route.questsByTitleKey) == "table" then
+    local direct = route.questsByTitleKey[questRef]
+    if type(direct) == "table" then
+      return direct
+    end
+    local norm = Compat.NormalizeQuestTitle(questRef)
+    if norm and type(route.questsByTitleKey["title:" .. norm]) == "table" then
+      return route.questsByTitleKey["title:" .. norm]
+    end
+  end
+  return nil
+end
+
+function Compat.CaptureQuestDialogIdentity()
+  local qid = nil
+  local rawTitle = nil
+  if type(GetQuestID) == "function" then
+    local ok, id = pcall(GetQuestID)
+    if ok and not Compat.IsSecretOrRestrictedValue(id) then
+      id = tonumber(id)
+      if id and id > 0 then
+        qid = id
+      end
+    end
+  end
+  if type(GetTitleText) == "function" then
+    local ok, t = pcall(GetTitleText)
+    if ok and type(t) == "string" and not Compat.IsSecretOrRestrictedValue(t) and t ~= "" then
+      rawTitle = t
+    end
+  end
+  local normTitle = Compat.NormalizeQuestTitle(rawTitle)
+  Compat.lastDialogQuest = {
+    questID = qid,
+    rawTitle = rawTitle,
+    normTitle = normTitle,
+    capturedAt = Compat.NowSeconds(),
+  }
+  if qid and normTitle then
+    Compat.observedLogTitlesByID[qid] = normTitle
+    if ns.State and type(ns.State.RecordDiscoveredQuestId) == "function" then
+      ns.State.RecordDiscoveredQuestId(normTitle, qid)
+    end
+  end
+  return Compat.lastDialogQuest
+end
+
+function Compat.ScanLiveQuestLog(allowCollapsedExpand)
+  local now = Compat.NowSeconds()
+  if
+    not allowCollapsedExpand
+    and Compat.liveQuestLogCache
+    and Compat.liveQuestLogCache.data
+    and now < (Compat.liveQuestLogCache.expiresAt or 0)
+  then
+    return Compat.liveQuestLogCache.data
+  end
+
+  local result = {
+    available = false,
+    byID = {},
+    byTitle = {},
+    numQuests = 0,
+    visibleQuestCount = 0,
+    hasCollapsedHeaders = false,
+    enumerationComplete = false,
+  }
+
+  local canUseModern = C_QuestLog
+    and type(C_QuestLog.GetNumQuestLogEntries) == "function"
+    and type(C_QuestLog.GetInfo) == "function"
+  local canUseClassic = type(GetNumQuestLogEntries) == "function" and type(GetQuestLogTitle) == "function"
+
+  if not canUseModern and not canUseClassic then
+    return result
+  end
+
+  local canSafelyExpand = false
+  if allowCollapsedExpand == true and not Compat.IsInCombat() then
+    local qfShown = (_G.QuestLogFrame and type(_G.QuestLogFrame.IsShown) == "function" and _G.QuestLogFrame:IsShown()) or false
+    local wmShown = (_G.WorldMapFrame and type(_G.WorldMapFrame.IsShown) == "function" and _G.WorldMapFrame:IsShown()) or false
+    if not qfShown and not wmShown then
+      canSafelyExpand = true
+    end
+  end
+
+  local collapsedHeaderTitles = {}
+  if canSafelyExpand and type(ExpandQuestHeader) == "function" and type(CollapseQuestHeader) == "function" then
+    local okN, numEntries = pcall(canUseModern and C_QuestLog.GetNumQuestLogEntries or GetNumQuestLogEntries)
+    if okN and type(numEntries) == "number" and numEntries > 0 then
+      for i = numEntries, 1, -1 do
+        local hTitle, isHeader, isCollapsed = nil, false, false
+        if canUseModern then
+          local okI, info = pcall(C_QuestLog.GetInfo, i)
+          if okI and type(info) == "table" then
+            hTitle = info.title
+            isHeader = (info.isHeader == true)
+            isCollapsed = (info.isCollapsed == true)
+          end
+        else
+          local okR, t, _, _, hdr, col = pcall(GetQuestLogTitle, i)
+          if okR then
+            hTitle = t
+            isHeader = (hdr == true or hdr == 1)
+            isCollapsed = (col == true or col == 1)
+          end
+        end
+        if isHeader and isCollapsed and type(hTitle) == "string" then
+          collapsedHeaderTitles[hTitle] = true
+          pcall(ExpandQuestHeader, i)
+        end
+      end
+    end
+  end
+
+  local totalEntriesRead = 0
+  local nonNilEntryCount = 0
+  local visibleQuestCount = 0
+
+  if canUseModern then
+    local okN, numEntries, nQuests = pcall(C_QuestLog.GetNumQuestLogEntries)
+    if okN and type(numEntries) == "number" then
+      result.available = true
+      result.numQuests = tonumber(nQuests) or 0
+      totalEntriesRead = numEntries
+      for i = 1, numEntries do
+        local okI, info = pcall(C_QuestLog.GetInfo, i)
+        if okI and type(info) == "table" then
+          nonNilEntryCount = nonNilEntryCount + 1
+          if info.isHeader == true then
+            if info.isCollapsed == true then
+              result.hasCollapsedHeaders = true
+            end
+          elseif not info.isHidden then
+            visibleQuestCount = visibleQuestCount + 1
+            local qid = tonumber(info.questID)
+            if qid and qid <= 0 then
+              qid = nil
+            end
+            local rawTitle = type(info.title) == "string" and not Compat.IsSecretOrRestrictedValue(info.title) and info.title or nil
+            local normTitle = Compat.NormalizeQuestTitle(rawTitle)
+            local row = {
+              logIndex = i,
+              questID = qid,
+              title = rawTitle,
+              normTitle = normTitle,
+              isComplete = (info.isComplete == true or info.isComplete == 1),
+            }
+            if qid and qid > 0 then
+              result.byID[qid] = row
+            end
+            if normTitle then
+              result.byTitle[normTitle] = row
+              if qid and qid > 0 then
+                Compat.observedLogTitlesByID[qid] = normTitle
+                if ns.State and type(ns.State.RecordDiscoveredQuestId) == "function" then
+                  ns.State.RecordDiscoveredQuestId(normTitle, qid)
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  elseif canUseClassic then
+    local okN, numEntries, nQuests = pcall(GetNumQuestLogEntries)
+    if okN and type(numEntries) == "number" then
+      result.available = true
+      result.numQuests = tonumber(nQuests) or 0
+      totalEntriesRead = numEntries
+      for i = 1, numEntries do
+        local okR, rawTitle, _, _, isHeader, isCollapsed, isComplete, _, qID = pcall(GetQuestLogTitle, i)
+        if okR and rawTitle ~= nil then
+          nonNilEntryCount = nonNilEntryCount + 1
+          if isHeader == true or isHeader == 1 then
+            if isCollapsed == true or isCollapsed == 1 then
+              result.hasCollapsedHeaders = true
+            end
+          else
+            visibleQuestCount = visibleQuestCount + 1
+            local qid = tonumber(qID)
+            if qid and qid <= 0 then
+              qid = nil
+            end
+            local cleanTitle = type(rawTitle) == "string" and not Compat.IsSecretOrRestrictedValue(rawTitle) and rawTitle or nil
+            local normTitle = Compat.NormalizeQuestTitle(cleanTitle)
+            local row = {
+              logIndex = i,
+              questID = qid,
+              title = cleanTitle,
+              normTitle = normTitle,
+              isComplete = (isComplete == true or isComplete == 1),
+            }
+            if qid and qid > 0 then
+              result.byID[qid] = row
+            end
+            if normTitle then
+              result.byTitle[normTitle] = row
+              if qid and qid > 0 then
+                Compat.observedLogTitlesByID[qid] = normTitle
+                if ns.State and type(ns.State.RecordDiscoveredQuestId) == "function" then
+                  ns.State.RecordDiscoveredQuestId(normTitle, qid)
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  result.visibleQuestCount = visibleQuestCount
+  if result.available then
+    local hiddenQuestGap = (nonNilEntryCount == totalEntriesRead)
+      and (result.numQuests > 0)
+      and (visibleQuestCount < result.numQuests)
+    result.enumerationComplete = (not result.hasCollapsedHeaders) and (not hiddenQuestGap)
+  end
+
+  local didTemporaryExpand = next(collapsedHeaderTitles) ~= nil
+  if didTemporaryExpand and type(CollapseQuestHeader) == "function" then
+    local okN2, numEntries2 = pcall(canUseModern and C_QuestLog.GetNumQuestLogEntries or GetNumQuestLogEntries)
+    if okN2 and type(numEntries2) == "number" then
+      for i = numEntries2, 1, -1 do
+        local hTitle, isHeader = nil, false
+        if canUseModern then
+          local okI, info = pcall(C_QuestLog.GetInfo, i)
+          if okI and type(info) == "table" then
+            hTitle = info.title
+            isHeader = (info.isHeader == true)
+          end
+        else
+          local okR, t, _, _, hdr = pcall(GetQuestLogTitle, i)
+          if okR then
+            hTitle = t
+            isHeader = (hdr == true or hdr == 1)
+          end
+        end
+        if isHeader and type(hTitle) == "string" and collapsedHeaderTitles[hTitle] then
+          pcall(CollapseQuestHeader, i)
+        end
+      end
+    end
+    -- Never leave pre-collapse expanded logIndex values on returned rows or in liveQuestLogCache
+    for _, row in pairs(result.byID) do
+      row.logIndex = nil
+    end
+    for _, row in pairs(result.byTitle) do
+      row.logIndex = nil
+    end
+    return result
+  end
+
+  Compat.liveQuestLogCache = {
+    expiresAt = now + LIVE_QUESTLOG_CACHE_TTL_SECONDS,
+    data = result,
+  }
+  return result
+end
+
+function Compat.ResolveFreshQuestLogIndex(questID, normTitle)
+  local qid = tonumber(questID)
+  if qid and qid <= 0 then
+    qid = nil
+  end
+  local canUseModern = C_QuestLog
+    and type(C_QuestLog.GetNumQuestLogEntries) == "function"
+    and type(C_QuestLog.GetInfo) == "function"
+  local canUseClassic = type(GetNumQuestLogEntries) == "function" and type(GetQuestLogTitle) == "function"
+
+  if canUseModern then
+    local okN, numEntries = pcall(C_QuestLog.GetNumQuestLogEntries)
+    if okN and type(numEntries) == "number" then
+      for i = 1, numEntries do
+        local okI, info = pcall(C_QuestLog.GetInfo, i)
+        if okI and type(info) == "table" and not info.isHeader and not info.isHidden then
+          local rowQid = tonumber(info.questID)
+          if rowQid and rowQid <= 0 then
+            rowQid = nil
+          end
+          local rawTitle = type(info.title) == "string" and not Compat.IsSecretOrRestrictedValue(info.title) and info.title or nil
+          local rowNorm = Compat.NormalizeQuestTitle(rawTitle)
+          local isComp = (info.isComplete == true or info.isComplete == 1)
+          if qid and rowQid == qid then
+            return i, isComp
+          end
+          if normTitle and rowNorm == normTitle and (not qid or not rowQid or rowQid == qid) then
+            return i, isComp
+          end
+        end
+      end
+    end
+  elseif canUseClassic then
+    local okN, numEntries = pcall(GetNumQuestLogEntries)
+    if okN and type(numEntries) == "number" then
+      for i = 1, numEntries do
+        local okR, rawTitle, _, _, isHeader, _, isComplete, _, qID = pcall(GetQuestLogTitle, i)
+        if okR and not (isHeader == true or isHeader == 1) then
+          local rowQid = tonumber(qID)
+          if rowQid and rowQid <= 0 then
+            rowQid = nil
+          end
+          local cleanTitle = type(rawTitle) == "string" and not Compat.IsSecretOrRestrictedValue(rawTitle) and rawTitle or nil
+          local rowNorm = Compat.NormalizeQuestTitle(cleanTitle)
+          local isComp = (isComplete == true or isComplete == 1)
+          if qid and rowQid == qid then
+            return i, isComp
+          end
+          if normTitle and rowNorm == normTitle and (not qid or not rowQid or rowQid == qid) then
+            return i, isComp
+          end
+        end
+      end
+    end
+  end
+  return nil, false
+end
+
+function Compat.ResolveQuestIdentity(questRef)
+  local qid = tonumber(questRef)
+  if qid and qid <= 0 then
+    qid = nil
+  end
+  local meta = Compat.LookupRouteQuestMeta(questRef)
+  if not qid and meta and tonumber(meta.questID) and tonumber(meta.questID) > 0 then
+    qid = tonumber(meta.questID)
+  end
+  local identityConfidence = qid and "catalog_id" or "title_only_unresolved"
+  local normTitle = nil
+  if meta and type(meta.name) == "string" then
+    normTitle = Compat.NormalizeQuestTitle(meta.name)
+  elseif type(questRef) == "string" then
+    normTitle = Compat.NormalizeQuestTitle(questRef)
+  elseif qid then
+    normTitle = Compat.observedLogTitlesByID[qid]
+      or (ns.State and type(ns.State.GetDiscoveredQuestTitle) == "function" and ns.State.GetDiscoveredQuestTitle(qid))
+      or nil
+  end
+
+  if not qid and normTitle then
+    if ns.State and type(ns.State.GetDiscoveredQuestId) == "function" then
+      qid = ns.State.GetDiscoveredQuestId(normTitle)
+      if qid then
+        identityConfidence = "discovered_id"
+      end
+    end
+    if not qid then
+      local scan = Compat.ScanLiveQuestLog(false)
+      local liveRow = scan.available and scan.byTitle[normTitle] or nil
+      if liveRow then
+        if (tonumber(liveRow.questID) or 0) > 0 then
+          qid = tonumber(liveRow.questID)
+          identityConfidence = "live_log_id"
+        else
+          identityConfidence = "title_only_active"
+        end
+      end
+    end
+  end
+  return qid, normTitle, meta, identityConfidence
+end
+
+local function resolveKnownTitleForQuestID(qid)
+  if not qid or qid <= 0 then
+    return nil
+  end
+  if Compat.liveQuestLogCache and Compat.liveQuestLogCache.data and Compat.liveQuestLogCache.data.byID[qid] then
+    local t = Compat.liveQuestLogCache.data.byID[qid].normTitle
+    if type(t) == "string" and t ~= "" then
+      return t
+    end
+  end
+  if type(Compat.observedLogTitlesByID[qid]) == "string" and Compat.observedLogTitlesByID[qid] ~= "" then
+    return Compat.observedLogTitlesByID[qid]
+  end
+  if ns.State and type(ns.State.GetDiscoveredQuestTitle) == "function" then
+    local dt = ns.State.GetDiscoveredQuestTitle(qid)
+    if type(dt) == "string" and dt ~= "" then
+      return dt
+    end
+  end
+  local meta = Compat.LookupRouteQuestMeta(qid)
+  if meta and type(meta.name) == "string" then
+    return Compat.NormalizeQuestTitle(meta.name)
+  end
+  return nil
+end
+
+local function isDialogTitleCompatibleWithQuestID(dialogNormTitle, qid)
+  if type(dialogNormTitle) ~= "string" or dialogNormTitle == "" then
+    return false
+  end
+  if not qid or qid <= 0 then
+    return true
+  end
+  local knownForID = resolveKnownTitleForQuestID(qid)
+  if knownForID and knownForID ~= dialogNormTitle then
+    return false
+  end
+  if ns.State and type(ns.State.GetDiscoveredQuestId) == "function" then
+    local existingDiscovered = ns.State.GetDiscoveredQuestId(dialogNormTitle)
+    if existingDiscovered and existingDiscovered ~= qid then
+      return false
+    end
+  end
+  local route = ns.RivergladesData and ns.RivergladesData.route
+  if type(route) == "table" and type(route.questsByID) == "table" then
+    for catID, qEntry in pairs(route.questsByID) do
+      if type(qEntry) == "table" and Compat.NormalizeQuestTitle(qEntry.name) == dialogNormTitle and tonumber(catID) ~= qid then
+        return false
+      end
+    end
+  end
+  return true
+end
+
+function Compat.RecordRecentQuestAccepted(questID, rawTitle)
+  local now = Compat.NowSeconds()
+  local qid = tonumber(questID)
+  if qid and qid <= 0 then
+    qid = nil
+  end
+  local normTitle = Compat.NormalizeQuestTitle(rawTitle)
+  if not normTitle and qid then
+    normTitle = resolveKnownTitleForQuestID(qid)
+  end
+  if not normTitle and Compat.lastDialogQuest and (now - (Compat.lastDialogQuest.capturedAt or 0)) <= 6.0 then
+    local dQid = Compat.lastDialogQuest.questID
+    local dNorm = Compat.lastDialogQuest.normTitle
+    if (not qid or not dQid or dQid == qid) and isDialogTitleCompatibleWithQuestID(dNorm, qid or dQid) then
+      normTitle = dNorm
+      qid = qid or dQid
+    end
+  end
+  if qid and qid > 0 then
+    Compat.recentQuestAcceptedByID[qid] = now + RECENT_ACCEPT_TTL_SECONDS
+    Compat.recentQuestTurnedInByID[qid] = nil
+    if normTitle then
+      Compat.observedLogTitlesByID[qid] = normTitle
+      if ns.State and type(ns.State.RecordDiscoveredQuestId) == "function" then
+        ns.State.RecordDiscoveredQuestId(normTitle, qid)
+      end
+    end
+  end
+  if normTitle then
+    Compat.recentQuestAcceptedByTitle[normTitle] = now + RECENT_ACCEPT_TTL_SECONDS
+    Compat.recentQuestTurnedInByTitle[normTitle] = nil
+    if ns.State and type(ns.State.ClearUnresolvedQuestConfirmation) == "function" then
+      ns.State.ClearUnresolvedQuestConfirmation(normTitle)
+    end
+    if _G.ForeverHubCharDB and type(_G.ForeverHubCharDB.routeProgress) == "table" then
+      local uct = _G.ForeverHubCharDB.routeProgress.userConfirmedCompletedQuestTitles
+      if type(uct) == "table" then
+        uct[normTitle] = nil
+        uct["title:" .. normTitle] = nil
+      end
+    end
+  end
+  Compat.InvalidateQuestStateCaches()
+end
+
+function Compat.RecordRecentQuestTurnedIn(questID, rawTitle)
+  local now = Compat.NowSeconds()
+  local qid = tonumber(questID)
+  if qid and qid <= 0 then
+    qid = nil
+  end
+  local normTitle = Compat.NormalizeQuestTitle(rawTitle)
+  if not normTitle and qid then
+    normTitle = resolveKnownTitleForQuestID(qid)
+  end
+  if not normTitle and Compat.lastDialogQuest and (now - (Compat.lastDialogQuest.capturedAt or 0)) <= 6.0 then
+    local dQid = Compat.lastDialogQuest.questID
+    local dNorm = Compat.lastDialogQuest.normTitle
+    if (not qid or not dQid or dQid == qid) and isDialogTitleCompatibleWithQuestID(dNorm, qid or dQid) then
+      normTitle = dNorm
+      qid = qid or dQid
+    end
+  end
+  if qid and qid > 0 then
+    Compat.recentQuestTurnedInByID[qid] = now + RECENT_TURNIN_TTL_SECONDS
+    Compat.recentQuestAcceptedByID[qid] = nil
+    if ns.State and type(ns.State.RecordCompletedQuestId) == "function" then
+      ns.State.RecordCompletedQuestId(qid)
+    end
+    if normTitle then
+      Compat.observedLogTitlesByID[qid] = normTitle
+      if ns.State and type(ns.State.RecordDiscoveredQuestId) == "function" then
+        ns.State.RecordDiscoveredQuestId(normTitle, qid)
+      end
+    end
+  end
+  if normTitle then
+    Compat.recentQuestTurnedInByTitle[normTitle] = now + RECENT_TURNIN_TTL_SECONDS
+    Compat.recentQuestAcceptedByTitle[normTitle] = nil
+    if ns.State and type(ns.State.RecordCompletedQuestTitle) == "function" then
+      ns.State.RecordCompletedQuestTitle(normTitle)
+    end
+  end
+  Compat.InvalidateQuestStateCaches()
+end
+
+function Compat.RecordRecentQuestRemoved(questID)
+  local qid = tonumber(questID)
+  if qid and qid > 0 then
+    Compat.recentQuestAcceptedByID[qid] = nil
+  end
+  Compat.InvalidateQuestStateCaches()
+end
+
+function Compat.CheckBulkQuestCompleted(questID)
+  local qid = tonumber(questID)
+  if not qid then
+    return false
+  end
+  local now = Compat.NowSeconds()
+  if not Compat.bulkCompletedCache.map or now >= (Compat.bulkCompletedCache.expiresAt or 0) then
+    local map = nil
+    if C_QuestLog and type(C_QuestLog.GetAllCompletedQuestIDs) == "function" then
+      local ok, list = pcall(C_QuestLog.GetAllCompletedQuestIDs)
+      if ok and type(list) == "table" and not Compat.IsSecretOrRestrictedValue(list) then
+        map = {}
+        for _, id in ipairs(list) do
+          local n = tonumber(id)
+          if n then
+            map[n] = true
+          end
+        end
+      end
+    elseif type(GetQuestsCompleted) == "function" then
+      local ok, tbl = pcall(GetQuestsCompleted)
+      if ok and type(tbl) == "table" and not Compat.IsSecretOrRestrictedValue(tbl) then
+        map = tbl
+      end
+    end
+    Compat.bulkCompletedCache = {
+      expiresAt = now + BULK_COMPLETED_TTL_SECONDS,
+      map = map,
+    }
+  end
+  if type(Compat.bulkCompletedCache.map) == "table" and Compat.bulkCompletedCache.map[qid] == true then
+    return true
+  end
+  return false
+end
+
+function Compat.IsQuestCompletedResult(questRef)
+  if questRef == nil then
+    return { status = "unknown", value = nil, reason = "invalid_quest_id" }
+  end
+  local questID, normTitle, _, identityConfidence = Compat.ResolveQuestIdentity(questRef)
+  if not questID and not normTitle then
+    return { status = "unknown", value = nil, reason = "invalid_quest_id" }
+  end
+
+  if ns.State and type(ns.State.overrideCompletedQuests) == "table" then
+    local ov = ns.State.overrideCompletedQuests[questRef]
+    if ov == nil and questID then
+      ov = ns.State.overrideCompletedQuests[questID]
+    end
+    if ov == nil and normTitle then
+      ov = ns.State.overrideCompletedQuests["title:" .. normTitle]
+    end
+    if ov == "unknown" or ov == "unavailable" or ov == "restricted" then
+      return { status = ov, value = nil, reason = "override_" .. ov, identityConfidence = identityConfidence }
+    elseif type(ov) == "boolean" then
+      return { status = "ok", value = ov, identityConfidence = identityConfidence }
+    else
+      return { status = "ok", value = false, identityConfidence = identityConfidence }
+    end
+  end
+
+  local now = Compat.NowSeconds()
+  if questID and (Compat.recentQuestTurnedInByID[questID] or 0) > now then
+    return { status = "ok", value = true, source = "recent_turnin_cache", identityConfidence = identityConfidence }
+  end
+  if normTitle and (Compat.recentQuestTurnedInByTitle[normTitle] or 0) > now then
+    return { status = "ok", value = true, source = "recent_turnin_title_cache", identityConfidence = identityConfidence }
+  end
+  if questID and ns.State and type(ns.State.IsObservedCompletedQuestId) == "function" and ns.State.IsObservedCompletedQuestId(questID) then
+    return { status = "ok", value = true, source = "observed_id_history", identityConfidence = identityConfidence }
+  end
+  if normTitle and _G.ForeverHubCharDB and type(_G.ForeverHubCharDB.routeProgress) == "table" then
+    local obsTitles = _G.ForeverHubCharDB.routeProgress.observedCompletedQuestTitles
+    if type(obsTitles) == "table" and obsTitles[normTitle] == true then
+      return { status = "ok", value = true, source = "observed_title_history", identityConfidence = identityConfidence }
+    end
+    local userConfirmed = _G.ForeverHubCharDB.routeProgress.userConfirmedCompletedQuestTitles
+    if type(userConfirmed) == "table" and userConfirmed[normTitle] == true then
+      return {
+        status = "ok",
+        value = true,
+        source = "user_confirmed",
+        completionSource = "user_confirmed",
+        identityConfidence = identityConfidence,
+      }
+    end
+  end
+
+  if not questID then
+    local onRes = Compat.IsOnQuestResult(questRef)
+    if onRes.status == "ok" and onRes.value == true then
+      return {
+        status = "ok",
+        value = false,
+        reason = "active_in_quest_log",
+        identityConfidence = "title_only_active",
+      }
+    end
+    if onRes.status == "restricted" then
+      return {
+        status = "restricted",
+        value = nil,
+        reason = onRes.reason or "secret_value",
+        identityConfidence = "title_only_unresolved",
+      }
+    end
+    if not ((C_QuestLog and type(C_QuestLog.IsQuestFlaggedCompleted) == "function") or type(IsQuestFlaggedCompleted) == "function") then
+      return {
+        status = "unavailable",
+        value = nil,
+        reason = "missing_quest_completion_api",
+        identityConfidence = "title_only_unresolved",
+      }
+    end
+    local userConfirmed = (
+      ns.State
+      and type(ns.State.IsUnresolvedQuestConfirmedIncomplete) == "function"
+      and ns.State.IsUnresolvedQuestConfirmedIncomplete(normTitle, type(questRef) == "string" and questRef or nil)
+    ) or false
+    return {
+      status = "unknown",
+      value = nil,
+      reason = "title_history_unresolved",
+      identityConfidence = "title_only_unresolved",
+      userConfirmedIncomplete = userConfirmed,
+    }
+  end
+
+  if C_QuestLog and type(C_QuestLog.IsQuestFlaggedCompleted) == "function" then
+    local ok, done = pcall(C_QuestLog.IsQuestFlaggedCompleted, questID)
+    if not ok then
+      return { status = "unavailable", value = nil, reason = "api_error", identityConfidence = identityConfidence }
+    end
+    if Compat.IsSecretOrRestrictedValue(done) then
+      return { status = "restricted", value = nil, reason = "secret_value", identityConfidence = identityConfidence }
+    end
+    if type(done) == "boolean" then
+      if done == true or Compat.CheckBulkQuestCompleted(questID) then
+        return { status = "ok", value = true, identityConfidence = identityConfidence }
+      end
+      return { status = "ok", value = false, identityConfidence = identityConfidence }
+    end
+    return { status = "unknown", value = nil, reason = "unexpected_return_type", identityConfidence = identityConfidence }
+  end
+  if type(IsQuestFlaggedCompleted) == "function" then
+    local ok, done = pcall(IsQuestFlaggedCompleted, questID)
+    if ok and not Compat.IsSecretOrRestrictedValue(done) then
+      if done == true or done == 1 or Compat.CheckBulkQuestCompleted(questID) then
+        return { status = "ok", value = true, identityConfidence = identityConfidence }
+      end
+      return { status = "ok", value = false, identityConfidence = identityConfidence }
+    end
+    return { status = "unavailable", value = nil, reason = "legacy_api_error", identityConfidence = identityConfidence }
+  end
+  return { status = "unavailable", value = nil, reason = "missing_quest_completion_api", identityConfidence = identityConfidence }
+end
+
+function Compat.IsOnQuestResult(questRef)
+  if questRef == nil then
+    return { status = "unknown", value = nil, reason = "invalid_quest_id" }
+  end
+  local questID, normTitle, _, identityConfidence = Compat.ResolveQuestIdentity(questRef)
+  if not questID and not normTitle then
+    return { status = "unknown", value = nil, reason = "invalid_quest_id" }
+  end
+
+  if ns.State and type(ns.State.overrideActiveQuests) == "table" then
+    local ov = ns.State.overrideActiveQuests[questRef]
+    if ov == nil and questID then
+      ov = ns.State.overrideActiveQuests[questID]
+    end
+    if ov == nil and normTitle then
+      ov = ns.State.overrideActiveQuests["title:" .. normTitle]
+    end
+    if ov == "unknown" or ov == "unavailable" or ov == "restricted" then
+      return { status = ov, value = nil, reason = "override_" .. ov, identityConfidence = identityConfidence }
+    end
+    return { status = "ok", value = (ov == true), identityConfidence = identityConfidence, observationCompleteness = "complete" }
+  end
+
+  local now = Compat.NowSeconds()
+  if questID and (Compat.recentQuestTurnedInByID[questID] or 0) > now then
+    return { status = "ok", value = false, source = "recent_turnin_cache", identityConfidence = identityConfidence, observationCompleteness = "complete" }
+  end
+  if normTitle and (Compat.recentQuestTurnedInByTitle[normTitle] or 0) > now then
+    return { status = "ok", value = false, source = "recent_turnin_title_cache", identityConfidence = identityConfidence, observationCompleteness = "complete" }
+  end
+  if questID and (Compat.recentQuestAcceptedByID[questID] or 0) > now then
+    return { status = "ok", value = true, source = "recent_accept_cache", identityConfidence = identityConfidence, observationCompleteness = "complete" }
+  end
+  if normTitle and (Compat.recentQuestAcceptedByTitle[normTitle] or 0) > now then
+    return { status = "ok", value = true, source = "recent_accept_title_cache", identityConfidence = identityConfidence, observationCompleteness = "complete" }
+  end
+
+  local scan = Compat.ScanLiveQuestLog(false)
+  local scanCompleteness = "unavailable"
+  if scan.available then
+    scanCompleteness = scan.enumerationComplete and "complete" or "incomplete_collapsed_headers"
+    if questID and scan.byID[questID] ~= nil then
+      return { status = "ok", value = true, identityConfidence = identityConfidence, observationCompleteness = scanCompleteness }
+    end
+    if normTitle and scan.byTitle[normTitle] ~= nil then
+      return { status = "ok", value = true, identityConfidence = identityConfidence, observationCompleteness = scanCompleteness }
+    end
+  end
+
+  if questID and C_QuestLog and type(C_QuestLog.IsOnQuest) == "function" then
+    local ok, onQ = pcall(C_QuestLog.IsOnQuest, questID)
+    if not ok then
+      return { status = "unavailable", value = nil, reason = "api_error", identityConfidence = identityConfidence, observationCompleteness = scanCompleteness }
+    end
+    if Compat.IsSecretOrRestrictedValue(onQ) then
+      return { status = "restricted", value = nil, reason = "secret_value", identityConfidence = identityConfidence, observationCompleteness = "restricted" }
+    end
+    if type(onQ) == "boolean" then
+      return { status = "ok", value = onQ, identityConfidence = identityConfidence, observationCompleteness = "complete" }
+    end
+    return { status = "unknown", value = nil, reason = "unexpected_return_type", identityConfidence = identityConfidence, observationCompleteness = scanCompleteness }
+  end
+
+  if scan.available then
+    if not scan.enumerationComplete then
+      return {
+        status = "unknown",
+        value = nil,
+        reason = "collapsed_quest_headers",
+        identityConfidence = identityConfidence,
+        observationCompleteness = "incomplete_collapsed_headers",
+      }
+    end
+    return {
+      status = "ok",
+      value = false,
+      identityConfidence = identityConfidence,
+      observationCompleteness = "complete",
+    }
+  end
+  return {
+    status = "unavailable",
+    value = nil,
+    reason = "missing_quest_log_api",
+    identityConfidence = identityConfidence,
+    observationCompleteness = "unavailable",
+  }
+end
+
+local function buildObjectivesSummaryText(parsed, allDone)
+  if allDone then
+    return "Ready to turn in"
+  end
+  if type(parsed) ~= "table" or #parsed == 0 then
+    return nil
+  end
+  local parts = {}
+  for _, row in ipairs(parsed) do
+    if row.finished ~= true then
+      local txt = type(row.text) == "string" and row.text or ""
+      txt = string.gsub(txt, "^%s*%-+%s*", "")
+      txt = string.gsub(txt, "^%s+", "")
+      txt = string.gsub(txt, "%s+$", "")
+      if txt == "" and row.numFulfilled ~= nil and row.numRequired ~= nil then
+        txt = string.format("%d/%d", row.numFulfilled, row.numRequired)
+      end
+      if txt ~= "" then
+        table.insert(parts, txt)
+      end
+      if #parts >= 2 then
+        break
+      end
+    end
+  end
+  if #parts == 0 then
+    return nil
+  end
+  return table.concat(parts, " • ")
+end
+
+function Compat.GetQuestObjectivesResult(questRef, opts)
+  if questRef == nil then
+    return { status = "unknown", allFinished = nil, objectives = {}, reason = "invalid_quest_id" }
+  end
+  local questID, normTitle, meta, identityConfidence = Compat.ResolveQuestIdentity(questRef)
+  if not questID and not normTitle then
+    return { status = "unknown", allFinished = nil, objectives = {}, reason = "invalid_quest_id" }
+  end
+  local isZeroObjectiveQuest = (type(opts) == "table" and opts.zeroObjectives == true)
+    or (type(meta) == "table" and meta.zeroObjectives == true)
+
+  if ns.State and type(ns.State.overrideQuestObjectives) == "table" then
+    local ov = ns.State.overrideQuestObjectives[questRef]
+    if ov == nil and questID then
+      ov = ns.State.overrideQuestObjectives[questID]
+    end
+    if ov == nil and normTitle then
+      ov = ns.State.overrideQuestObjectives["title:" .. normTitle]
+    end
+    if type(ov) == "string" then
+      return { status = ov, allFinished = nil, objectives = {}, reason = "override_" .. ov }
+    elseif type(ov) == "boolean" then
+      return { status = "ok", allFinished = ov, objectives = {}, summaryText = ov and "Ready to turn in" or nil }
+    elseif type(ov) == "table" then
+      if ov.status then
+        return ov
+      end
+      local allDone = (#ov > 0)
+      for _, row in ipairs(ov) do
+        if not (type(row) == "table" and row.finished == true) then
+          allDone = false
+          break
+        end
+      end
+      return { status = "ok", allFinished = allDone, objectives = ov, summaryText = buildObjectivesSummaryText(ov, allDone) }
+    end
+  end
+
+  if questID and C_QuestLog and type(C_QuestLog.IsComplete) == "function" then
+    local okComp, isComp = pcall(C_QuestLog.IsComplete, questID)
+    if okComp and Compat.IsSecretOrRestrictedValue(isComp) then
+      return { status = "restricted", allFinished = nil, objectives = {}, reason = "secret_value" }
+    end
+    if okComp and isComp == true then
+      return { status = "ok", allFinished = true, objectives = {}, summaryText = "Ready to turn in", provider = "modern_c_questlog" }
+    end
+  end
+
+  local scan = Compat.ScanLiveQuestLog(false)
+  if scan.available then
+    local logRow = (questID and scan.byID[questID]) or (normTitle and scan.byTitle[normTitle]) or nil
+    if logRow and logRow.isComplete == true then
+      return { status = "ok", allFinished = true, objectives = {}, summaryText = "Ready to turn in", provider = "quest_log_header_flag" }
+    end
+  end
+
+  -- Provider 1: Modern C_QuestLog.GetQuestObjectives (retains catalog questID; falls through to Classic leaderboards on error/nil/empty, NEVER bypassing restricted values!)
+  local modernFallbackReason = nil
+  if questID and C_QuestLog and type(C_QuestLog.GetQuestObjectives) == "function" then
+    local ok, objs = pcall(C_QuestLog.GetQuestObjectives, questID)
+    if not ok then
+      modernFallbackReason = "api_error"
+    elseif Compat.IsSecretOrRestrictedValue(objs) then
+      return { status = "restricted", allFinished = nil, objectives = {}, reason = "secret_value", identityConfidence = identityConfidence }
+    elseif type(objs) ~= "table" then
+      modernFallbackReason = "nil_objectives"
+    elseif #objs == 0 then
+      modernFallbackReason = "empty_objectives"
+    else
+      local parsed = {}
+      local allDone = true
+      for idx, row in ipairs(objs) do
+        if type(row) ~= "table" or Compat.IsSecretOrRestrictedValue(row.finished) then
+          return { status = "restricted", allFinished = nil, objectives = {}, reason = "restricted_objective_row", identityConfidence = identityConfidence }
+        end
+        local fin = (row.finished == true)
+        if not fin then
+          allDone = false
+        end
+        table.insert(parsed, {
+          index = idx,
+          text = type(row.text) == "string" and not Compat.IsSecretOrRestrictedValue(row.text) and row.text or "",
+          finished = fin,
+          numFulfilled = tonumber(row.numFulfilled),
+          numRequired = tonumber(row.numRequired),
+        })
+      end
+      return {
+        status = "ok",
+        allFinished = allDone,
+        objectives = parsed,
+        summaryText = buildObjectivesSummaryText(parsed, allDone),
+        provider = "modern_c_questlog",
+        identityConfidence = identityConfidence,
+      }
+    end
+  end
+
+  -- Provider 2: Classic Quest Log Leaderboards using a freshly verified live logIndex (even when live row had questID=0)
+  if type(GetNumQuestLeaderBoards) == "function" and type(GetQuestLogLeaderBoard) == "function" then
+    local freshIndex, freshComplete = Compat.ResolveFreshQuestLogIndex(questID, normTitle)
+    if freshIndex then
+      if freshComplete == true then
+        return {
+          status = "ok",
+          allFinished = true,
+          objectives = {},
+          summaryText = "Ready to turn in",
+          provider = "classic_leaderboards",
+          identityConfidence = identityConfidence,
+        }
+      end
+      local okLB, numLB = pcall(GetNumQuestLeaderBoards, freshIndex)
+      if okLB and Compat.IsSecretOrRestrictedValue(numLB) then
+        return { status = "restricted", allFinished = nil, objectives = {}, reason = "secret_value", identityConfidence = identityConfidence }
+      end
+      if okLB and type(numLB) == "number" then
+        if numLB == 0 then
+          return {
+            status = "ok",
+            allFinished = (isZeroObjectiveQuest == true),
+            objectives = {},
+            summaryText = isZeroObjectiveQuest and "Ready to turn in" or nil,
+            provider = "classic_leaderboards",
+            identityConfidence = identityConfidence,
+          }
+        end
+        local parsed = {}
+        local allDone = true
+        for j = 1, numLB do
+          local okItem, desc, _, finished = pcall(GetQuestLogLeaderBoard, j, freshIndex)
+          if okItem and Compat.IsSecretOrRestrictedValue(finished) then
+            return { status = "restricted", allFinished = nil, objectives = {}, reason = "restricted_objective_row", identityConfidence = identityConfidence }
+          end
+          local fin = (okItem and (finished == true or finished == 1)) or false
+          if not fin then
+            allDone = false
+          end
+          local cleanDesc = (type(desc) == "string" and not Compat.IsSecretOrRestrictedValue(desc)) and desc or ""
+          local nf, nr = nil, nil
+          if cleanDesc ~= "" then
+            local a, b = string.match(cleanDesc, "(%d+)%s*/%s*(%d+)")
+            nf = tonumber(a)
+            nr = tonumber(b)
+          end
+          table.insert(parsed, {
+            index = j,
+            text = cleanDesc,
+            finished = fin,
+            numFulfilled = nf,
+            numRequired = nr,
+          })
+        end
+        return {
+          status = "ok",
+          allFinished = allDone,
+          objectives = parsed,
+          summaryText = buildObjectivesSummaryText(parsed, allDone),
+          provider = "classic_leaderboards",
+          identityConfidence = identityConfidence,
+        }
+      end
+    end
+  end
+
+  if modernFallbackReason == "empty_objectives" then
+    local onRes = Compat.IsOnQuestResult(questRef)
+    if onRes.status == "ok" and onRes.value == true then
+      if isZeroObjectiveQuest then
+        return { status = "ok", allFinished = true, objectives = {}, summaryText = "Ready to turn in", identityConfidence = identityConfidence }
+      end
+      return { status = "ok", allFinished = false, objectives = {}, identityConfidence = identityConfidence }
+    end
+    return { status = "unknown", allFinished = nil, objectives = {}, reason = "empty_objectives", identityConfidence = identityConfidence }
+  elseif modernFallbackReason == "api_error" then
+    return { status = "unavailable", allFinished = nil, objectives = {}, reason = "api_error", identityConfidence = identityConfidence }
+  elseif modernFallbackReason == "nil_objectives" then
+    return { status = "unknown", allFinished = nil, objectives = {}, reason = "nil_objectives", identityConfidence = identityConfidence }
+  end
+
+  if not questID then
+    local onRes = Compat.IsOnQuestResult(questRef)
+    if onRes.status == "ok" and onRes.value == true and isZeroObjectiveQuest then
+      return { status = "ok", allFinished = true, objectives = {}, summaryText = "Ready to turn in", identityConfidence = identityConfidence }
+    end
+    if onRes.status ~= "ok" then
+      return { status = onRes.status, allFinished = nil, objectives = {}, reason = onRes.reason, identityConfidence = identityConfidence }
+    end
+    return { status = "ok", allFinished = false, objectives = {}, reason = "title_quest_not_active", identityConfidence = identityConfidence }
+  end
+  return { status = "unavailable", allFinished = nil, objectives = {}, reason = "missing_objectives_api", identityConfidence = identityConfidence }
+end
+
+function Compat.GetQuestEvidenceResult(questRef, opts)
+  opts = type(opts) == "table" and opts or {}
+  local questID, normTitle, meta, identityConfidence = Compat.ResolveQuestIdentity(questRef)
+  local questKey = (meta and meta.questKey) or (normTitle and ("title:" .. normTitle)) or nil
+  local activeRes = Compat.IsOnQuestResult(questRef)
+  local completedRes = Compat.IsQuestCompletedResult(questRef)
+  local objectivesRes = nil
+  if opts.includeObjectives then
+    objectivesRes = Compat.GetQuestObjectivesResult(questRef, opts)
+  end
+  local userConfirmed = (
+    ns.State
+    and type(ns.State.IsUnresolvedQuestConfirmedIncomplete) == "function"
+    and ns.State.IsUnresolvedQuestConfirmedIncomplete(normTitle, questKey, opts.progress)
+  ) or false
+  local observationCompleteness = activeRes.observationCompleteness or "complete"
+  if activeRes.status == "restricted" or completedRes.status == "restricted" or (objectivesRes and objectivesRes.status == "restricted") then
+    observationCompleteness = "restricted"
+  end
+  return {
+    questRef = questRef,
+    questID = questID,
+    normTitle = normTitle,
+    questKey = questKey,
+    identityConfidence = completedRes.identityConfidence or identityConfidence,
+    observationCompleteness = observationCompleteness,
+    active = activeRes,
+    completed = completedRes,
+    objectives = objectivesRes,
+    userConfirmedIncomplete = userConfirmed,
+    provenance = {
+      reviewStatus = meta and meta.reviewStatus or nil,
+      prereqConfidence = meta and meta.prereqConfidence or nil,
+    },
+  }
+end
+
+function Compat.IsQuestLogFullResult()
+  if ns.State and ns.State.overrideQuestLogFull ~= nil then
+    if type(ns.State.overrideQuestLogFull) == "boolean" then
+      return { status = "ok", value = ns.State.overrideQuestLogFull }
+    end
+    return { status = "unknown", value = nil }
+  end
+  local numQuests = nil
+  local maxQuests = 40
+  local hasExplicitApiMax = false
+  if C_QuestLog and type(C_QuestLog.GetNumQuestLogEntries) == "function" then
+    local ok, _, nQuests = pcall(C_QuestLog.GetNumQuestLogEntries)
+    if ok and type(nQuests) == "number" then
+      numQuests = nQuests
+    end
+    if type(C_QuestLog.GetMaxNumQuestsCanAccept) == "function" then
+      local okM, maxQ = pcall(C_QuestLog.GetMaxNumQuestsCanAccept)
+      if okM and type(maxQ) == "number" and maxQ > 0 then
+        maxQuests = maxQ
+        hasExplicitApiMax = true
+      end
+    end
+  elseif type(GetNumQuestLogEntries) == "function" then
+    local ok, _, nQuests = pcall(GetNumQuestLogEntries)
+    if ok and type(nQuests) == "number" then
+      numQuests = nQuests
+    end
+  end
+  local tocVersion = nil
+  if type(GetBuildInfo) == "function" then
+    local okB, _, _, _, t = pcall(GetBuildInfo)
+    if okB then
+      tocVersion = tonumber(t)
+    end
+  end
+  if tocVersion == 16001 and maxQuests < 40 then
+    -- WoW: Forever raises the active Quest Log cap to 40 quests
+    maxQuests = 40
+  elseif not hasExplicitApiMax then
+    maxQuests = math.max(maxQuests, tonumber(_G.MAX_QUESTLOG_QUESTS) or 0, tonumber(_G.MAX_QUESTS) or 0)
+  end
+  if type(numQuests) == "number" then
+    if numQuests > maxQuests then
+      maxQuests = numQuests
+    end
+    return { status = "ok", value = (numQuests >= maxQuests), count = numQuests, max = maxQuests }
+  end
+  return { status = "unknown", value = nil }
+end
+
+function Compat.ValidateUiMap(uiMapID)
+  uiMapID = tonumber(uiMapID)
+  if not uiMapID then
+    return { status = "unknown", value = false, reason = "invalid_uimap_id" }
+  end
+  if ns.State and type(ns.State.overrideValidUiMaps) == "table" then
+    local ov = ns.State.overrideValidUiMaps[uiMapID]
+    if ov == "unavailable" or ov == "unknown" then
+      return { status = ov, value = nil, reason = "override_" .. ov }
+    end
+    return { status = "ok", value = (ov == true) }
+  end
+  if C_Map and type(C_Map.GetMapInfo) == "function" then
+    local ok, info = pcall(C_Map.GetMapInfo, uiMapID)
+    if not ok then
+      return { status = "unavailable", value = nil, reason = "get_map_info_failed" }
+    end
+    if Compat.IsSecretOrRestrictedValue(info) then
+      return { status = "restricted", value = nil, reason = "secret_map_info" }
+    end
+    if type(info) == "table" and tonumber(info.mapID) == uiMapID then
+      return { status = "ok", value = true, mapInfo = info }
+    end
+    return { status = "ok", value = false, reason = "map_not_found" }
+  end
+  return { status = "unavailable", value = nil, reason = "missing_c_map" }
+end
+
+function Compat.GetPlayerUiMapIDRaw()
+  if ns.State and type(ns.State.overridePlayerPosition) == "table" then
+    local pos = ns.State.overridePlayerPosition
+    if pos.status and pos.status ~= "ok" then
+      return false, nil
+    end
+    local m = tonumber(pos.uiMapID)
+    if Compat.IsFiniteNumber(m) and m > 0 then
+      return true, m
+    end
+    return false, nil
+  end
+  if C_Map and type(C_Map.GetBestMapForUnit) == "function" then
+    local okMap, mapID = pcall(C_Map.GetBestMapForUnit, "player")
+    if okMap and not Compat.IsSecretOrRestrictedValue(mapID) then
+      mapID = tonumber(mapID)
+      if Compat.IsFiniteNumber(mapID) and mapID > 0 then
+        return true, mapID
+      end
+    end
+  end
+  return false, nil
+end
+
+-- Zero-allocation raw position helper returning `(status, uiMapID, x01, y01, reason)` on the Lua stack.
+function Compat.GetPlayerPosition01Raw()
+  if ns.State and type(ns.State.overridePlayerPosition) == "table" then
+    local pos = ns.State.overridePlayerPosition
+    if pos.status and pos.status ~= "ok" then
+      return tostring(pos.status), nil, nil, nil, pos.reason or "override_not_ok"
+    end
+    local x = tonumber(pos.x01)
+    local y = tonumber(pos.y01)
+    local m = tonumber(pos.uiMapID)
+    if not Compat.IsFiniteNumber(m) or not Compat.IsFiniteNumber(x) or not Compat.IsFiniteNumber(y)
+      or (x == 0 and y == 0) or x < 0 or x > 1 or y < 0 or y > 1
+    then
+      return "unavailable", nil, nil, nil, "invalid_or_zero_override_coords"
+    end
+    return "ok", m, x, y, nil
+  end
+  if not (C_Map and type(C_Map.GetBestMapForUnit) == "function" and type(C_Map.GetPlayerMapPosition) == "function") then
+    return "unavailable", nil, nil, nil, "missing_map_position_api"
+  end
+  local okMap, mapID = pcall(C_Map.GetBestMapForUnit, "player")
+  if not okMap or Compat.IsSecretOrRestrictedValue(mapID) or not Compat.IsFiniteNumber(mapID) or mapID <= 0 then
+    return "unavailable", nil, nil, nil, "player_map_unavailable"
+  end
+  local okPos, posObj = pcall(C_Map.GetPlayerMapPosition, mapID, "player")
+  if not okPos or not posObj or Compat.IsSecretOrRestrictedValue(posObj) or type(posObj.GetXY) ~= "function" then
+    return "unavailable", nil, nil, nil, "player_position_nil_or_restricted"
+  end
+  local okXY, x, y = pcall(posObj.GetXY, posObj)
+  if not okXY or Compat.IsSecretOrRestrictedValue(x) or Compat.IsSecretOrRestrictedValue(y) then
+    return "restricted", nil, nil, nil, "secret_xy"
+  end
+  x = tonumber(x)
+  y = tonumber(y)
+  -- Never treat (0, 0), NaN, or out-of-bounds sentinel as a valid coordinate!
+  if not Compat.IsFiniteNumber(x) or not Compat.IsFiniteNumber(y)
+    or (x <= 0 and y <= 0) or x < 0 or x > 1 or y < 0 or y > 1
+  then
+    return "unavailable", nil, nil, nil, "zero_or_out_of_bounds_xy"
+  end
+  return "ok", mapID, x, y, nil
+end
+
+function Compat.GetPlayerPosition01()
+  if ns.State and type(ns.State.overridePlayerPosition) == "table" then
+    local pos = ns.State.overridePlayerPosition
+    if pos.status and pos.status ~= "ok" then
+      return pos
+    end
+  end
+  local status, mapID, x, y, reason = Compat.GetPlayerPosition01Raw()
+  if status == "ok" then
+    return { status = "ok", uiMapID = mapID, x01 = x, y01 = y }
+  end
+  return { status = status, reason = reason }
+end
+
+function Compat.GetMapWorldSizeYards(uiMapID)
+  uiMapID = tonumber(uiMapID)
+  if not Compat.IsFiniteNumber(uiMapID) or uiMapID <= 0 then
+    return { status = "unavailable", reason = "invalid_uimap_id" }
+  end
+  if ns.State and type(ns.State.overrideMapWorldSizes) == "table" then
+    local ov = ns.State.overrideMapWorldSizes[uiMapID]
+    if ov == nil and ns.State.overrideMapWorldSizes["*"] ~= nil then
+      ov = ns.State.overrideMapWorldSizes["*"]
+    end
+    if ov == nil or ov == false or ov == "unavailable" or ov == "unknown" then
+      return { status = "unavailable", reason = "missing_world_transform" }
+    elseif type(ov) == "table" then
+      local w = tonumber(ov.width or ov.widthYards or ov[1])
+      local h = tonumber(ov.height or ov.heightYards or ov[2])
+      if Compat.IsFiniteNumber(w) and Compat.IsFiniteNumber(h) and w > 0 and h > 0 then
+        return { status = "ok", widthYards = w, heightYards = h, source = "override" }
+      end
+      return { status = "unavailable", reason = "invalid_override_world_size" }
+    end
+    return { status = "unavailable", reason = "invalid_override_world_size" }
+  end
+  if C_Map and type(C_Map.GetMapWorldSize) == "function" then
+    local okSz, w, h = pcall(C_Map.GetMapWorldSize, uiMapID)
+    if okSz and not Compat.IsSecretOrRestrictedValue(w) and not Compat.IsSecretOrRestrictedValue(h) then
+      w = tonumber(w)
+      h = tonumber(h)
+      if Compat.IsFiniteNumber(w) and Compat.IsFiniteNumber(h) and w > 0 and h > 0 then
+        return { status = "ok", widthYards = w, heightYards = h, source = "GetMapWorldSize" }
+      end
+    end
+  end
+  if C_Map and type(C_Map.GetWorldPosFromMapPos) == "function" then
+    local makeVec = type(_G.CreateVector2D) == "function" and _G.CreateVector2D
+      or function(vx, vy)
+        return { x = vx, y = vy, GetXY = function(self) return self.x, self.y end }
+      end
+    local ok0, inst0, wp0 = pcall(C_Map.GetWorldPosFromMapPos, uiMapID, makeVec(0, 0))
+    local ok1, inst1, wp1 = pcall(C_Map.GetWorldPosFromMapPos, uiMapID, makeVec(1, 1))
+    if ok0 and ok1 and wp0 and wp1 and inst0 ~= nil and inst0 == inst1 then
+      local x0 = type(wp0.GetXY) == "function" and select(1, wp0:GetXY()) or wp0.x
+      local y0 = type(wp0.GetXY) == "function" and select(2, wp0:GetXY()) or wp0.y
+      local x1 = type(wp1.GetXY) == "function" and select(1, wp1:GetXY()) or wp1.x
+      local y1 = type(wp1.GetXY) == "function" and select(2, wp1:GetXY()) or wp1.y
+      x0, y0, x1, y1 = tonumber(x0), tonumber(y0), tonumber(x1), tonumber(y1)
+      if Compat.IsFiniteNumber(x0) and Compat.IsFiniteNumber(y0)
+        and Compat.IsFiniteNumber(x1) and Compat.IsFiniteNumber(y1)
+      then
+        -- In WoW world space, map X corresponds to -worldY (west->east) and map Y corresponds to -worldX (north->south),
+        -- or vice versa depending on client axis helper; check axis-aligned spans robustly:
+        local spanA = math.abs(x1 - x0)
+        local spanB = math.abs(y1 - y0)
+        local okX, _, wpX = pcall(C_Map.GetWorldPosFromMapPos, uiMapID, makeVec(1, 0))
+        local okY, _, wpY = pcall(C_Map.GetWorldPosFromMapPos, uiMapID, makeVec(0, 1))
+        if okX and okY and wpX and wpY then
+          local xx = tonumber(type(wpX.GetXY) == "function" and select(1, wpX:GetXY()) or wpX.x)
+          local xy = tonumber(type(wpX.GetXY) == "function" and select(2, wpX:GetXY()) or wpX.y)
+          local yx = tonumber(type(wpY.GetXY) == "function" and select(1, wpY:GetXY()) or wpY.x)
+          local yy = tonumber(type(wpY.GetXY) == "function" and select(2, wpY:GetXY()) or wpY.y)
+          if Compat.IsFiniteNumber(xx) and Compat.IsFiniteNumber(xy)
+            and Compat.IsFiniteNumber(yx) and Compat.IsFiniteNumber(yy)
+          then
+            local wYards = math.sqrt(((xx - x0) * (xx - x0)) + ((xy - y0) * (xy - y0)))
+            local hYards = math.sqrt(((yx - x0) * (yx - x0)) + ((yy - y0) * (yy - y0)))
+            if wYards > 0 and hYards > 0 then
+              return { status = "ok", widthYards = wYards, heightYards = hYards, source = "GetWorldPosFromMapPos" }
+            end
+          end
+        elseif spanA > 0 and spanB > 0 then
+          return { status = "ok", widthYards = spanB, heightYards = spanA, source = "GetWorldPosFromMapPos" }
+        end
+      end
+    end
+  end
+  return { status = "unavailable", reason = "missing_world_transform" }
+end
+
+function Compat.GetWorldDistanceYards(uiMapID, ax01, ay01, bx01, by01)
+  uiMapID = tonumber(uiMapID)
+  ax01, ay01 = tonumber(ax01), tonumber(ay01)
+  bx01, by01 = tonumber(bx01), tonumber(by01)
+  if not Compat.IsFiniteNumber(uiMapID)
+    or not Compat.IsFiniteNumber(ax01) or not Compat.IsFiniteNumber(ay01)
+    or not Compat.IsFiniteNumber(bx01) or not Compat.IsFiniteNumber(by01)
+    or ax01 < 0 or ax01 > 1 or ay01 < 0 or ay01 > 1
+    or bx01 < 0 or bx01 > 1 or by01 < 0 or by01 > 1
+  then
+    return { status = "unavailable", yards = nil, reason = "invalid_coords" }
+  end
+  local sz = Compat.GetMapWorldSizeYards(uiMapID)
+  if sz.status ~= "ok" or not Compat.IsFiniteNumber(sz.widthYards) or not Compat.IsFiniteNumber(sz.heightYards) then
+    return { status = "unavailable", yards = nil, reason = sz.reason or "missing_world_transform" }
+  end
+  local dxYards = (ax01 - bx01) * sz.widthYards
+  local dyYards = (ay01 - by01) * sz.heightYards
+  local yards = math.sqrt((dxYards * dxYards) + (dyYards * dyYards))
+  return {
+    status = "ok",
+    yards = yards,
+    widthYards = sz.widthYards,
+    heightYards = sz.heightYards,
+    source = sz.source,
+  }
+end
+
+function Compat.GetLoadedAddonInfo(addonFolderName)
+  local loaded = false
+  local version = nil
+  if C_AddOns and type(C_AddOns.IsAddOnLoaded) == "function" then
+    local ok, res = pcall(C_AddOns.IsAddOnLoaded, addonFolderName)
+    if ok and res == true then
+      loaded = true
+    end
+  elseif type(IsAddOnLoaded) == "function" then
+    local ok, res = pcall(IsAddOnLoaded, addonFolderName)
+    if ok and (res == true or res == 1) then
+      loaded = true
+    end
+  end
+  if C_AddOns and type(C_AddOns.GetAddOnMetadata) == "function" then
+    local okV, v = pcall(C_AddOns.GetAddOnMetadata, addonFolderName, "Version")
+    if okV and type(v) == "string" and v ~= "" then
+      version = v
+    end
+  elseif type(GetAddOnMetadata) == "function" then
+    local okV, v = pcall(GetAddOnMetadata, addonFolderName, "Version")
+    if okV and type(v) == "string" and v ~= "" then
+      version = v
+    end
+  end
+  if not loaded then
+    if addonFolderName == "RXPGuides" and type(_G.RXPGuides) == "table" then
+      loaded = true
+      version = version or tostring(_G.RXPGuides.version or _G.RXPGuides.release or "loaded")
+    elseif addonFolderName == "TomTom" and type(_G.TomTom) == "table" then
+      loaded = true
+      version = version or tostring(_G.TomTom.version or "loaded")
+    elseif addonFolderName == "Questie" and type(_G.Questie) == "table" then
+      loaded = true
+      version = version or "loaded"
+    elseif addonFolderName == "QuestieDB" and type(_G.QuestieDB) == "table" then
+      loaded = true
+      version = version or "loaded"
+    end
+  end
+  return {
+    loaded = loaded,
+    version = loaded and (version or "unknown") or "not_loaded",
+  }
+end
+
+function Compat.CanSetNativeWaypoint(uiMapID)
+  uiMapID = tonumber(uiMapID)
+  if not Compat.IsFiniteNumber(uiMapID) then
+    return { status = "ok", value = false, reason = "invalid_uimap_id" }
+  end
+  if ns.State and type(ns.State.overrideNativeWaypointState) == "table" then
+    local st = ns.State.overrideNativeWaypointState
+    if st.supported == false then
+      return { status = "ok", value = false, reason = "override_unsupported" }
+    elseif st.supported == "unavailable" then
+      return { status = "unavailable", value = nil, reason = "override_unavailable" }
+    end
+    local allowedMaps = st.allowedMaps
+    if type(allowedMaps) == "table" then
+      return { status = "ok", value = (allowedMaps[uiMapID] == true) }
+    end
+    return { status = "ok", value = true }
+  end
+  if not (C_Map and type(C_Map.CanSetUserWaypointOnMap) == "function" and type(C_Map.SetUserWaypoint) == "function" and _G.UiMapPoint and type(_G.UiMapPoint.CreateFromCoordinates) == "function") then
+    return { status = "unavailable", value = false, reason = "missing_native_waypoint_api" }
+  end
+  local ok, canSet = pcall(C_Map.CanSetUserWaypointOnMap, uiMapID)
+  if not ok or Compat.IsSecretOrRestrictedValue(canSet) then
+    return { status = "unavailable", value = nil, reason = "can_set_waypoint_failed" }
+  end
+  return { status = "ok", value = (canSet == true) }
+end
+
+function Compat.GetNativeWaypoint()
+  if ns.State and type(ns.State.overrideNativeWaypointState) == "table" then
+    local st = ns.State.overrideNativeWaypointState
+    if st.readStatus == "restricted" then
+      return { status = "restricted", hasWaypoint = true, reason = "override_restricted" }
+    elseif st.readStatus == "unavailable" then
+      return { status = "unavailable", hasWaypoint = nil, reason = "override_unavailable" }
+    end
+    local cur = st.current
+    if type(cur) == "table"
+      and Compat.IsFiniteNumber(tonumber(cur.uiMapID))
+      and Compat.IsFiniteNumber(tonumber(cur.x01))
+      and Compat.IsFiniteNumber(tonumber(cur.y01))
+    then
+      return {
+        status = "ok",
+        hasWaypoint = true,
+        uiMapID = tonumber(cur.uiMapID),
+        x01 = tonumber(cur.x01),
+        y01 = tonumber(cur.y01),
+      }
+    end
+    return { status = "ok", hasWaypoint = false }
+  end
+  if not (C_Map and type(C_Map.GetUserWaypoint) == "function") then
+    return { status = "unavailable", hasWaypoint = nil }
+  end
+  local ok, point = pcall(C_Map.GetUserWaypoint)
+  if not ok then
+    return { status = "unavailable", hasWaypoint = nil }
+  end
+  if not point then
+    return { status = "ok", hasWaypoint = false }
+  end
+  if Compat.IsSecretOrRestrictedValue(point) or type(point) ~= "table" then
+    return { status = "restricted", hasWaypoint = true }
+  end
+  local uiMapID = tonumber(point.uiMapID)
+  local x01, y01 = nil, nil
+  if type(point.position) == "table" then
+    if type(point.position.GetXY) == "function" then
+      local okXY, px, py = pcall(point.position.GetXY, point.position)
+      if okXY then
+        x01, y01 = tonumber(px), tonumber(py)
+      end
+    else
+      x01 = tonumber(point.position.x)
+      y01 = tonumber(point.position.y)
+    end
+  end
+  if not Compat.IsFiniteNumber(uiMapID) or not Compat.IsFiniteNumber(x01) or not Compat.IsFiniteNumber(y01) then
+    return { status = "restricted", hasWaypoint = true, reason = "unreadable_waypoint_coords" }
+  end
+  return {
+    status = "ok",
+    hasWaypoint = true,
+    uiMapID = uiMapID,
+    x01 = x01,
+    y01 = y01,
+  }
+end
+
+function Compat.SetNativeWaypoint(uiMapID, x01, y01)
+  uiMapID = tonumber(uiMapID)
+  x01 = tonumber(x01)
+  y01 = tonumber(y01)
+  if not Compat.IsFiniteNumber(uiMapID) or not Compat.IsFiniteNumber(x01) or not Compat.IsFiniteNumber(y01)
+    or x01 <= 0 or x01 >= 1 or y01 <= 0 or y01 >= 1
+  then
+    return { status = "unavailable", reason = "invalid_waypoint_coords" }
+  end
+  if Compat.IsInCombat() then
+    return { status = "unavailable", reason = "in_combat_lockdown" }
+  end
+  local canRes = Compat.CanSetNativeWaypoint(uiMapID)
+  if canRes.status ~= "ok" or canRes.value ~= true then
+    return { status = "unavailable", reason = canRes.reason or "map_waypoint_unsupported" }
+  end
+  if ns.State and type(ns.State.overrideNativeWaypointState) == "table" then
+    local st = ns.State.overrideNativeWaypointState
+    if st.setMustFail == true then
+      return { status = "unavailable", reason = "override_set_failed" }
+    end
+    st.current = {
+      uiMapID = uiMapID,
+      x01 = x01,
+      y01 = y01,
+    }
+    st.superTracked = true
+    return { status = "ok", uiMapID = uiMapID, x01 = x01, y01 = y01 }
+  end
+  local okPt, pt = pcall(_G.UiMapPoint.CreateFromCoordinates, uiMapID, x01, y01)
+  if not okPt or not pt then
+    return { status = "unavailable", reason = "create_uimap_point_failed" }
+  end
+  local okSet = pcall(C_Map.SetUserWaypoint, pt)
+  if not okSet then
+    return { status = "unavailable", reason = "set_user_waypoint_failed" }
+  end
+  if C_SuperTrack and type(C_SuperTrack.SetSuperTrackedUserWaypoint) == "function" then
+    pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+  end
+  return { status = "ok", uiMapID = uiMapID, x01 = x01, y01 = y01 }
+end
+
+function Compat.ClearNativeWaypoint()
+  if Compat.IsInCombat() then
+    return { status = "unavailable", reason = "in_combat_lockdown" }
+  end
+  if ns.State and type(ns.State.overrideNativeWaypointState) == "table" then
+    local st = ns.State.overrideNativeWaypointState
+    if st.clearMustFail == true then
+      return { status = "unavailable", reason = "override_clear_failed" }
+    end
+    st.current = nil
+    st.superTracked = false
+    return { status = "ok" }
+  end
+  if not (C_Map and type(C_Map.ClearUserWaypoint) == "function") then
+    return { status = "unavailable", reason = "missing_clear_waypoint_api" }
+  end
+  local ok = pcall(C_Map.ClearUserWaypoint)
+  if not ok then
+    return { status = "unavailable", reason = "clear_waypoint_failed" }
+  end
+  return { status = "ok" }
+end
+
+function Compat.RequestLoadItemData(itemID)
+  itemID = tonumber(itemID)
+  if not itemID or itemID <= 0 then
+    return false
+  end
+  if ns.State and type(ns.State.requestedItemLoads) == "table" then
+    ns.State.requestedItemLoads[itemID] = (ns.State.requestedItemLoads[itemID] or 0) + 1
+  end
+  if C_Item and type(C_Item.RequestLoadItemDataByID) == "function" then
+    local ok = pcall(C_Item.RequestLoadItemDataByID, itemID)
+    return ok == true
+  end
+  return false
+end
+
+function Compat.GetItemSellPriceResult(itemIDOrLink)
+  local itemID = Compat.ExtractItemID(itemIDOrLink)
+  if not itemID then
+    return { status = "unknown", unitSellPrice = nil, reason = "missing_item_id" }
+  end
+  if ns.State and type(ns.State.overrideItemSellPrices) == "table" then
+    local ov = ns.State.overrideItemSellPrices[itemID]
+    if ov == "loading" then
+      return { status = "loading", itemID = itemID, unitSellPrice = nil }
+    elseif ov == "unknown" or ov == "unavailable" then
+      return { status = ov, itemID = itemID, unitSellPrice = nil }
+    elseif type(ov) == "number" then
+      return { status = "ok", itemID = itemID, unitSellPrice = math.max(0, math.floor(ov)) }
+    elseif type(ov) == "table" then
+      return ov
+    end
+  end
+  local getInfoFn = (C_Item and type(C_Item.GetItemInfo) == "function" and C_Item.GetItemInfo)
+    or (type(GetItemInfo) == "function" and GetItemInfo)
+    or nil
+  if not getInfoFn then
+    return { status = "unavailable", itemID = itemID, unitSellPrice = nil, reason = "missing_get_item_info" }
+  end
+  local ok, itemName, itemLink, _, _, _, _, _, _, _, _, sellPrice = pcall(getInfoFn, itemIDOrLink or itemID)
+  if not ok then
+    return { status = "unavailable", itemID = itemID, unitSellPrice = nil, reason = "get_item_info_error" }
+  end
+  if Compat.IsSecretOrRestrictedValue(itemName) or Compat.IsSecretOrRestrictedValue(sellPrice) then
+    return { status = "restricted", itemID = itemID, unitSellPrice = nil, reason = "secret_item_info" }
+  end
+  -- When itemName is nil, the client has not cached item info yet: never treat as 0c!
+  if itemName == nil then
+    return { status = "loading", itemID = itemID, unitSellPrice = nil, reason = "item_not_cached" }
+  end
+  if type(sellPrice) ~= "number" then
+    return { status = "unknown", itemID = itemID, itemName = itemName, itemLink = itemLink, unitSellPrice = nil, reason = "sell_price_nil" }
+  end
+  return {
+    status = "ok",
+    itemID = itemID,
+    itemName = itemName,
+    itemLink = itemLink,
+    unitSellPrice = math.max(0, math.floor(sellPrice)),
+  }
+end
+
+function Compat.GetQuestRewardChoicesSnapshot()
+  if ns.State and type(ns.State.overrideQuestRewardChoices) == "table" then
+    return ns.State.overrideQuestRewardChoices
+  end
+  if type(GetNumQuestChoices) ~= "function" or type(GetQuestItemInfo) ~= "function" then
+    return { status = "unavailable", choices = {} }
+  end
+  local okNum, numChoices = pcall(GetNumQuestChoices)
+  if not okNum or Compat.IsSecretOrRestrictedValue(numChoices) or type(numChoices) ~= "number" then
+    return { status = "unavailable", choices = {} }
+  end
+  local questID = nil
+  if type(GetQuestID) == "function" then
+    local okQ, qid = pcall(GetQuestID)
+    if okQ and not Compat.IsSecretOrRestrictedValue(qid) and type(qid) == "number" and qid > 0 then
+      questID = qid
+    end
+  end
+  local questTitle = nil
+  if type(GetTitleText) == "function" then
+    local okT, title = pcall(GetTitleText)
+    if okT and not Compat.IsSecretOrRestrictedValue(title) and type(title) == "string" then
+      questTitle = title
+    end
+  end
+  local choices = {}
+  for idx = 1, numChoices do
+    local okInfo, name, texture, numItems, quality, isUsable = pcall(GetQuestItemInfo, "choice", idx)
+    local link = nil
+    if type(GetQuestItemLink) == "function" then
+      local okLink, l = pcall(GetQuestItemLink, "choice", idx)
+      if okLink and not Compat.IsSecretOrRestrictedValue(l) and type(l) == "string" then
+        link = l
+      end
+    end
+    local itemID = Compat.ExtractItemID(link)
+    local qty = (okInfo and not Compat.IsSecretOrRestrictedValue(numItems) and tonumber(numItems)) or 1
+    qty = math.max(1, math.floor(qty))
+    table.insert(choices, {
+      choiceIndex = idx,
+      itemID = itemID,
+      itemLink = link,
+      name = (okInfo and not Compat.IsSecretOrRestrictedValue(name) and type(name) == "string" and name ~= "") and name or nil,
+      texture = okInfo and texture or nil,
+      quantity = qty,
+      quality = okInfo and tonumber(quality) or nil,
+      isUsable = okInfo and isUsable or nil,
+    })
+  end
+  return {
+    status = "ok",
+    questID = questID,
+    questTitle = questTitle,
+    choices = choices,
+  }
+end
+
+function Compat.GetPlayerMoneyCopper()
+  if ns.State and ns.State.overridePlayerMoneyCopper ~= nil then
+    if type(ns.State.overridePlayerMoneyCopper) == "number" then
+      return { status = "ok", copper = math.max(0, math.floor(ns.State.overridePlayerMoneyCopper)) }
+    end
+    return { status = tostring(ns.State.overridePlayerMoneyCopper), copper = nil }
+  end
+  if type(GetMoney) == "function" then
+    local ok, money = pcall(GetMoney)
+    if ok and not Compat.IsSecretOrRestrictedValue(money) and type(money) == "number" then
+      return { status = "ok", copper = math.max(0, math.floor(money)) }
+    end
+    return { status = "unavailable", copper = nil, reason = "get_money_failed" }
+  end
+  return { status = "unavailable", copper = nil, reason = "missing_get_money" }
+end
+
+local TWO_PI = math.pi * 2
+
+local function atan2Radians(y, x)
+  if type(math.atan2) == "function" then
+    return math.atan2(y, x)
+  end
+  if x > 0 then
+    return math.atan(y / x)
+  elseif x < 0 and y >= 0 then
+    return math.atan(y / x) + math.pi
+  elseif x < 0 and y < 0 then
+    return math.atan(y / x) - math.pi
+  elseif x == 0 and y > 0 then
+    return math.pi / 2
+  elseif x == 0 and y < 0 then
+    return -math.pi / 2
+  end
+  return 0
+end
+
+-- UTF-8 boundary-safe truncation (never splits multi-byte codepoints like `—`, `•`, or localized names).
+function Compat.UTF8Truncate(text, maxCodepoints)
+  local s = tostring(text or "")
+  maxCodepoints = math.max(2, tonumber(maxCodepoints) or 34)
+  local byteLen = #s
+  if byteLen <= maxCodepoints then
+    return s
+  end
+  local i = 1
+  local count = 0
+  local cutPos = nil
+  while i <= byteLen do
+    count = count + 1
+    if count == maxCodepoints then
+      cutPos = i - 1
+    end
+    local b = string.byte(s, i)
+    if b < 0x80 then
+      i = i + 1
+    elseif b >= 0xC0 and b < 0xE0 then
+      i = i + 2
+    elseif b >= 0xE0 and b < 0xF0 then
+      i = i + 3
+    elseif b >= 0xF0 then
+      i = i + 4
+    else
+      i = i + 1
+    end
+  end
+  if count <= maxCodepoints then
+    return s
+  end
+  return string.sub(s, 1, cutPos or (maxCodepoints - 1)) .. "…"
+end
+
+function Compat.HasStartupArrowAsset()
+  if ns.State and ns.State.overrideStartupArrowAsset ~= nil then
+    return ns.State.overrideStartupArrowAsset == true
+  end
+  local addonNameKey = (ns and ns.name) or "ForeverHub"
+  if C_AddOns and type(C_AddOns.GetAddOnMetadata) == "function" then
+    local ok, val = pcall(C_AddOns.GetAddOnMetadata, addonNameKey, "X-ForeverHub-Assets")
+    if ok and type(val) == "string" then
+      return val == "arrow-v1"
+    end
+  elseif type(GetAddOnMetadata) == "function" then
+    local ok, val = pcall(GetAddOnMetadata, addonNameKey, "X-ForeverHub-Assets")
+    if ok and type(val) == "string" then
+      return val == "arrow-v1"
+    end
+  end
+  return false
+end
+
+function Compat.GetPlayerFacingRadiansRaw()
+  if ns.State and ns.State.overridePlayerFacing ~= nil then
+    local ov = ns.State.overridePlayerFacing
+    if type(ov) == "number" and Compat.IsFiniteNumber(ov) then
+      return true, ((ov % TWO_PI) + TWO_PI) % TWO_PI, nil
+    end
+    return false, nil, tostring(ov)
+  end
+  if type(GetPlayerFacing) ~= "function" then
+    return false, nil, "missing_get_player_facing"
+  end
+  local ok, facing = pcall(GetPlayerFacing)
+  if not ok or facing == nil or Compat.IsSecretOrRestrictedValue(facing) then
+    return false, nil, "facing_restricted_or_nil"
+  end
+  facing = tonumber(facing)
+  if not Compat.IsFiniteNumber(facing) then
+    return false, nil, "facing_non_finite"
+  end
+  return true, ((facing % TWO_PI) + TWO_PI) % TWO_PI, nil
+end
+
+function Compat.GetPlayerFacingRadians()
+  local ok, rad, reason = Compat.GetPlayerFacingRadiansRaw()
+  if ok then
+    return { status = "ok", radians = rad }
+  end
+  return { status = "unavailable", radians = nil, reason = reason or "unavailable" }
+end
+
+-- Returns `(ok, northYards, westYards, instanceID)` with zero table allocations for OnUpdate hot paths.
+-- In WoW 1.60.1, `UnitPosition("player")` returns `(posNorth, posWest, posZ, instanceID)`, matching
+-- `C_Map.GetWorldPosFromMapPos` (`worldPos:GetXY() -> north, west`).
+function Compat.GetPlayerWorldPositionRaw()
+  if ns.State and ns.State.overridePlayerWorldPosition ~= nil then
+    local ov = ns.State.overridePlayerWorldPosition
+    if type(ov) == "table" then
+      local n = tonumber(ov.north or ov.y or ov[1])
+      local w = tonumber(ov.west or ov.x or ov[2])
+      local inst = tonumber(ov.instanceID or ov.instance or ov[3])
+      if Compat.IsFiniteNumber(n) and Compat.IsFiniteNumber(w) and Compat.IsFiniteNumber(inst) then
+        return true, n, w, inst
+      end
+    end
+    return false, nil, nil, nil
+  end
+  if type(UnitPosition) ~= "function" then
+    return false, nil, nil, nil
+  end
+  local ok, north, west, _z, instanceID = pcall(UnitPosition, "player")
+  if not ok or north == nil or west == nil then
+    return false, nil, nil, tonumber(instanceID)
+  end
+  if Compat.IsSecretOrRestrictedValue(north)
+    or Compat.IsSecretOrRestrictedValue(west)
+    or Compat.IsSecretOrRestrictedValue(instanceID)
+  then
+    return false, nil, nil, nil
+  end
+  north = tonumber(north)
+  west = tonumber(west)
+  instanceID = tonumber(instanceID)
+  if not Compat.IsFiniteNumber(north) or not Compat.IsFiniteNumber(west) or not Compat.IsFiniteNumber(instanceID) then
+    return false, nil, nil, nil
+  end
+  return true, north, west, instanceID
+end
+
+-- Resolves and caches destination world coordinates & map world size ONCE per step change (zero OnUpdate churn).
+function Compat.ResolveTargetWorldAnchor(uiMapID, x01, y01, arrivalRadiusYards)
+  uiMapID = tonumber(uiMapID)
+  x01 = tonumber(x01)
+  y01 = tonumber(y01)
+  if not Compat.IsFiniteNumber(uiMapID) or uiMapID <= 0
+    or not Compat.IsFiniteNumber(x01) or not Compat.IsFiniteNumber(y01)
+    or x01 <= 0 or x01 >= 1 or y01 <= 0 or y01 >= 1
+  then
+    return nil
+  end
+
+  local anchor = {
+    uiMapID = uiMapID,
+    x01 = x01,
+    y01 = y01,
+    arrivalRadiusYards = math.max(5, tonumber(arrivalRadiusYards) or 15),
+    hasWorldCoords = false,
+    continentInstanceID = nil,
+    targetNorth = nil,
+    targetWest = nil,
+    hasZoneSize = false,
+    widthYards = nil,
+    heightYards = nil,
+  }
+
+  if ns.State and type(ns.State.overrideTargetWorldPositions) == "table" then
+    local key = string.format("%d:%.4f:%.4f", uiMapID, x01, y01)
+    local ov = ns.State.overrideTargetWorldPositions[key] or ns.State.overrideTargetWorldPositions[uiMapID]
+    if type(ov) == "table" then
+      local tn = tonumber(ov.north)
+      local tw = tonumber(ov.west)
+      local inst = tonumber(ov.instanceID)
+      if Compat.IsFiniteNumber(tn) and Compat.IsFiniteNumber(tw) and Compat.IsFiniteNumber(inst) then
+        anchor.hasWorldCoords = true
+        anchor.continentInstanceID = inst
+        anchor.targetNorth = tn
+        anchor.targetWest = tw
+      end
+    end
+  elseif C_Map and type(C_Map.GetWorldPosFromMapPos) == "function" then
+    local makeVec = type(_G.CreateVector2D) == "function" and _G.CreateVector2D
+      or function(vx, vy)
+        return { x = vx, y = vy, GetXY = function(self) return self.x, self.y end }
+      end
+    local okW, instID, wp = pcall(C_Map.GetWorldPosFromMapPos, uiMapID, makeVec(x01, y01))
+    if okW and wp and instID ~= nil and not Compat.IsSecretOrRestrictedValue(instID) and not Compat.IsSecretOrRestrictedValue(wp) then
+      local tn = type(wp.GetXY) == "function" and select(1, wp:GetXY()) or wp.x
+      local tw = type(wp.GetXY) == "function" and select(2, wp:GetXY()) or wp.y
+      tn = tonumber(tn)
+      tw = tonumber(tw)
+      instID = tonumber(instID)
+      if Compat.IsFiniteNumber(tn) and Compat.IsFiniteNumber(tw) and Compat.IsFiniteNumber(instID) then
+        anchor.hasWorldCoords = true
+        anchor.continentInstanceID = instID
+        anchor.targetNorth = tn
+        anchor.targetWest = tw
+      end
+    end
+  end
+
+  local sz = Compat.GetMapWorldSizeYards(uiMapID)
+  if sz.status == "ok" and Compat.IsFiniteNumber(sz.widthYards) and Compat.IsFiniteNumber(sz.heightYards) then
+    anchor.hasZoneSize = true
+    anchor.widthYards = sz.widthYards
+    anchor.heightYards = sz.heightYards
+  end
+
+  anchor.isUsable = (anchor.hasWorldCoords or anchor.hasZoneSize)
+  anchor.isComplete = (anchor.hasWorldCoords and anchor.hasZoneSize)
+  return anchor
+end
+
+function Compat.ComputeArrowAlignmentColor(absTurnRadians, isArrived)
+  if isArrived then
+    return 0.20, 1.00, 0.76
+  end
+  local t = math.max(0, math.min(1, (tonumber(absTurnRadians) or 0) / math.pi))
+  if t <= 0.5 then
+    local u = t * 2.0
+    -- Crisp Emerald Green (0.15, 0.96, 0.42) -> Warm Gold (1.00, 0.80, 0.16)
+    return 0.15 + (1.00 - 0.15) * u, 0.96 + (0.80 - 0.96) * u, 0.42 + (0.16 - 0.42) * u
+  else
+    local u = (t - 0.5) * 2.0
+    -- Warm Gold (1.00, 0.80, 0.16) -> Coral Red (0.98, 0.28, 0.28)
+    return 1.00 + (0.98 - 1.00) * u, 0.80 + (0.28 - 0.80) * u, 0.16 + (0.28 - 0.16) * u
+  end
+end
+
+-- Computes live distance in yards, world bearing, relative arrow rotation (`Texture:SetRotation` CCW radians),
+-- and alignment tint into `out` (allocates zero tables on BOTH `world_coords` and `same_map_size` paths when `out` is supplied).
+function Compat.ComputeNavigationVector(anchor, out)
+  out = out or {}
+  out.status = "unavailable"
+  out.reason = nil
+  out.yards = nil
+  out.worldBearingRadians = nil
+  out.playerFacingRadians = nil
+  out.rotationRadians = nil
+  out.signedTurnRadians = nil
+  out.absTurnRadians = nil
+  out.isArrived = false
+  out.nearZeroDistance = false
+  out.isCrossZone = false
+  out.playerUiMapID = nil
+  out.vectorSource = nil
+  out.colorR, out.colorG, out.colorB = 1, 1, 1
+
+  if type(anchor) ~= "table" then
+    out.reason = "missing_anchor"
+    return out
+  end
+  if not anchor.hasWorldCoords and not anchor.hasZoneSize then
+    out.status = "missing_transform"
+    out.reason = "target_transform_unavailable"
+    return out
+  end
+
+  local dNorth, dWest = nil, nil
+  local okWorld, pNorth, pWest, pInst = Compat.GetPlayerWorldPositionRaw()
+  if okWorld and anchor.hasWorldCoords and pInst == anchor.continentInstanceID then
+    dNorth = anchor.targetNorth - pNorth
+    dWest = anchor.targetWest - pWest
+    out.vectorSource = "world_coords"
+    local okMap, curMapID = Compat.GetPlayerUiMapIDRaw()
+    if okMap then
+      out.playerUiMapID = curMapID
+      out.isCrossZone = (curMapID ~= anchor.uiMapID)
+    end
+  end
+
+  if dNorth == nil then
+    local posStatus, pMapID, px01, py01, posReason = Compat.GetPlayerPosition01Raw()
+    if posStatus == "ok" then
+      out.playerUiMapID = pMapID
+      if pMapID == anchor.uiMapID then
+        if anchor.hasZoneSize then
+          -- Map X increases West->East (-West); Map Y increases North->South (-North)
+          dNorth = (py01 - anchor.y01) * anchor.heightYards
+          dWest = (px01 - anchor.x01) * anchor.widthYards
+          out.vectorSource = "same_map_size"
+          out.isCrossZone = false
+        else
+          out.status = "missing_transform"
+          out.reason = "zone_world_size_unavailable"
+          return out
+        end
+      elseif okWorld and anchor.hasWorldCoords and pInst ~= nil and pInst ~= anchor.continentInstanceID then
+        out.status = "different_instance"
+        out.reason = "different_instance_or_continent"
+        return out
+      else
+        out.status = "different_zone"
+        out.reason = "cross_zone_without_world_pos"
+        return out
+      end
+    elseif okWorld and anchor.hasWorldCoords and pInst ~= nil and pInst ~= anchor.continentInstanceID then
+      out.status = "different_instance"
+      out.reason = "different_instance_or_continent"
+      return out
+    else
+      out.status = "unavailable"
+      out.reason = posReason or "player_position_unavailable"
+      return out
+    end
+  end
+
+  local yards = math.sqrt((dNorth * dNorth) + (dWest * dWest))
+  out.yards = yards
+  out.isArrived = (yards <= (anchor.arrivalRadiusYards or 15))
+  out.nearZeroDistance = (yards < 2.0)
+
+  local okFace, facingRad, faceReason = Compat.GetPlayerFacingRadiansRaw()
+  if not okFace then
+    out.status = "facing_unavailable"
+    out.reason = faceReason or "facing_unavailable"
+    return out
+  end
+
+  -- World bearing counter-clockwise from North (`0` = North, `pi/2` = West, `pi` = South, `3*pi/2` = East)
+  local rawBearing = out.nearZeroDistance and facingRad or atan2Radians(dWest, dNorth)
+  local bearing = ((rawBearing % TWO_PI) + TWO_PI) % TWO_PI
+  local rotation = ((bearing - facingRad) % TWO_PI + TWO_PI) % TWO_PI
+  local signedTurn = ((rotation + math.pi) % TWO_PI) - math.pi
+  local absTurn = math.abs(signedTurn)
+
+  out.status = "ok"
+  out.worldBearingRadians = bearing
+  out.playerFacingRadians = facingRad
+  out.rotationRadians = rotation
+  out.signedTurnRadians = signedTurn
+  out.absTurnRadians = absTurn
+  out.colorR, out.colorG, out.colorB = Compat.ComputeArrowAlignmentColor(absTurn, out.isArrived)
+  return out
+end
+
+-- Capability-safe item visual adapter (Astra v0.8.0):
+-- Resolves live item icon, quality, and localized name without assuming Retail-only C_Item APIs.
+-- Missing or uncached item data returns `hasIcon = false` so callers render a neutral placeholder.
+function Compat.GetItemVisualInfo(itemID)
+  local id = tonumber(itemID)
+  if not id or id <= 0 then
+    return { itemID = nil, icon = nil, quality = nil, name = nil, hasIcon = false, cached = false }
+  end
+
+  local icon, quality, name = nil, nil, nil
+
+  if type(_G.C_Item) == "table" and type(_G.C_Item.GetItemInfo) == "function" then
+    local ok, n, _, q, _, _, _, _, _, _, tex = pcall(_G.C_Item.GetItemInfo, id)
+    if ok then
+      if type(n) == "string" and n ~= "" and not Compat.IsSecretOrRestrictedValue(n) then
+        name = n
+      end
+      if type(q) == "number" and not Compat.IsSecretOrRestrictedValue(q) then
+        quality = q
+      end
+      if (type(tex) == "number" or (type(tex) == "string" and tex ~= "")) and not Compat.IsSecretOrRestrictedValue(tex) then
+        icon = tex
+      end
+    end
+  end
+
+  if (name == nil or icon == nil) and type(_G.GetItemInfo) == "function" then
+    local ok, n, _, q, _, _, _, _, _, _, tex = pcall(_G.GetItemInfo, id)
+    if ok then
+      if name == nil and type(n) == "string" and n ~= "" and not Compat.IsSecretOrRestrictedValue(n) then
+        name = n
+      end
+      if quality == nil and type(q) == "number" and not Compat.IsSecretOrRestrictedValue(q) then
+        quality = q
+      end
+      if icon == nil and (type(tex) == "number" or (type(tex) == "string" and tex ~= "")) and not Compat.IsSecretOrRestrictedValue(tex) then
+        icon = tex
+      end
+    end
+  end
+
+  if icon == nil and type(_G.C_Item) == "table" and type(_G.C_Item.GetItemIconByID) == "function" then
+    local ok, tex = pcall(_G.C_Item.GetItemIconByID, id)
+    if ok and (type(tex) == "number" or (type(tex) == "string" and tex ~= "")) and not Compat.IsSecretOrRestrictedValue(tex) then
+      icon = tex
+    end
+  end
+
+  if icon == nil and type(_G.GetItemIcon) == "function" then
+    local ok, tex = pcall(_G.GetItemIcon, id)
+    if ok and (type(tex) == "number" or (type(tex) == "string" and tex ~= "")) and not Compat.IsSecretOrRestrictedValue(tex) then
+      icon = tex
+    end
+  end
+
+  if icon == nil and type(_G.C_Item) == "table" and type(_G.C_Item.GetItemInfoInstant) == "function" then
+    local ok, _, _, _, _, tex = pcall(_G.C_Item.GetItemInfoInstant, id)
+    if ok and (type(tex) == "number" or (type(tex) == "string" and tex ~= "")) and not Compat.IsSecretOrRestrictedValue(tex) then
+      icon = tex
+    end
+  end
+
+  if icon == nil and type(_G.GetItemInfoInstant) == "function" then
+    local ok, _, _, _, _, tex = pcall(_G.GetItemInfoInstant, id)
+    if ok and (type(tex) == "number" or (type(tex) == "string" and tex ~= "")) and not Compat.IsSecretOrRestrictedValue(tex) then
+      icon = tex
+    end
+  end
+
+  return {
+    itemID = id,
+    icon = icon,
+    quality = quality,
+    name = name,
+    hasIcon = (icon ~= nil),
+    cached = (name ~= nil),
+  }
+end
+
+function Compat.RequestItemVisualLoad(itemID)
+  local id = tonumber(itemID)
+  if not id or id <= 0 then
+    return false
+  end
+  return Compat.RequestLoadItemData(id)
+end

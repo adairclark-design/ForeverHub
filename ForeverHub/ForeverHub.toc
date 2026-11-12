@@ -1,0 +1,44 @@
+## Interface: 16001
+## Title: ForeverHub |cff00ccffCrate, Writ, Riverglades & Gold Advisor|r
+## Notes: Reservation-aware Waylaid Crate & Writ advisor, reviewed Riverglades route assistant, quest reward vendor-value advisor, and verified Level 40 Mage raw gold farm navigator for WoW: Forever.
+## Author: ForeverHub
+## Version: 0.8.3
+## X-License: MIT
+## X-ForeverHub-Assets: ui-v2
+## SavedVariables: ForeverHubDB
+## SavedVariablesPerCharacter: ForeverHubCharDB
+## OptionalDeps: Auctionator, BagBrother, Bagnon, Syndicator, RXPGuides, Questie, QuestieDB, TomTom
+
+Bootstrap.lua
+Compat.lua
+ForeverHub_Data.lua
+ForeverHub_RivergladesData.lua
+ForeverHub_GoldFarmsData.lua
+State.lua
+Providers/Auctionator.lua
+Providers/Inventory.lua
+Providers/Syndicator.lua
+Providers/Questie.lua
+Domain/Reservations.lua
+Domain/Costs.lua
+Domain/Diagnostics.lua
+Domain/RoutePlanner.lua
+Domain/RouteProgress.lua
+Domain/RewardValue.lua
+Domain/GoldFarms.lua
+Domain/SelfTest.lua
+UI/Theme.lua
+UI/Widgets.lua
+UI/CratesPresenter.lua
+UI/RivergladesPresenter.lua
+UI/GoldFarmsPresenter.lua
+UI/Workspace.lua
+UI/Tooltips.lua
+UI/Crates.lua
+UI/Riverglades.lua
+UI/Navigation.lua
+UI/WorldMapPins.lua
+UI/RewardAdvisor.lua
+UI/GoldFarms.lua
+Bridges/RXPBridge.lua
+Events.lua
