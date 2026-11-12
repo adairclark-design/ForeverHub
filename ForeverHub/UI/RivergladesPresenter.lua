@@ -300,8 +300,23 @@ function RivergladesPresenter.Build(snapshot, uiState)
 
       if selectedHubID == "all" or selectedHubID == hubID then
         local glyphKey, glyphColor = glyphForAction(act)
-        local coordStr = formatCoordText(act.destination)
-        local npcPart = (type(act.npcName) == "string" and act.npcName ~= "") and act.npcName or nil
+        local resolvedDest, resolvedName = act.destination, act.npcName
+        if row.state == "available"
+          and (act.kind == "turnin" or act.kind == "objective")
+          and ns.Domain
+          and ns.Domain.RoutePlanner
+          and ns.Domain.RoutePlanner.ResolveActiveActionTarget
+        then
+          local rd, rn = ns.Domain.RoutePlanner.ResolveActiveActionTarget(act, prog, nil, nil, route)
+          if type(rd) == "table" then
+            resolvedDest = rd
+          end
+          if type(rn) == "string" and rn ~= "" then
+            resolvedName = rn
+          end
+        end
+        local coordStr = formatCoordText(resolvedDest)
+        local npcPart = (type(resolvedName) == "string" and resolvedName ~= "") and resolvedName or nil
         local liveObj = objMap[act.actionID]
         local subParts = {}
         if npcPart then table.insert(subParts, npcPart) end
@@ -311,7 +326,7 @@ function RivergladesPresenter.Build(snapshot, uiState)
           table.insert(subParts, act.note)
         end
 
-        local destConf = act.destination and act.destination.coordConfidence or (qMeta and qMeta.reviewStatus) or act.reviewStatus or "verified"
+        local destConf = resolvedDest and resolvedDest.coordConfidence or (qMeta and qMeta.reviewStatus) or act.reviewStatus or "verified"
         local isEstimated = (destConf == "estimated" or act.reviewStatus == "estimated")
         local isPinned = (prog.pinnedActionID ~= nil and prog.pinnedActionID == act.actionID)
         local isSkipped = (prog.explicitlySkippedActions and prog.explicitlySkippedActions[act.actionID] ~= nil) or (row.state == "skipped")
@@ -463,11 +478,21 @@ function RivergladesPresenter.Build(snapshot, uiState)
   local nextAct = eval.nextAction
   local currentActionVM
   if nextAct then
-    local nextCoord = formatCoordText(nextAct.destination)
+    local nextDest, nextNpcName = nextAct.destination, nextAct.npcName
+    if ns.Domain and ns.Domain.RoutePlanner and ns.Domain.RoutePlanner.ResolveActiveActionTarget then
+      local rd, rn = ns.Domain.RoutePlanner.ResolveActiveActionTarget(nextAct, prog, nil, nil, route)
+      if type(rd) == "table" then
+        nextDest = rd
+      end
+      if type(rn) == "string" and rn ~= "" then
+        nextNpcName = rn
+      end
+    end
+    local nextCoord = formatCoordText(nextDest)
     local nextObj = objMap[nextAct.actionID]
     local detailParts = {}
-    if nextAct.npcName and nextAct.npcName ~= "" then
-      table.insert(detailParts, nextAct.npcName)
+    if nextNpcName and nextNpcName ~= "" then
+      table.insert(detailParts, nextNpcName)
     end
     if nextCoord and nextCoord ~= "" then
       table.insert(detailParts, nextCoord)

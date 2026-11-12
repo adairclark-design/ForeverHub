@@ -1556,15 +1556,15 @@ function SelfTest.RunRivergladesSuite()
     assertTrue(evalInferred.byActionID["rg_a_13_powderfuse_hub"].state == "completed", "Powderfuse intro hub check must auto-retire once route quests are started")
 
     -- 1b. Negative non-inference on `"estimated"` observational chain edges (Astra v0.7.1 P1 #5):
-    -- Having `95988` (From Port to Port) active with empty server flags MUST NOT infer completion of `95561`!
+    -- Having `94928` (A Few Furs for Friz) active with empty server flags MUST NOT infer completion of `94925` (A Fur Trade)!
     local evalNoUnverifiedInference = RoutePlanner.EvaluateRoute(
       route,
       prog,
-      makeMockCtx({ level = 41, active = { [95988] = true }, completed = {} })
+      makeMockCtx({ level = 41, active = { [94928] = true }, completed = {} })
     )
     assertTrue(
-      evalNoUnverifiedInference.byActionID["rg_pf_accept_95561"].state == "available",
-      "Estimated chain edge 95561 -> 95913 -> 95961 -> 95988 MUST NOT suppress 95561 without direct completion evidence"
+      evalNoUnverifiedInference.byActionID["rg_hb_accept_94925"].state == "available",
+      "Estimated chain edge 94925 -> 94928 MUST NOT suppress 94925 without direct completion evidence"
     )
 
     -- Test live hybrid title->ID discovery & immediate QUEST_TURNED_IN cache before server flag flip
@@ -1655,19 +1655,20 @@ function SelfTest.RunRivergladesSuite()
       ns.State.overrideMapWorldSizes = { [2548] = { width = 3600, height = 2400 }, [1444] = { width = 6950, height = 4633 } }
       local prog = ns.State.MigrateRouteProgress({ mode = "standalone", includeEliteBounties = false }, route)
       local active22 = {
-        ["title:foreman's plight"] = true,
+        [95943] = true, -- Foreman's Plight
         [96063] = true, -- Gaseous Gold
-        ["title:goes down smooth"] = true,
+        [95988] = true, -- Goes Down Smooth
         [95613] = true, -- Keeping the Light On (follows 95603)
         [95982] = true, -- Not My Circus
-        [94931] = true, -- Stolen Saws (follows 94930)
+        [94931] = true, -- Stolen Saws
         [95184] = true, -- The Sharpest of Blades (follows 95156)
-        [94842] = true, -- Unsavory Plant Food (follows 94841)
-        [94925] = true, -- A Fur Trade
+        [94842] = true, -- Unsavory Plant Food
+        [94925] = true, -- A Fur Trade (8 Prized Lion Hides -> Watcher Cornelius)
+        [94928] = true, -- A Few Furs for Friz (zero-objective delivery -> Friz Frazzlespark)
         [94924] = true, -- Hunting the Hunters
-        ["title:a taste of the sea"] = true,
+        [95121] = true, -- A Taste of the Sea
         [96081] = true, -- Wound Dressings (13/20 Mageweave Cloth)
-        [95988] = true, -- From Port to Port (follows 95561 -> 95913 -> 95961)
+        [95219] = true, -- From Port to Port (Feralas delivery)
         [95118] = true, -- Saltwater Savages
         [95912] = true, -- [42+] WANTED: Blademaster Kaijo
         [95991] = true, -- [42+] WANTED: Ghostmaw
@@ -1683,11 +1684,6 @@ function SelfTest.RunRivergladesSuite()
       local completedPrior = {
         [95603] = true,
         [95156] = true,
-        [94841] = true,
-        [94930] = true,
-        [95561] = true,
-        [95913] = true,
-        [95961] = true,
         [94885] = true,
       }
       local objectives22 = {}
@@ -1708,18 +1704,22 @@ function SelfTest.RunRivergladesSuite()
         "rg_a_08_turnin_94881",
         "rg_fk_turnin_95603",
         "rg_fk_turnin_95156",
-        "rg_hb_turnin_94841",
-        "rg_hb_turnin_94930",
-        "rg_pf_turnin_95561",
-        "rg_pf_turnin_95913",
-        "rg_pf_turnin_95961",
       }) do
         assertTrue(eval1.byActionID[doneID].state == "completed", "Completed/inferred step must never be recommended: " .. doneID)
       end
 
-      -- 2. Unaccepted quests are blocked by 40/40 log, NOT stalling active progression; local Powderfuse step wins!
-      assertTrue(eval1.byActionID["rg_hb_accept_94961"].state == "blocked_quest_log_full", "Unaccepted quest must be blocked_quest_log_full at 40/40")
-      assertTrue(eval1.nextAction ~= nil and eval1.nextAction.actionID == "rg_pf_obj_wanted_trapclaw", "At Powderfuse (78.9, 53.0), local Trapclaw objective must be chosen first")
+      -- 2. Unaccepted quests are blocked by 40/40 log, NOT stalling active progression; local Powderfuse delivery 94928 wins!
+      assertTrue(eval1.byActionID["rg_hb_accept_94614"].state == "blocked_quest_log_full", "Unaccepted quest must be blocked_quest_log_full at 40/40")
+      assertTrue(eval1.nextAction ~= nil and eval1.nextAction.actionID == "rg_pf_turnin_94928", "At Powderfuse (78.9, 53.0), ready zero-objective A Few Furs for Friz (94928) turn-in must be chosen first")
+      active22[94928] = false
+      completedPrior[94928] = true
+      eval1 = RouteProgress.Reconcile(
+        route,
+        prog,
+        makeMockCtx({ level = 41, active = active22, completed = completedPrior, objectives = objectives22, questLogFull = true }),
+        playerAtPowderfuse
+      )
+      assertTrue(eval1.nextAction ~= nil and eval1.nextAction.actionID == "rg_pf_obj_wanted_trapclaw", "After turning in 94928 at Powderfuse, local Trapclaw objective must be chosen next")
 
       -- 3. [42+] Elite bounty objectives are hidden by default, EXCEPT if completed they immediately surface to turn in!
       assertTrue(eval1.byActionID["rg_el_obj_95991"].state == "ineligible", "[42+] Ghostmaw objective must default off for solo safety")
@@ -1757,17 +1757,32 @@ function SelfTest.RunRivergladesSuite()
         }),
         playerAtPowderfuse
       )
-      assertTrue(eval3.nextAction.actionID == "rg_pf_obj_goes_down_smooth", "Turning in Trapclaw must auto-advance to next local Powderfuse step without clicking Skip")
+      assertTrue(eval3.nextAction.actionID == "rg_pf_accept_95261", "Freeing a slot after Trapclaw at Powderfuse must immediately offer local dock pickup It Takes Guts (95261)")
+      completedPrior[95261] = true
+      completedPrior[95267] = true
+      local eval3b = RouteProgress.Reconcile(
+        route,
+        prog,
+        makeMockCtx({
+          level = 41,
+          active = active22,
+          completed = completedPrior,
+          objectives = objectives22,
+          questLogFull = false,
+        }),
+        playerAtPowderfuse
+      )
+      assertTrue(eval3b.nextAction.actionID == "rg_pf_obj_goes_down_smooth", "With Powderfuse pickups complete, turning in Trapclaw must auto-advance to Goes Down Smooth without clicking Skip")
 
-      -- 5. Zero-objective delivery `From Port to Port` (95988) is available & immediately prioritized if player arrives in Feralas (1444)
-      assertTrue(eval3.byActionID["rg_exit_turnin_95988"].state == "available", "Zero-objective delivery 95988 must be available while active")
+      -- 5. Zero-objective delivery `From Port to Port` (95219) is available & immediately prioritized if player arrives in Feralas (1444)
+      assertTrue(eval3.byActionID["rg_exit_turnin_95219"].state == "available", "Zero-objective delivery 95219 must be available while active")
       local evalInFeralas = RouteProgress.Reconcile(
         route,
         prog,
         makeMockCtx({ level = 41, active = active22, completed = completedPrior, objectives = objectives22 }),
         { status = "ok", uiMapID = 1444, x01 = 0.3100, y01 = 0.4320 }
       )
-      assertTrue(evalInFeralas.nextAction.actionID == "rg_exit_turnin_95988", "Entering Feralas must immediately prioritize From Port to Port turn-in")
+      assertTrue(evalInFeralas.nextAction.actionID == "rg_exit_turnin_95219", "Entering Feralas must immediately prioritize From Port to Port turn-in")
     end)
     ns.State.overrideMapWorldSizes = savedWorldSizes
     if not okReplay then
@@ -1827,7 +1842,7 @@ function SelfTest.RunRivergladesSuite()
       active = {
         [94842] = true,
         [94907] = true, -- A Small Favor active -> artifact_verified inference suppresses 94879 & 94881!
-        [95988] = true,
+        [95219] = true,
         ["title:wanted: trapclaw"] = true,
       },
       completed = {
@@ -1872,7 +1887,7 @@ function SelfTest.RunRivergladesSuite()
     }
     local ctx2 = makeMockCtx({
       level = 41,
-      active = { [94842] = true, [94907] = true, [95988] = true, ["title:wanted: trapclaw"] = true },
+      active = { [94842] = true, [94907] = true, [95219] = true, ["title:wanted: trapclaw"] = true },
       completed = { [95603] = true, [95613] = true },
       objectives = unsavoryObjectivesAfterMurlocs,
     })
@@ -1928,11 +1943,11 @@ function SelfTest.RunRivergladesSuite()
     local entriesFeralas = WorldMapPins.CollectPinEntries(1444, route, prog, pinSettings, ctx2, playerPos)
     local foundPortToPort = false
     for _, e in ipairs(entriesFeralas) do
-      if e.actionID == "rg_exit_turnin_95988" and e.kind == "turnin" then
+      if e.actionID == "rg_exit_turnin_95219" and e.kind == "turnin" then
         foundPortToPort = true
       end
     end
-    assertTrue(foundPortToPort, "Active From Port to Port (95988) must appear as a turn-in pin on Feralas (1444)")
+    assertTrue(foundPortToPort, "Active From Port to Port (95219) must appear as a turn-in pin on Feralas (1444)")
 
     -- Left-click focus (`FocusActionFromMapPin`) & Right-click unpin (`ClearPinnedFocus`)
     local okFocus, evalFocus = RouteProgress.FocusActionFromMapPin("rg_hb_obj_94842", "fresh_manure", route, prog, ctx2, playerPos)
@@ -2244,8 +2259,8 @@ function SelfTest.RunRivergladesSuite()
       assertTrue(string.find(rxpGuideText, ".complete 94842,1", 1, true) ~= nil, "RXP export must emit per-subLocation .complete 94842,1")
       assertTrue(string.find(rxpGuideText, ".complete 94842,3", 1, true) ~= nil, "RXP export must emit per-subLocation .complete 94842,3")
       assertTrue(string.find(rxpGuideText, ".complete -95991,1", 1, true) ~= nil, "RXP export must emit negative skipIfMissing .complete for optional [42+] elites")
-      assertTrue(string.find(rxpGuideText, "\n    +Accept Goes Down Smooth (manual checkbox", 1, true) ~= nil, "Undiscovered title quest in RXP export must emit clickable + manual checkbox")
-      assertTrue(string.find(rxpGuideText, "[Est. Coords]", 1, true) ~= nil, "RXP export must label estimated patrol coordinates")
+      assertTrue(string.find(rxpGuideText, "\n    +Accept WANTED: Trapclaw (manual checkbox", 1, true) ~= nil, "Undiscovered title quest in RXP export must emit clickable + manual checkbox")
+      assertTrue(string.find(rxpGuideText, "[Est. Coords]", 1, true) == nil, "RXP export must have zero [Est. Coords] when 100% of active steps are artifact_verified")
     end)
 
     _G.C_QuestLog = savedCQ
@@ -2275,6 +2290,243 @@ function SelfTest.RunRivergladesSuite()
     ns.Compat.InvalidateQuestStateCaches()
     if not okGate14 then
       error(errGate14, 2)
+    end
+  end)
+
+  -- RG-15. v0.8.4 14-Quest Zone Audit & Live Client Quest-Target Self-Healing (Defense-in-Depth)
+  check("RG-15. v0.8.4 14-Quest Zone Audit & Live Client Quest-Target Self-Healing", function()
+    local savedMapOv = ns.State.overrideMapQuestsByUiMapID
+    local savedObjTxtOv = ns.State.overrideQuestObjectiveTexts
+    local savedWorldSizes = ns.State.overrideMapWorldSizes
+    local savedDrifts = deepCopyTable(ns.Compat.liveQuestTargetDrifts or {})
+    local savedObjTxtMem = deepCopyTable(ns.Compat.questObjectiveTextByID or {})
+    local savedCharRG = charDB and deepCopyTable(charDB.routeProgress) or nil
+
+    local okGate15, errGate15 = pcall(function()
+      ns.State.overrideMapWorldSizes = { [2548] = { width = 3600, height = 2400 }, [1444] = { width = 6950, height = 4633 } }
+      ns.Compat.liveQuestTargetDrifts = {}
+      ns.Compat.questObjectiveTextByID = {}
+
+      -- 1. Verify Layer 1 Static Audit: Gaseous Gold (96063) -> Sleebo Fizzlespout (263367 @ 69.55, 50.32), NOT Friz Frazzlespark!
+      local byID = {}
+      for _, a in ipairs(route.actions) do
+        byID[a.actionID] = a
+        if a.destination then
+          assertTrue(
+            a.destination.coordConfidence == "artifact_verified",
+            "Every active automated step in v0.8.4 must be artifact_verified: " .. tostring(a.actionID)
+          )
+        end
+      end
+      local gasAccept = byID["rg_pf_accept_96063"]
+      local gasTurnin = byID["rg_pf_turnin_96063"]
+      assertTrue(
+        gasAccept and gasAccept.npcID == 263367 and gasAccept.npcName == "Sleebo Fizzlespout",
+        "96063 accept must point to Sleebo Fizzlespout (263367)"
+      )
+      assertTrue(
+        gasTurnin
+          and gasTurnin.npcID == 263367
+          and gasTurnin.npcName == "Sleebo Fizzlespout"
+          and math.abs(gasTurnin.destination.x01 - 0.6955) < 1e-4
+          and math.abs(gasTurnin.destination.y01 - 0.5032) < 1e-4,
+        "96063 turn-in must point to Sleebo Fizzlespout @ (0.6955, 0.5032)"
+      )
+
+      -- Verify key audited quests across the zone
+      local gdsObj = byID["rg_pf_obj_goes_down_smooth"]
+      assertTrue(
+        gdsObj and type(gdsObj.subLocations) == "table" and #gdsObj.subLocations == 4,
+        "Goes Down Smooth (95988) must include all 4 audited drink delivery sub-locations"
+      )
+      assertTrue(
+        byID["rg_pf_turnin_goes_down_smooth"] and byID["rg_pf_turnin_goes_down_smooth"].npcID == 255894,
+        "Goes Down Smooth (95988) turn-in must be Innkeeper Zizplink (255894)"
+      )
+      assertTrue(
+        byID["rg_exit_turnin_95219"]
+          and byID["rg_exit_turnin_95219"].npcID == 7941
+          and byID["rg_exit_turnin_95219"].destination.uiMapID == 1444,
+        "From Port to Port (95219) must deliver to Mardrack Greenwell (7941) in Feralas (1444)"
+      )
+      assertTrue(
+        byID["rg_fk_obj_95603"] and byID["rg_fk_obj_95603"].npcID == 262037,
+        "Bats in the Belfry (95603) must target Roosting Duskbat (262037)"
+      )
+      assertTrue(
+        byID["rg_fk_turnin_95156"] and byID["rg_fk_turnin_95156"].npcID == 260080
+          and byID["rg_sup_turnin_95184"] and byID["rg_sup_turnin_95184"].npcID == 260080,
+        "95156 & 95184 must point to Ember Bladewhisper (260080)"
+      )
+      assertTrue(
+        route.questsByID[94925] and route.questsByID[94925].zeroObjectives == false
+          and byID["rg_hb_turnin_94925"] and byID["rg_hb_turnin_94925"].npcID == 259352
+          and route.questsByID[94928] and route.questsByID[94928].zeroObjectives == true
+          and byID["rg_pf_turnin_94928"] and byID["rg_pf_turnin_94928"].npcID == 255897,
+        "A Fur Trade (94925) must turn in to Watcher Cornelius (259352), unlocking zero-objective A Few Furs for Friz (94928 -> 255897)"
+      )
+      assertTrue(
+        byID["rg_hb_turnin_95329"] and byID["rg_hb_turnin_95329"].npcID == 259352,
+        "Out in the Field (95329) turn-in must point to Watcher Cornelius (259352)"
+      )
+      assertTrue(
+        byID["rg_hb_accept_94614"] and byID["rg_hb_accept_94614"].npcID == 258317
+          and byID["rg_hb_accept_94618"] and byID["rg_hb_accept_94618"].npcID == 258317,
+        "94614 & 94618 must be present at Benjy Wheeler (258317)"
+      )
+      assertTrue(
+        byID["rg_pf_turnin_wanted_trapclaw"] and byID["rg_pf_turnin_wanted_trapclaw"].npcID == 259962,
+        "WANTED: Trapclaw must turn in at Fimbo Greasemitz (259962)"
+      )
+      assertTrue(
+        byID["rg_el_turnin_95912"] and byID["rg_el_turnin_95912"].npcID == 260080,
+        "WANTED: Blademaster Kaijo (95912) must turn in at Ember Bladewhisper (260080)"
+      )
+      assertTrue(
+        type(route.npcDirectoryByID) == "table" and route.npcDirectoryByID[263367] ~= nil and route.npcDirectoryByID[7941] ~= nil,
+        "198-entry NPC directory must include Sleebo Fizzlespout (263367) and Mardrack Greenwell (7941)"
+      )
+
+      -- 2. Verify Layer 2 Live Client Self-Healing against simulated server hotfix drift
+      -- Simulate an outdated static turn-in action pointing 96063 to Friz Frazzlespark (77.15, 52.92)
+      local staleAction = {
+        actionID = "test_stale_turnin_96063",
+        kind = "turnin",
+        questID = 96063,
+        title = "Turn in Gaseous Gold",
+        npcID = 255897,
+        npcName = "Friz Frazzlespark",
+        destination = {
+          uiMapID = 2548,
+          areaID = 16727,
+          x01 = 0.7715,
+          y01 = 0.5292,
+          coordinateSpace = "uiMap01",
+          coordConfidence = "artifact_verified",
+        },
+      }
+      local healProg = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
+      local healCtx = makeMockCtx({
+        level = 41,
+        active = { [96063] = true },
+        objectives = { [96063] = true },
+      })
+
+      -- 2a. Hostile-mob & rank-prefix text parser safety
+      assertTrue(
+        ns.Compat.MatchNpcFromQuestText("Travel to Bolder'ok Outpost to kill Bolder'ok Brute.", route) == nil,
+        "MatchNpcFromQuestText must NEVER match hostile mob after an infinitive verb ('to kill ...')"
+      )
+      local rankedMatch = ns.Compat.MatchNpcFromQuestText(
+        "Deliver the Eye of Mugg to Knight Commander Demar Brant in Farholde Keep.",
+        route
+      )
+      assertTrue(
+        rankedMatch and rankedMatch.npcID == 257558,
+        "MatchNpcFromQuestText must resolve ranked NPC names ('Knight Commander Demar Brant' -> 257558)"
+      )
+
+      -- 2b. Signal 1: Quest Log objective text ('Gather 5 Marsh Gas Vials for Sleebo Fizzlespout.') heals target!
+      ns.State.overrideMapQuestsByUiMapID = {}
+      ns.State.overrideQuestObjectiveTexts = {
+        [96063] = "Gather 5 Marsh Gas Vials for Sleebo Fizzlespout.",
+      }
+      local d1, n1, sub1, ov1 = RoutePlanner.ResolveActiveActionTarget(staleAction, healProg, healCtx, nil, route)
+      assertTrue(sub1 == nil, "Single-spot live override MUST keep 3rd return (activeSub) nil")
+      assertTrue(
+        d1
+          and n1 == "Sleebo Fizzlespout"
+          and math.abs(d1.x01 - 0.6955) < 1e-4
+          and math.abs(d1.y01 - 0.5032) < 1e-4
+          and ov1
+          and ov1.source == "quest_text_npc",
+        "Quest Log objective text must self-heal turn-in target to Sleebo Fizzlespout @ (69.55, 50.32)"
+      )
+
+      -- 2c. Signal 2: Observed QUEST_DETAIL giver heals same-giver-as-turnin quest when text/POI absent
+      ns.State.overrideQuestObjectiveTexts = nil
+      ns.Compat.questObjectiveTextByID = {}
+      ns.State.RecordObservedQuestGiver(96063, {
+        npcID = 263367,
+        npcName = "Sleebo Fizzlespout",
+        uiMapID = 2548,
+        x01 = 0.6955,
+        y01 = 0.5032,
+      }, healProg)
+      local d2, n2, sub2, ov2 = RoutePlanner.ResolveActiveActionTarget(staleAction, healProg, healCtx, nil, route)
+      assertTrue(
+        sub2 == nil
+          and n2 == "Sleebo Fizzlespout"
+          and math.abs(d2.x01 - 0.6955) < 1e-4
+          and ov2
+          and ov2.source == "observed_quest_giver",
+        "Observed quest giver must self-heal turn-in when giverNpcID == turninNpcID"
+      )
+
+      -- 2d. Signal 3: Live Map POI (`C_QuestLog.GetQuestsOnMap`) heals target & World Map Pins, while <25 yd jitter is ignored!
+      healProg.observedQuestGivers = {}
+      ns.State.overrideMapQuestsByUiMapID = {
+        [2548] = {
+          [96063] = { questID = 96063, x01 = 0.7712, y01 = 0.5290 }, -- ~1.2 yds from static: must NOT trigger override!
+        },
+      }
+      local _, _, _, ovJitter = RoutePlanner.ResolveActiveActionTarget(staleAction, healProg, healCtx, nil, route)
+      assertTrue(ovJitter == nil, "<25 yd map POI coordinate jitter must NOT trigger a false-positive override")
+
+      -- Move live map POI for 96063 to Powderfuse Pier (Argo Brinewhistle @ 0.7954, 0.5246, >360 yds from Sleebo):
+      -- Both ResolveActiveActionTarget AND WorldMapPins.CollectPinEntries on the real route must self-heal!
+      ns.State.overrideMapQuestsByUiMapID = {
+        [2548] = {
+          [96063] = { questID = 96063, x01 = 0.7954, y01 = 0.5246 },
+        },
+      }
+      local realTurnin = byID["rg_pf_turnin_96063"]
+      local d3, n3, sub3, ov3 = RoutePlanner.ResolveActiveActionTarget(realTurnin, healProg, healCtx, nil, route)
+      assertTrue(
+        sub3 == nil
+          and n3 == "Argo Brinewhistle"
+          and math.abs(d3.x01 - 0.7954) < 1e-4
+          and math.abs(d3.y01 - 0.5246) < 1e-4
+          and ov3
+          and ov3.source == "live_map_poi",
+        "Live map POI >25 yds away must self-heal route target and resolve nearest directory NPC"
+      )
+      assertTrue(
+        ns.Compat.liveQuestTargetDrifts["rg_pf_turnin_96063"] ~= nil,
+        "Active live self-healing override must be recorded in Compat.liveQuestTargetDrifts for /fh rg doctor"
+      )
+
+      local healedPins = ns.UI.WorldMapPins.CollectPinEntries(
+        2548,
+        route,
+        healProg,
+        { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
+        healCtx
+      )
+      local sawHealedMapPin = false
+      for _, pe in ipairs(healedPins) do
+        if pe.actionID == "rg_pf_turnin_96063" then
+          assertTrue(
+            math.abs(pe.x01 - 0.7954) < 1e-4 and pe.targetName == "Argo Brinewhistle",
+            "WorldMapPins must project healed coordinates and NPC name for single-spot turn-ins"
+          )
+          sawHealedMapPin = true
+        end
+      end
+      assertTrue(sawHealedMapPin, "WorldMapPins must emit healed turn-in pin for 96063")
+    end)
+
+    ns.State.overrideMapQuestsByUiMapID = savedMapOv
+    ns.State.overrideQuestObjectiveTexts = savedObjTxtOv
+    ns.State.overrideMapWorldSizes = savedWorldSizes
+    ns.Compat.liveQuestTargetDrifts = savedDrifts
+    ns.Compat.questObjectiveTextByID = savedObjTxtMem
+    if charDB then
+      charDB.routeProgress = savedCharRG
+    end
+    ns.Compat.InvalidateQuestStateCaches()
+    if not okGate15 then
+      error(errGate15, 2)
     end
   end)
 

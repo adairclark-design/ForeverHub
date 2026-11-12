@@ -843,12 +843,21 @@ end
 -- Selects the active destination & target caption for HUD + Directional Arrow,
 -- honoring user-clicked `pinnedSubLocationID`, sustained `currentSubLocationID` hysteresis (Astra P2 #3),
 -- or the closest unfinished `subLocation`.
-function RoutePlanner.ResolveActiveActionTarget(action, progress, ctx, playerPos)
+function RoutePlanner.ResolveActiveActionTarget(action, progress, ctx, playerPos, route)
   if type(action) ~= "table" then
-    return nil, nil, nil
+    return nil, nil, nil, nil
   end
   if type(action.subLocations) ~= "table" or #action.subLocations == 0 then
-    return action.destination, action.npcName, nil
+    if (action.kind == "turnin" or action.kind == "objective")
+      and ns.Compat
+      and type(ns.Compat.ResolveLiveQuestTargetOverride) == "function"
+    then
+      local liveOverride = ns.Compat.ResolveLiveQuestTargetOverride(action, route, progress, ctx)
+      if type(liveOverride) == "table" and type(liveOverride.destination) == "table" then
+        return liveOverride.destination, liveOverride.targetName or action.npcName, nil, liveOverride
+      end
+    end
+    return action.destination, action.npcName, nil, nil
   end
   ctx = ctx or RoutePlanner.BuildDefaultContext()
   playerPos = playerPos or (ns.Compat and ns.Compat.GetPlayerPosition01 and ns.Compat.GetPlayerPosition01()) or nil
@@ -925,8 +934,8 @@ function RoutePlanner.SelectBestNextAction(availableEvaluations, route, progress
   for _, ev in ipairs(availableEvaluations) do
     local act = ev.action
     local scoreDest = act and act.destination or nil
-    if act and type(act.subLocations) == "table" and #act.subLocations > 0 then
-      local resolvedDest = RoutePlanner.ResolveActiveActionTarget(act, progress, ctx, playerPos)
+    if act and ((type(act.subLocations) == "table" and #act.subLocations > 0) or act.kind == "turnin" or act.kind == "objective") then
+      local resolvedDest = RoutePlanner.ResolveActiveActionTarget(act, progress, ctx, playerPos, route)
       if type(resolvedDest) == "table" then
         scoreDest = resolvedDest
       end

@@ -501,6 +501,9 @@ Compat.recentQuestAcceptedByTitle = Compat.recentQuestAcceptedByTitle or {}
 Compat.recentQuestTurnedInByID = Compat.recentQuestTurnedInByID or {}
 Compat.recentQuestTurnedInByTitle = Compat.recentQuestTurnedInByTitle or {}
 Compat.observedLogTitlesByID = Compat.observedLogTitlesByID or {}
+Compat.questObjectiveTextByID = Compat.questObjectiveTextByID or {}
+Compat.liveMapQuestsCache = Compat.liveMapQuestsCache or {}
+Compat.liveQuestTargetDrifts = Compat.liveQuestTargetDrifts or {}
 Compat.lastDialogQuest = Compat.lastDialogQuest or { questID = nil, rawTitle = nil, normTitle = nil, capturedAt = 0 }
 Compat.bulkCompletedCache = Compat.bulkCompletedCache or { expiresAt = 0, map = nil }
 Compat.liveQuestLogCache = Compat.liveQuestLogCache or { expiresAt = 0, data = nil }
@@ -509,6 +512,7 @@ local RECENT_ACCEPT_TTL_SECONDS = 3.5
 local RECENT_TURNIN_TTL_SECONDS = 8.0
 local BULK_COMPLETED_TTL_SECONDS = 2.0
 local LIVE_QUESTLOG_CACHE_TTL_SECONDS = 0.25
+local LIVE_MAP_QUESTS_CACHE_TTL_SECONDS = 1.50
 
 function Compat.NowSeconds()
   if type(GetTime) == "function" then
@@ -552,6 +556,7 @@ end
 function Compat.InvalidateQuestStateCaches()
   Compat.bulkCompletedCache = { expiresAt = 0, map = nil }
   Compat.liveQuestLogCache = { expiresAt = 0, data = nil }
+  Compat.liveMapQuestsCache = {}
 end
 
 function Compat.LookupRouteQuestMeta(questRef)
@@ -562,6 +567,13 @@ function Compat.LookupRouteQuestMeta(questRef)
   local qid = tonumber(questRef)
   if qid and type(route.questsByID) == "table" and type(route.questsByID[qid]) == "table" then
     return route.questsByID[qid]
+  end
+  if qid and type(route.questsByTitleKey) == "table" then
+    for _, row in pairs(route.questsByTitleKey) do
+      if type(row) == "table" and tonumber(row.knownQuestID) == qid then
+        return row
+      end
+    end
   end
   if type(questRef) == "string" and type(route.questsByTitleKey) == "table" then
     local direct = route.questsByTitleKey[questRef]
@@ -576,9 +588,25 @@ function Compat.LookupRouteQuestMeta(questRef)
   return nil
 end
 
-function Compat.CaptureQuestDialogIdentity()
+local function parseNpcIdFromGuid(guid)
+  if type(guid) ~= "string" or Compat.IsSecretOrRestrictedValue(guid) or guid == "" then
+    return nil
+  end
+  local idStr = string.match(guid, "^%a+%-0%-%d+%-%d+%-%d+%-(%d+)%-")
+    or string.match(guid, "%-(%d+)%-%x+$")
+  local nid = tonumber(idStr)
+  if nid and nid > 0 then
+    return nid
+  end
+  return nil
+end
+
+function Compat.CaptureQuestDialogIdentity(dialogKind)
   local qid = nil
   local rawTitle = nil
+  local npcID = nil
+  local npcName = nil
+  local objectiveText = nil
   if type(GetQuestID) == "function" then
     local ok, id = pcall(GetQuestID)
     if ok and not Compat.IsSecretOrRestrictedValue(id) then
@@ -594,17 +622,56 @@ function Compat.CaptureQuestDialogIdentity()
       rawTitle = t
     end
   end
+  if type(_G.UnitGUID) == "function" then
+    local okG, guid = pcall(_G.UnitGUID, "npc")
+    if okG then
+      npcID = parseNpcIdFromGuid(guid)
+    end
+  end
+  if type(UnitName) == "function" then
+    local okU, uName = pcall(UnitName, "npc")
+    if okU and type(uName) == "string" and not Compat.IsSecretOrRestrictedValue(uName) and uName ~= "" then
+      npcName = uName
+    end
+  end
+  if type(_G.GetObjectiveText) == "function" then
+    local okO, oTxt = pcall(_G.GetObjectiveText)
+    if okO and type(oTxt) == "string" and not Compat.IsSecretOrRestrictedValue(oTxt) and oTxt ~= "" then
+      objectiveText = oTxt
+    end
+  end
+  local posStatus, posMapID, posX, posY = Compat.GetPlayerPosition01Raw()
   local normTitle = Compat.NormalizeQuestTitle(rawTitle)
   Compat.lastDialogQuest = {
+    dialogKind = dialogKind,
     questID = qid,
     rawTitle = rawTitle,
     normTitle = normTitle,
+    npcID = npcID,
+    npcName = npcName,
+    objectiveText = objectiveText,
+    uiMapID = (posStatus == "ok") and posMapID or nil,
+    x01 = (posStatus == "ok") and posX or nil,
+    y01 = (posStatus == "ok") and posY or nil,
     capturedAt = Compat.NowSeconds(),
   }
-  if qid and normTitle then
-    Compat.observedLogTitlesByID[qid] = normTitle
-    if ns.State and type(ns.State.RecordDiscoveredQuestId) == "function" then
-      ns.State.RecordDiscoveredQuestId(normTitle, qid)
+  if qid then
+    if normTitle then
+      Compat.observedLogTitlesByID[qid] = normTitle
+      if ns.State and type(ns.State.RecordDiscoveredQuestId) == "function" then
+        ns.State.RecordDiscoveredQuestId(normTitle, qid)
+      end
+    end
+    if objectiveText then
+      Compat.questObjectiveTextByID[qid] = objectiveText
+      if ns.State and type(ns.State.RecordObservedQuestObjectiveText) == "function" then
+        ns.State.RecordObservedQuestObjectiveText(qid, objectiveText)
+      end
+    end
+    if dialogKind == "QUEST_DETAIL" and (npcID or npcName) then
+      if ns.State and type(ns.State.RecordObservedQuestGiver) == "function" then
+        ns.State.RecordObservedQuestGiver(qid, Compat.lastDialogQuest)
+      end
     end
   end
   return Compat.lastDialogQuest
@@ -881,6 +948,146 @@ function Compat.ResolveFreshQuestLogIndex(questID, normTitle)
   return nil, false
 end
 
+function Compat.GetSelectedQuestInfo()
+  if ns.State and type(ns.State.overrideSelectedQuest) == "table" then
+    local ov = ns.State.overrideSelectedQuest
+    local qid = tonumber(ov.questID)
+    if qid and qid <= 0 then
+      qid = nil
+    end
+    local rawTitle = type(ov.title) == "string" and ov.title or nil
+    if not rawTitle and qid then
+      local meta = Compat.LookupRouteQuestMeta(qid)
+      rawTitle = meta and meta.name or nil
+    end
+    local normTitle = Compat.NormalizeQuestTitle(rawTitle)
+    if not qid and not normTitle then
+      return { available = false }
+    end
+    return {
+      available = true,
+      questID = qid,
+      title = rawTitle,
+      normTitle = normTitle,
+      level = tonumber(ov.level),
+      source = "override",
+    }
+  end
+
+  local qid = nil
+  local rawTitle = nil
+  local qLevel = nil
+  local source = nil
+
+  if type(_G.QuestMapFrame_GetDetailQuestID) == "function" then
+    local ok, id = pcall(_G.QuestMapFrame_GetDetailQuestID)
+    if ok and not Compat.IsSecretOrRestrictedValue(id) and (tonumber(id) or 0) > 0 then
+      qid = tonumber(id)
+      source = "quest_map_detail_fn"
+    end
+  end
+
+  if not qid and type(_G.QuestMapFrame) == "table" and type(_G.QuestMapFrame.DetailsFrame) == "table" then
+    local df = _G.QuestMapFrame.DetailsFrame
+    local shown = (type(df.IsShown) ~= "function") or df:IsShown()
+    if shown and not Compat.IsSecretOrRestrictedValue(df.questID) and (tonumber(df.questID) or 0) > 0 then
+      qid = tonumber(df.questID)
+      source = "quest_map_details_frame"
+    end
+  end
+
+  if not qid and type(_G.WorldMapFrame) == "table" then
+    local wf = _G.WorldMapFrame
+    if type(wf.DetailsFrame) == "table" then
+      local df = wf.DetailsFrame
+      local shown = (type(df.IsShown) ~= "function") or df:IsShown()
+      if shown and not Compat.IsSecretOrRestrictedValue(df.questID) and (tonumber(df.questID) or 0) > 0 then
+        qid = tonumber(df.questID)
+        source = "world_map_details_frame"
+      end
+    end
+    if not qid and type(wf.questLog) == "table" then
+      local ql = wf.questLog
+      if type(ql.DetailsFrame) == "table" then
+        local df = ql.DetailsFrame
+        local shown = (type(df.IsShown) ~= "function") or df:IsShown()
+        if shown and not Compat.IsSecretOrRestrictedValue(df.questID) and (tonumber(df.questID) or 0) > 0 then
+          qid = tonumber(df.questID)
+          source = "world_map_questlog_details"
+        end
+      end
+      if not qid and not Compat.IsSecretOrRestrictedValue(ql.selectedQuestID) and (tonumber(ql.selectedQuestID) or 0) > 0 then
+        qid = tonumber(ql.selectedQuestID)
+        source = "world_map_questlog_selected"
+      end
+    end
+  end
+
+  if not qid and C_QuestLog and type(C_QuestLog.GetSelectedQuest) == "function" then
+    local ok, id = pcall(C_QuestLog.GetSelectedQuest)
+    if ok and not Compat.IsSecretOrRestrictedValue(id) and (tonumber(id) or 0) > 0 then
+      qid = tonumber(id)
+      source = "c_questlog_selected"
+    end
+  end
+
+  if not qid and type(_G.GetQuestLogSelection) == "function" and type(_G.GetQuestLogTitle) == "function" then
+    local okSel, selIdx = pcall(_G.GetQuestLogSelection)
+    if okSel and type(selIdx) == "number" and selIdx > 0 and not Compat.IsSecretOrRestrictedValue(selIdx) then
+      local okRow, t, lvl, _, isHeader, _, _, _, rowQid = pcall(_G.GetQuestLogTitle, selIdx)
+      if okRow and not (isHeader == true or isHeader == 1) then
+        if type(t) == "string" and not Compat.IsSecretOrRestrictedValue(t) and t ~= "" then
+          rawTitle = t
+        end
+        if type(lvl) == "number" and not Compat.IsSecretOrRestrictedValue(lvl) and lvl > 0 then
+          qLevel = lvl
+        end
+        if not Compat.IsSecretOrRestrictedValue(rowQid) and (tonumber(rowQid) or 0) > 0 then
+          qid = tonumber(rowQid)
+        end
+        source = "classic_questlog_selection"
+      end
+    end
+  end
+
+  if qid and not rawTitle then
+    if C_QuestLog and type(C_QuestLog.GetTitleForQuestID) == "function" then
+      local okT, t = pcall(C_QuestLog.GetTitleForQuestID, qid)
+      if okT and type(t) == "string" and not Compat.IsSecretOrRestrictedValue(t) and t ~= "" then
+        rawTitle = t
+      end
+    end
+    if not rawTitle then
+      local scan = Compat.ScanLiveQuestLog(false)
+      local liveRow = scan.available and scan.byID and scan.byID[qid] or nil
+      if liveRow then
+        rawTitle = liveRow.title or liveRow.normTitle
+        qLevel = qLevel or tonumber(liveRow.level)
+      end
+    end
+    if not rawTitle then
+      local meta = Compat.LookupRouteQuestMeta(qid)
+      if meta then
+        rawTitle = meta.name
+        qLevel = qLevel or tonumber(meta.questLevel)
+      end
+    end
+  end
+
+  local normTitle = Compat.NormalizeQuestTitle(rawTitle)
+  if not qid and not normTitle then
+    return { available = false }
+  end
+  return {
+    available = true,
+    questID = qid,
+    title = rawTitle,
+    normTitle = normTitle,
+    level = qLevel,
+    source = source or "live",
+  }
+end
+
 function Compat.ResolveQuestIdentity(questRef)
   local qid = tonumber(questRef)
   if qid and qid <= 0 then
@@ -918,6 +1125,47 @@ function Compat.ResolveQuestIdentity(questRef)
           identityConfidence = "live_log_id"
         else
           identityConfidence = "title_only_active"
+        end
+      end
+      if not qid and meta and tonumber(meta.knownQuestID) and tonumber(meta.knownQuestID) > 0 then
+        local kQid = tonumber(meta.knownQuestID)
+        local now = Compat.NowSeconds()
+        local hasExplicitOverride = (
+          ns.State
+          and (
+            (type(ns.State.overrideActiveQuests) == "table" and ns.State.overrideActiveQuests[kQid] ~= nil)
+            or (type(ns.State.overrideCompletedQuests) == "table" and ns.State.overrideCompletedQuests[kQid] ~= nil)
+          )
+        )
+        local observedOrCached = (
+          (ns.State and type(ns.State.IsObservedCompletedQuestId) == "function" and ns.State.IsObservedCompletedQuestId(kQid))
+          or ((Compat.recentQuestAcceptedByID[kQid] or 0) > now)
+          or ((Compat.recentQuestTurnedInByID[kQid] or 0) > now)
+          or (scan and scan.available and scan.byID and scan.byID[kQid] ~= nil)
+        )
+        local liveActiveOrCompleted = false
+        if not hasExplicitOverride and not observedOrCached then
+          if not (ns.State and type(ns.State.overrideActiveQuests) == "table")
+            and C_QuestLog and type(C_QuestLog.IsOnQuest) == "function"
+          then
+            local okOn, onVal = pcall(C_QuestLog.IsOnQuest, kQid)
+            if okOn and not Compat.IsSecretOrRestrictedValue(onVal) and onVal == true then
+              liveActiveOrCompleted = true
+            end
+          end
+          if not liveActiveOrCompleted
+            and not (ns.State and type(ns.State.overrideCompletedQuests) == "table")
+            and C_QuestLog and type(C_QuestLog.IsQuestFlaggedCompleted) == "function"
+          then
+            local okDone, doneVal = pcall(C_QuestLog.IsQuestFlaggedCompleted, kQid)
+            if okDone and not Compat.IsSecretOrRestrictedValue(doneVal) and doneVal == true then
+              liveActiveOrCompleted = true
+            end
+          end
+        end
+        if hasExplicitOverride or observedOrCached or liveActiveOrCompleted then
+          qid = kQid
+          identityConfidence = "live_log_id"
         end
       end
     end
@@ -1004,6 +1252,23 @@ function Compat.RecordRecentQuestAccepted(questID, rawTitle)
       Compat.observedLogTitlesByID[qid] = normTitle
       if ns.State and type(ns.State.RecordDiscoveredQuestId) == "function" then
         ns.State.RecordDiscoveredQuestId(normTitle, qid)
+      end
+    end
+    if Compat.lastDialogQuest and (now - (Compat.lastDialogQuest.capturedAt or 0)) <= 6.0 then
+      local dQid = Compat.lastDialogQuest.questID
+      local dKind = Compat.lastDialogQuest.dialogKind
+      if (not dQid or dQid == qid) and (dKind == nil or dKind == "QUEST_DETAIL") then
+        if type(Compat.lastDialogQuest.objectiveText) == "string" and Compat.lastDialogQuest.objectiveText ~= "" then
+          Compat.questObjectiveTextByID[qid] = Compat.lastDialogQuest.objectiveText
+          if ns.State and type(ns.State.RecordObservedQuestObjectiveText) == "function" then
+            ns.State.RecordObservedQuestObjectiveText(qid, Compat.lastDialogQuest.objectiveText)
+          end
+        end
+        if Compat.lastDialogQuest.npcID or Compat.lastDialogQuest.npcName then
+          if ns.State and type(ns.State.RecordObservedQuestGiver) == "function" then
+            ns.State.RecordObservedQuestGiver(qid, Compat.lastDialogQuest)
+          end
+        end
       end
     end
   end
@@ -2605,4 +2870,501 @@ function Compat.RequestItemVisualLoad(itemID)
     return false
   end
   return Compat.RequestLoadItemData(id)
+end
+
+-- ============================================================================
+-- v0.8.4 Live Client Quest-Target Self-Healing (Defense-in-Depth Layer 2)
+-- Cross-checks single-spot turn-in and objective steps against live client
+-- map POIs (`C_QuestLog.GetQuestsOnMap`), Quest Log objective recipient text,
+-- and observed quest-giver identity so unannounced server hotfixes self-heal.
+-- ============================================================================
+
+local QUEST_TEXT_RANK_PREFIX_WORDS = {
+  abbot = true,
+  barracks = true,
+  brother = true,
+  captain = true,
+  cavalry = true,
+  chief = true,
+  commander = true,
+  corporal = true,
+  doctor = true,
+  foreman = true,
+  guard = true,
+  innkeeper = true,
+  knight = true,
+  lady = true,
+  lieutenant = true,
+  lord = true,
+  marshal = true,
+  master = true,
+  professor = true,
+  scout = true,
+  sergeant = true,
+  sister = true,
+  watcher = true,
+  wharfmaster = true,
+}
+
+local QUEST_TEXT_PRIORITY_CUES = {
+  " return to ",
+  " speak to ",
+  " speak with ",
+  " talk to ",
+  " talk with ",
+  " report to ",
+}
+
+local QUEST_TEXT_GENERAL_CUES = {
+  " for ",
+  " to ",
+  " with ",
+}
+
+function Compat.GetLiveMapQuestsByID(uiMapID)
+  uiMapID = tonumber(uiMapID)
+  if not Compat.IsFiniteNumber(uiMapID) or uiMapID <= 0 then
+    return {}
+  end
+
+  if ns.State and type(ns.State.overrideMapQuestsByUiMapID) == "table" then
+    local rawOv = ns.State.overrideMapQuestsByUiMapID[uiMapID]
+    local out = {}
+    if type(rawOv) == "table" then
+      for k, row in pairs(rawOv) do
+        if type(row) == "table" then
+          local qid = tonumber(row.questID or k)
+          local x = tonumber(row.x01 or row.x)
+          local y = tonumber(row.y01 or row.y)
+          if qid and qid > 0 and Compat.IsFiniteNumber(x) and Compat.IsFiniteNumber(y) and x > 0 and x < 1 and y > 0 and y < 1 then
+            out[qid] = { questID = qid, x01 = x, y01 = y }
+          end
+        end
+      end
+    end
+    return out
+  end
+
+  local now = Compat.NowSeconds()
+  local cached = Compat.liveMapQuestsCache[uiMapID]
+  if cached and now < (cached.expiresAt or 0) and type(cached.byID) == "table" then
+    return cached.byID
+  end
+
+  local byID = {}
+  if C_QuestLog and type(C_QuestLog.GetQuestsOnMap) == "function" then
+    local ok, list = pcall(C_QuestLog.GetQuestsOnMap, uiMapID)
+    if ok and type(list) == "table" and not Compat.IsSecretOrRestrictedValue(list) then
+      for _, row in ipairs(list) do
+        if type(row) == "table" and not Compat.IsSecretOrRestrictedValue(row) then
+          local rawQid = row.questID
+          local rawX = row.x ~= nil and row.x or row.x01
+          local rawY = row.y ~= nil and row.y or row.y01
+          if not Compat.IsSecretOrRestrictedValue(rawQid)
+            and not Compat.IsSecretOrRestrictedValue(rawX)
+            and not Compat.IsSecretOrRestrictedValue(rawY)
+          then
+            local qid = tonumber(rawQid)
+            local x = tonumber(rawX)
+            local y = tonumber(rawY)
+            if qid and qid > 0 and Compat.IsFiniteNumber(x) and Compat.IsFiniteNumber(y) and x > 0 and x < 1 and y > 0 and y < 1 then
+              byID[qid] = { questID = qid, x01 = x, y01 = y }
+            end
+          end
+        end
+      end
+    end
+  end
+
+  Compat.liveMapQuestsCache[uiMapID] = {
+    expiresAt = now + LIVE_MAP_QUESTS_CACHE_TTL_SECONDS,
+    byID = byID,
+  }
+  return byID
+end
+
+function Compat.MatchNpcFromQuestText(rawText, route)
+  if type(rawText) ~= "string" or rawText == "" or Compat.IsSecretOrRestrictedValue(rawText) then
+    return nil
+  end
+  route = route
+    or (ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute())
+    or (ns.RivergladesData and ns.RivergladesData.route)
+    or nil
+  if type(route) ~= "table" or type(route.npcDirectoryByNormName) ~= "table" or type(route.npcDirectoryByID) ~= "table" then
+    return nil
+  end
+
+  local byNorm = route.npcDirectoryByNormName
+  local byID = route.npcDirectoryByID
+  local cleaned = string.lower(rawText)
+  cleaned = string.gsub(cleaned, "[^%w'%-%s]", " ")
+  cleaned = string.gsub(cleaned, "%s+", " ")
+  cleaned = " " .. cleaned .. " "
+
+  local function matchAfterCue(cue)
+    local searchFrom = 1
+    while true do
+      local sPos, ePos = string.find(cleaned, cue, searchFrom, true)
+      if not sPos then
+        return nil
+      end
+      searchFrom = sPos + 1
+      local tail = string.sub(cleaned, ePos + 1)
+      local tokens = {}
+      for rawTok in string.gmatch(tail, "[%w'%-]+") do
+        local tok = string.gsub(string.gsub(rawTok, "^['%-]+", ""), "['%-]+$", "")
+        if tok ~= "" then
+          table.insert(tokens, tok)
+          if #tokens >= 6 then
+            break
+          end
+        end
+      end
+      if #tokens > 0 then
+        local maxStart = 1
+        while maxStart < #tokens and maxStart <= 3 and QUEST_TEXT_RANK_PREFIX_WORDS[tokens[maxStart]] do
+          maxStart = maxStart + 1
+        end
+        for startIdx = 1, maxStart do
+          local maxLen = math.min(4, #tokens - startIdx + 1)
+          for wLen = maxLen, 1, -1 do
+            local cand = table.concat(tokens, " ", startIdx, startIdx + wLen - 1)
+            if wLen > 1 or #cand >= 5 then
+              local npcID = byNorm[cand]
+              if npcID and type(byID[npcID]) == "table" then
+                return byID[npcID]
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  for _, cue in ipairs(QUEST_TEXT_PRIORITY_CUES) do
+    local hit = matchAfterCue(cue)
+    if hit then
+      return hit
+    end
+  end
+  for _, cue in ipairs(QUEST_TEXT_GENERAL_CUES) do
+    local hit = matchAfterCue(cue)
+    if hit then
+      return hit
+    end
+  end
+  return nil
+end
+
+function Compat.ReadSafeQuestLogObjectiveText(questID, normTitle, progress)
+  local qid = tonumber(questID)
+  if qid and qid <= 0 then
+    qid = nil
+  end
+
+  if ns.State and type(ns.State.overrideQuestObjectiveTexts) == "table" then
+    local ov = (qid and ns.State.overrideQuestObjectiveTexts[qid])
+      or (normTitle and ns.State.overrideQuestObjectiveTexts["title:" .. normTitle])
+      or nil
+    if type(ov) == "string" and ov ~= "" then
+      return ov
+    end
+  end
+
+  if qid and type(Compat.questObjectiveTextByID[qid]) == "string" and Compat.questObjectiveTextByID[qid] ~= "" then
+    return Compat.questObjectiveTextByID[qid]
+  end
+
+  if qid and ns.State and type(ns.State.GetObservedQuestObjectiveText) == "function" then
+    local persisted = ns.State.GetObservedQuestObjectiveText(qid, progress)
+    if type(persisted) == "string" and persisted ~= "" then
+      Compat.questObjectiveTextByID[qid] = persisted
+      return persisted
+    end
+  end
+
+  if Compat.IsInCombat() then
+    return nil
+  end
+  if _G.QuestLogFrame and type(_G.QuestLogFrame.IsShown) == "function" and _G.QuestLogFrame:IsShown() then
+    return nil
+  end
+  if _G.WorldMapFrame and type(_G.WorldMapFrame.IsShown) == "function" and _G.WorldMapFrame:IsShown() then
+    return nil
+  end
+  if type(_G.GetQuestLogQuestText) ~= "function" then
+    return nil
+  end
+
+  local logIndex = Compat.ResolveFreshQuestLogIndex(qid, normTitle)
+  if not logIndex then
+    return nil
+  end
+
+  local prevSel = nil
+  if type(_G.GetQuestLogSelection) == "function" then
+    local okSel, curSel = pcall(_G.GetQuestLogSelection)
+    if okSel and type(curSel) == "number" and not Compat.IsSecretOrRestrictedValue(curSel) then
+      prevSel = curSel
+    end
+  end
+
+  if type(_G.SelectQuestLogEntry) == "function" then
+    pcall(_G.SelectQuestLogEntry, logIndex)
+  end
+  local okTxt, _, questObjectives = pcall(_G.GetQuestLogQuestText, logIndex)
+  if prevSel and prevSel > 0 and prevSel ~= logIndex and type(_G.SelectQuestLogEntry) == "function" then
+    pcall(_G.SelectQuestLogEntry, prevSel)
+  end
+
+  if okTxt and type(questObjectives) == "string" and questObjectives ~= "" and not Compat.IsSecretOrRestrictedValue(questObjectives) then
+    if qid then
+      Compat.questObjectiveTextByID[qid] = questObjectives
+      if ns.State and type(ns.State.RecordObservedQuestObjectiveText) == "function" then
+        ns.State.RecordObservedQuestObjectiveText(qid, questObjectives, progress)
+      end
+    end
+    return questObjectives
+  end
+  return nil
+end
+
+local function estimateHeuristicDistanceYards(uiMapID, ax01, ay01, bx01, by01)
+  local dRes = Compat.GetWorldDistanceYards(uiMapID, ax01, ay01, bx01, by01)
+  if type(dRes) == "table" and dRes.status == "ok" and Compat.IsFiniteNumber(dRes.yards) then
+    return dRes.yards
+  end
+  local dx = (tonumber(ax01) - tonumber(bx01)) * 3600.0
+  local dy = (tonumber(ay01) - tonumber(by01)) * 2400.0
+  return math.sqrt(dx * dx + dy * dy)
+end
+
+local function isQuestObjectiveTargetNpc(route, questID, npcID)
+  if type(route) ~= "table" or type(route.actions) ~= "table" or not questID or not npcID then
+    return false
+  end
+  for _, act in ipairs(route.actions) do
+    if type(act) == "table" and act.kind == "objective" and tonumber(act.questID) == questID then
+      if tonumber(act.npcID) == npcID then
+        return true
+      end
+      if type(act.subLocations) == "table" then
+        for _, sl in ipairs(act.subLocations) do
+          if type(sl) == "table" and tonumber(sl.targetNpcID) == npcID then
+            return true
+          end
+        end
+      end
+    end
+  end
+  return false
+end
+
+local function findNearestDirectoryNpc(route, uiMapID, x01, y01, maxNormRadius)
+  if type(route) ~= "table" or type(route.npcDirectoryByID) ~= "table" then
+    return nil
+  end
+  local bestNpc = nil
+  local bestSq = (maxNormRadius or 0.008) * (maxNormRadius or 0.008)
+  for _, entry in pairs(route.npcDirectoryByID) do
+    if type(entry) == "table" and tonumber(entry.uiMapID) == uiMapID then
+      local ex = tonumber(entry.x01)
+      local ey = tonumber(entry.y01)
+      if ex and ey then
+        local dx = ex - x01
+        local dy = ey - y01
+        local sq = dx * dx + dy * dy
+        if sq <= bestSq then
+          bestSq = sq
+          bestNpc = entry
+        end
+      end
+    end
+  end
+  return bestNpc
+end
+
+function Compat.ResolveLiveQuestTargetOverride(action, route, progress, ctx)
+  if type(action) ~= "table" then
+    return nil
+  end
+  if action.kind ~= "turnin" and action.kind ~= "objective" then
+    return nil
+  end
+  if type(action.subLocations) == "table" and #action.subLocations > 0 then
+    return nil
+  end
+  local sDest = action.destination
+  if type(sDest) ~= "table" then
+    return nil
+  end
+
+  route = route
+    or (ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute())
+    or (ns.RivergladesData and ns.RivergladesData.route)
+    or nil
+  if type(route) ~= "table" then
+    return nil
+  end
+
+  local qRef = action.questID or action.questKey
+  if qRef == nil then
+    return nil
+  end
+  local qid, normTitle, qMeta = Compat.ResolveQuestIdentity(qRef)
+  if not qid or qid <= 0 then
+    return nil
+  end
+  qMeta = qMeta or (type(route.questsByID) == "table" and route.questsByID[qid]) or nil
+
+  local onRes = (ctx and type(ctx.isOnQuest) == "function") and ctx.isOnQuest(qRef) or Compat.IsOnQuestResult(qRef)
+  if type(onRes) ~= "table" or onRes.status ~= "ok" or onRes.value ~= true then
+    Compat.liveQuestTargetDrifts[action.actionID] = nil
+    return nil
+  end
+
+  local objsComplete = false
+  if qMeta and qMeta.zeroObjectives == true then
+    objsComplete = true
+  else
+    local objRes = (ctx and type(ctx.getQuestObjectives) == "function")
+        and ctx.getQuestObjectives(qRef)
+      or Compat.GetQuestObjectivesResult(qRef)
+    if type(objRes) == "table" and objRes.status == "ok" and objRes.allFinished == true then
+      objsComplete = true
+    end
+  end
+
+  local staticMapID = tonumber(sDest.uiMapID)
+  local staticX = tonumber(sDest.x01)
+  local staticY = tonumber(sDest.y01)
+  local staticNpcID = tonumber(action.npcID)
+  if not staticMapID or not staticX or not staticY then
+    return nil
+  end
+
+  local candMapID, candAreaID, candX, candY, candName, candNpcID, candSource = nil, nil, nil, nil, nil, nil, nil
+  local hasExplicitNpcIdentity = false
+  local minDriftYards = 25.0
+
+  if action.kind == "turnin" then
+    local objText = Compat.ReadSafeQuestLogObjectiveText(qid, normTitle, progress)
+    local textNpc = objText and Compat.MatchNpcFromQuestText(objText, route) or nil
+    if textNpc and isQuestObjectiveTargetNpc(route, qid, tonumber(textNpc.npcID)) then
+      if not (qMeta and tonumber(qMeta.turninNpcID) == tonumber(textNpc.npcID)) then
+        textNpc = nil
+      end
+    end
+
+    local giverNpc = nil
+    if ns.State and type(ns.State.GetObservedQuestGiver) == "function" then
+      local obsGiver = ns.State.GetObservedQuestGiver(qid, progress)
+      if type(obsGiver) == "table" and qMeta and qMeta.giverNpcID ~= nil and qMeta.giverNpcID == qMeta.turninNpcID then
+        local gID = tonumber(obsGiver.npcID)
+        if gID and type(route.npcDirectoryByID) == "table" and type(route.npcDirectoryByID[gID]) == "table" then
+          giverNpc = route.npcDirectoryByID[gID]
+        elseif obsGiver.uiMapID and obsGiver.x01 and obsGiver.y01 then
+          giverNpc = {
+            npcID = gID,
+            name = obsGiver.npcName,
+            uiMapID = tonumber(obsGiver.uiMapID),
+            areaID = sDest.areaID,
+            x01 = tonumber(obsGiver.x01),
+            y01 = tonumber(obsGiver.y01),
+          }
+        end
+      end
+    end
+
+    local poi = nil
+    if objsComplete then
+      local mapPois = Compat.GetLiveMapQuestsByID(staticMapID)
+      poi = mapPois and mapPois[qid] or nil
+    end
+
+    if poi then
+      local poiDist = estimateHeuristicDistanceYards(staticMapID, staticX, staticY, poi.x01, poi.y01)
+      if poiDist >= 25.0 then
+        candMapID = staticMapID
+        candX = poi.x01
+        candY = poi.y01
+        candSource = "live_map_poi"
+        local named = textNpc or giverNpc or findNearestDirectoryNpc(route, staticMapID, poi.x01, poi.y01, 0.008)
+        if named and tonumber(named.uiMapID) == staticMapID then
+          candName = named.name
+          candNpcID = tonumber(named.npcID)
+          candAreaID = tonumber(named.areaID) or sDest.areaID
+        else
+          candName = "Quest Turn-in (Live Map POI)"
+          candAreaID = sDest.areaID
+        end
+      end
+    end
+
+    if not candX then
+      local chosen = textNpc or giverNpc
+      if chosen and tonumber(chosen.uiMapID) and tonumber(chosen.x01) and tonumber(chosen.y01) then
+        candMapID = tonumber(chosen.uiMapID)
+        candAreaID = tonumber(chosen.areaID) or sDest.areaID
+        candX = tonumber(chosen.x01)
+        candY = tonumber(chosen.y01)
+        candName = chosen.name
+        candNpcID = tonumber(chosen.npcID)
+        candSource = (chosen == textNpc) and "quest_text_npc" or "observed_quest_giver"
+        hasExplicitNpcIdentity = (candNpcID ~= nil)
+      end
+    end
+  elseif action.kind == "objective" and not objsComplete then
+    minDriftYards = 80.0
+    local mapPois = Compat.GetLiveMapQuestsByID(staticMapID)
+    local poi = mapPois and mapPois[qid] or nil
+    if poi then
+      candMapID = staticMapID
+      candAreaID = sDest.areaID
+      candX = poi.x01
+      candY = poi.y01
+      candName = action.npcName
+      candNpcID = staticNpcID
+      candSource = "live_map_poi"
+    end
+  end
+
+  if not candMapID or not candX or not candY or candX <= 0 or candX >= 1 or candY <= 0 or candY >= 1 then
+    Compat.liveQuestTargetDrifts[action.actionID] = nil
+    return nil
+  end
+
+  local crossZone = (candMapID ~= staticMapID)
+  local distYards = crossZone and 9999.0 or estimateHeuristicDistanceYards(staticMapID, staticX, staticY, candX, candY)
+  local npcChanged = hasExplicitNpcIdentity and staticNpcID ~= nil and candNpcID ~= staticNpcID
+
+  if not crossZone and not npcChanged and distYards < minDriftYards then
+    Compat.liveQuestTargetDrifts[action.actionID] = nil
+    return nil
+  end
+
+  local override = {
+    actionID = action.actionID,
+    questID = qid,
+    kind = action.kind,
+    source = candSource,
+    deltaYards = math.floor(distYards + 0.5),
+    staticNpcID = staticNpcID,
+    staticNpcName = action.npcName,
+    staticX01 = staticX,
+    staticY01 = staticY,
+    npcID = candNpcID,
+    targetName = candName or action.npcName,
+    destination = {
+      uiMapID = candMapID,
+      areaID = candAreaID or sDest.areaID,
+      x01 = candX,
+      y01 = candY,
+      coordinateSpace = "uiMap01",
+      coordConfidence = "live_client_healed",
+    },
+  }
+  Compat.liveQuestTargetDrifts[action.actionID] = override
+  return override
 end

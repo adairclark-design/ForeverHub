@@ -1208,6 +1208,32 @@ function State.MigrateRouteProgress(rawProgress, compiledRoute)
     end
   end
 
+  local observedGivers = {}
+  if type(p.observedQuestGivers) == "table" then
+    for k, v in pairs(p.observedQuestGivers) do
+      local n = tonumber(k)
+      if n and n > 0 and type(v) == "table" then
+        observedGivers[n] = {
+          npcID = tonumber(v.npcID),
+          npcName = type(v.npcName) == "string" and v.npcName ~= "" and v.npcName or nil,
+          uiMapID = tonumber(v.uiMapID),
+          x01 = tonumber(v.x01),
+          y01 = tonumber(v.y01),
+        }
+      end
+    end
+  end
+
+  local observedObjTexts = {}
+  if type(p.observedQuestObjectivesText) == "table" then
+    for k, v in pairs(p.observedQuestObjectivesText) do
+      local n = tonumber(k)
+      if n and n > 0 and type(v) == "string" and v ~= "" then
+        observedObjTexts[n] = v
+      end
+    end
+  end
+
   local mode = p.mode
   if mode ~= "standalone" and mode ~= "rxp" then
     mode = "paused"
@@ -1230,6 +1256,8 @@ function State.MigrateRouteProgress(rawProgress, compiledRoute)
     observedCompletedQuestIds = completedIds,
     userConfirmedCompletedQuestTitles = userConfirmedCompleted,
     confirmedIncompleteQuestKeys = confirmedIncomplete,
+    observedQuestGivers = observedGivers,
+    observedQuestObjectivesText = observedObjTexts,
     archivedSkippedActions = archivedSkipped,
     archivedCompletionEvidence = archivedEvidence,
     ownedWaypoint = type(p.ownedWaypoint) == "table" and p.ownedWaypoint or nil,
@@ -1331,6 +1359,76 @@ function State.RecordCompletedQuestId(questID)
     return true
   end
   return false
+end
+
+function State.RecordObservedQuestGiver(questID, giverInfo, progressOverride)
+  local qid = tonumber(questID)
+  if not qid or qid <= 0 or type(giverInfo) ~= "table" then
+    return false
+  end
+  local prog = type(progressOverride) == "table" and progressOverride
+    or (type(_G.ForeverHubCharDB) == "table" and State.GetRouteProgress())
+    or nil
+  if type(prog) ~= "table" then
+    return false
+  end
+  prog.observedQuestGivers = type(prog.observedQuestGivers) == "table" and prog.observedQuestGivers or {}
+  prog.observedQuestGivers[qid] = {
+    npcID = tonumber(giverInfo.npcID),
+    npcName = type(giverInfo.npcName) == "string" and giverInfo.npcName ~= "" and giverInfo.npcName or nil,
+    uiMapID = tonumber(giverInfo.uiMapID),
+    x01 = tonumber(giverInfo.x01),
+    y01 = tonumber(giverInfo.y01),
+  }
+  return true
+end
+
+function State.GetObservedQuestGiver(questID, progressOverride)
+  local qid = tonumber(questID)
+  if not qid or qid <= 0 then
+    return nil
+  end
+  local rp = type(progressOverride) == "table" and progressOverride
+    or (_G.ForeverHubCharDB and _G.ForeverHubCharDB.routeProgress)
+  if type(rp) == "table" and type(rp.observedQuestGivers) == "table" then
+    local g = rp.observedQuestGivers[qid]
+    if type(g) == "table" then
+      return g
+    end
+  end
+  return nil
+end
+
+function State.RecordObservedQuestObjectiveText(questID, objText, progressOverride)
+  local qid = tonumber(questID)
+  if not qid or qid <= 0 or type(objText) ~= "string" or objText == "" then
+    return false
+  end
+  local prog = type(progressOverride) == "table" and progressOverride
+    or (type(_G.ForeverHubCharDB) == "table" and State.GetRouteProgress())
+    or nil
+  if type(prog) ~= "table" then
+    return false
+  end
+  prog.observedQuestObjectivesText = type(prog.observedQuestObjectivesText) == "table" and prog.observedQuestObjectivesText or {}
+  prog.observedQuestObjectivesText[qid] = objText
+  return true
+end
+
+function State.GetObservedQuestObjectiveText(questID, progressOverride)
+  local qid = tonumber(questID)
+  if not qid or qid <= 0 then
+    return nil
+  end
+  local rp = type(progressOverride) == "table" and progressOverride
+    or (_G.ForeverHubCharDB and _G.ForeverHubCharDB.routeProgress)
+  if type(rp) == "table" and type(rp.observedQuestObjectivesText) == "table" then
+    local txt = rp.observedQuestObjectivesText[qid]
+    if type(txt) == "string" and txt ~= "" then
+      return txt
+    end
+  end
+  return nil
 end
 
 function State.IsObservedCompletedQuestId(questID)

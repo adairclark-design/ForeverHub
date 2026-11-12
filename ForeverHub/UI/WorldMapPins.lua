@@ -293,15 +293,25 @@ function WorldMapPins.CollectPinEntries(targetMapID, route, progress, settings, 
         end
 
         local spots = nil
-        if kind == "objective" and RoutePlanner.ResolveActiveSubLocations then
+        if kind == "objective" and type(act.subLocations) == "table" and #act.subLocations > 0 and RoutePlanner.ResolveActiveSubLocations then
           spots = RoutePlanner.ResolveActiveSubLocations(act, ctx)
         elseif type(act.destination) == "table" then
+          local resolvedDest, resolvedName = act.destination, act.npcName
+          if (kind == "turnin" or kind == "objective") and RoutePlanner.ResolveActiveActionTarget then
+            local rd, rn = RoutePlanner.ResolveActiveActionTarget(act, progress, ctx, nil, route)
+            if type(rd) == "table" then
+              resolvedDest = rd
+            end
+            if type(rn) == "string" and rn ~= "" then
+              resolvedName = rn
+            end
+          end
           spots = {
             {
               subID = act.actionID,
               label = act.title,
-              targetName = act.npcName,
-              destination = act.destination,
+              targetName = resolvedName,
+              destination = resolvedDest,
               isPrimary = true,
             },
           }

@@ -296,9 +296,21 @@ local function formatRouteStepSummary(act)
   if not act then
     return "None (all eligible steps completed or skipped)"
   end
-  if act.destination then
-    local xPct, yPct = ns.Domain.RoutePlanner.NormalizedToPercent(act.destination.x01, act.destination.y01)
-    return string.format("[%s] %s @ (%.1f, %.1f)", tostring(act.actionID), tostring(act.title), xPct or 0, yPct or 0)
+  local dest = act.destination
+  local npcName = act.npcName
+  if ns.Domain and ns.Domain.RoutePlanner and ns.Domain.RoutePlanner.ResolveActiveActionTarget then
+    local rd, rn = ns.Domain.RoutePlanner.ResolveActiveActionTarget(act, ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress() or nil)
+    if type(rd) == "table" then
+      dest = rd
+    end
+    if type(rn) == "string" and rn ~= "" then
+      npcName = rn
+    end
+  end
+  if dest then
+    local xPct, yPct = ns.Domain.RoutePlanner.NormalizedToPercent(dest.x01, dest.y01)
+    local npcSuffix = (type(npcName) == "string" and npcName ~= "") and (" — " .. npcName) or ""
+    return string.format("[%s] %s @ (%.1f, %.1f)%s", tostring(act.actionID), tostring(act.title), xPct or 0, yPct or 0, npcSuffix)
   end
   return string.format("[%s] %s (Manual pin)", tostring(act.actionID), tostring(act.title))
 end
@@ -406,6 +418,39 @@ function Events.RunRivergladesDoctor()
         raw2548 and raw2548.turnins or 0,
         raw2548 and raw2548.available or 0,
         snap.activePinCount or 0
+      )
+    )
+  end
+  local driftList = {}
+  if ns.Compat and type(ns.Compat.liveQuestTargetDrifts) == "table" then
+    for _, ov in pairs(ns.Compat.liveQuestTargetDrifts) do
+      if type(ov) == "table" and type(ov.destination) == "table" then
+        table.insert(driftList, ov)
+      end
+    end
+    table.sort(driftList, function(a, b)
+      return tostring(a.actionID) < tostring(b.actionID)
+    end)
+  end
+  ns.Compat.Print(
+    string.format(
+      "Live Self-Healing: %d quest target override(s) active",
+      #driftList
+    )
+  )
+  for _, ov in ipairs(driftList) do
+    local hx, hy = ns.Domain.RoutePlanner.NormalizedToPercent(ov.destination.x01, ov.destination.y01)
+    ns.Compat.Print(
+      string.format(
+        "  |cff5cc98a[Healed]|r [%s] q=%s via %s (~%d yds): %s -> %s @ (%.1f, %.1f)",
+        tostring(ov.actionID),
+        tostring(ov.questID),
+        tostring(ov.source),
+        tonumber(ov.deltaYards) or 0,
+        tostring(ov.staticNpcName or "?"),
+        tostring(ov.targetName or "?"),
+        hx or 0,
+        hy or 0
       )
     )
   end
@@ -1874,18 +1919,18 @@ if eventFrame then
       end
     elseif event == "QUEST_COMPLETE" then
       if ns.Compat and ns.Compat.CaptureQuestDialogIdentity then
-        ns.Compat.CaptureQuestDialogIdentity()
+        ns.Compat.CaptureQuestDialogIdentity("QUEST_COMPLETE")
       end
       if ns.UI and ns.UI.RewardAdvisor then
         ns.UI.RewardAdvisor.OnQuestComplete()
       end
     elseif event == "QUEST_PROGRESS" then
       if ns.Compat and ns.Compat.CaptureQuestDialogIdentity then
-        ns.Compat.CaptureQuestDialogIdentity()
+        ns.Compat.CaptureQuestDialogIdentity("QUEST_PROGRESS")
       end
     elseif event == "QUEST_DETAIL" then
       if ns.Compat and ns.Compat.CaptureQuestDialogIdentity then
-        ns.Compat.CaptureQuestDialogIdentity()
+        ns.Compat.CaptureQuestDialogIdentity("QUEST_DETAIL")
       end
       if ns.UI and ns.UI.RewardAdvisor then
         ns.UI.RewardAdvisor.OnQuestFinished()

@@ -3,7 +3,7 @@ ns = ns or _G.ForeverHub or {}
 ns = ns or {}
 
 ns.name = addonName or "ForeverHub"
-ns.version = "0.8.3"
+ns.version = "0.8.4"
 
 ns.Compat = ns.Compat or {}
 ns.Data = ns.Data or {}
