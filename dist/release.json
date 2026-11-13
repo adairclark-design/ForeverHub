@@ -1,0 +1,16 @@
+{
+  "releases": [
+    {
+      "filename": "ForeverHub-v0.8.7-forever.zip",
+      "metadata": [
+        {
+          "flavor": "forever",
+          "interface": 16001
+        }
+      ],
+      "name": "ForeverHub v0.8.7",
+      "nolib": false,
+      "version": "v0.8.7"
+    }
+  ]
+}
