@@ -555,11 +555,11 @@ function Events.HandleRivergladesSubcommand(subRaw)
     elseif hudSub == "unlock" then
       arrowSettings.hudLocked = false
       resyncActiveNavigationContext()
-      ns.Compat.Print("Unlocked ForeverHub Tracker HUD (left-drag header to reposition).")
+      ns.Compat.Print("Unlocked ForeverHub Tracker HUD (left-drag tracker to reposition).")
     elseif hudSub == "width" then
       local wNum = tonumber(hudVal)
-      if not wNum or wNum < 280 or wNum > 440 then
-        ns.Compat.Print("Usage: /fh rg hud width <280-440>")
+      if not wNum or wNum < 200 or wNum > 440 then
+        ns.Compat.Print("Usage: /fh rg hud width <200-440>")
         return
       end
       arrowSettings.hudWidth = math.floor(wNum + 0.5)

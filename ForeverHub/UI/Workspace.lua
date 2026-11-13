@@ -232,7 +232,7 @@ local function createDiagnosticsDrawer(parent)
         end
       end
       if ns.Compat and type(ns.Compat.Print) == "function" then
-        ns.Compat.Print(string.format("Installed: v%s — Check website for updates: %s", tostring(ns.version or "0.8.7"), UPDATE_PORTAL_URL))
+        ns.Compat.Print(string.format("Installed: v%s — Check website for updates: %s", tostring(ns.version or "0.8.8"), UPDATE_PORTAL_URL))
       end
     end)
     drawer.updateCheckBtn = updateCheckBtn
@@ -254,13 +254,14 @@ local function createDiagnosticsDrawer(parent)
     end
     local hasAuc = (ns.Providers and ns.Providers.Auctionator and ns.Providers.Auctionator.IsAvailable and ns.Providers.Auctionator.IsAvailable()) or false
     local invName = (ns.Providers and ns.Providers.Syndicator and ns.Providers.Syndicator.GetActiveBackendName and ns.Providers.Syndicator.GetActiveBackendName()) or "None"
-    local curVer = tostring(ns.version or "0.8.7")
+    local curVer = tostring(ns.version or "0.8.8")
     local lines = {
       string.format("Installed: v%s  ·  Client %s (Build %s, TOC %s)", curVer, buildVer, buildNum, tocNum),
       string.format("Crates: %s (%s) · Riverglades Rev %s (%s)", tostring(meta.corpusRevisionID or "unknown"), string.sub(tostring(meta.compiledContentSha256 or "unknown"), 1, 8), tostring(rgMeta.datasetRevision or "?"), string.sub(tostring(rgMeta.compiledContentSha256 or "unknown"), 1, 8)),
       string.format("Providers: Auctionator=%s · AccountInv=%s", hasAuc and "OK" or "Missing", tostring(invName)),
       "",
       string.format("Changelog (v%s):", curVer),
+      "• Compact 240x48 Tracker HUD (Arrow, Quest Name, Distance/Status, ...)",
       "• Mapped all 124 playable Riverglades & Krol'dok quests (330 steps)",
       "• Fixed Snargl's Snout & accepted Elite quest pins on World Map",
       "• Added Search Area badges + live auto-snap for unpinned spawns",
@@ -391,7 +392,7 @@ function Workspace.EnsureCreated()
   if subtitleText then
     Widgets.SafeSetPoint(subtitleText, "LEFT", titleText or titleBar or f, "RIGHT", 10, -1)
     if type(subtitleText.SetText) == "function" then
-      subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.7")))
+      subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.8")))
     end
   end
   f.subtitleText = subtitleText
@@ -644,7 +645,7 @@ function Workspace.Refresh()
   if f.subtitleText then
     Theme.ApplyFont(f.subtitleText, "dense", "text.muted")
     if type(f.subtitleText.SetText) == "function" then
-      f.subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.7")))
+      f.subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.8")))
     end
   end
 

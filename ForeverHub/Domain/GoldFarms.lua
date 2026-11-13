@@ -520,15 +520,18 @@ end
 local function pauseRivergladesForMutualExclusion()
   if ns.State and ns.State.GetRouteProgress then
     local rgProg = ns.State.GetRouteProgress()
-    if rgProg and rgProg.mode ~= "paused" then
-      if ns.Domain and ns.Domain.RouteProgress and ns.Domain.RouteProgress.Pause then
-        ns.Domain.RouteProgress.Pause(nil, rgProg)
-      else
-        rgProg.mode = "paused"
+    if rgProg then
+      if rgProg.mode ~= "paused" then
+        if ns.Domain and ns.Domain.RouteProgress and ns.Domain.RouteProgress.Pause then
+          ns.Domain.RouteProgress.Pause(nil, rgProg)
+        else
+          rgProg.mode = "paused"
+        end
+        if ns.UI and ns.UI.Navigation and ns.UI.Navigation.HideRivergladesHUD then
+          ns.UI.Navigation.HideRivergladesHUD()
+        end
       end
-      if ns.UI and ns.UI.Navigation and ns.UI.Navigation.HideRivergladesHUD then
-        ns.UI.Navigation.HideRivergladesHUD()
-      end
+      rgProg.pausedHudRetained = false
     end
   end
   if ns.UI and ns.UI.Navigation and ns.UI.Navigation.RequestContextSwitch then
@@ -554,6 +557,7 @@ function GoldFarms.Start(farmQuery, catalog, progress, playerPos)
   end
 
   pauseRivergladesForMutualExclusion()
+  progress.pausedHudRetained = false
 
   local pos = playerPos
   if pos == nil and ns.Compat and ns.Compat.GetPlayerPosition01 then
@@ -672,6 +676,7 @@ function GoldFarms.Pause(catalog, progress)
     return false, "Gold farm progress unavailable."
   end
   progress.mode = "paused"
+  progress.pausedHudRetained = (progress.selectedFarmID ~= nil)
   if ns.State and ns.State.PauseGoldFarmSession then
     ns.State.PauseGoldFarmSession(nil, nil)
   end
@@ -685,6 +690,7 @@ function GoldFarms.Stop(resetHops, catalog, progress)
     return false, "Gold farm progress unavailable."
   end
   progress.mode = "paused"
+  progress.pausedHudRetained = false
   if ns.State and ns.State.PauseGoldFarmSession then
     ns.State.PauseGoldFarmSession(nil, nil)
   end

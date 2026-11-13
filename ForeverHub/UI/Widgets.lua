@@ -301,6 +301,9 @@ function Widgets.CreatePanel(parent, surfaceToken, borderToken, name)
   if not ok or not f then
     return nil
   end
+  if f.__parent == nil then
+    f.__parent = parent
+  end
   Widgets.ApplySurface(f, surfaceToken or "surface.card", borderToken or "border.subtle")
   return f
 end
@@ -423,6 +426,9 @@ local function createStyledButton(parent, styleKind, width, text, height)
   local ok, btn = pcall(_G.CreateFrame, "Button", nil, parent)
   if not ok or not btn then
     return nil
+  end
+  if btn.__parent == nil then
+    btn.__parent = parent
   end
   btn.__supportsOnClick = true
   btn.__styleKind = styleKind
@@ -598,6 +604,12 @@ function Widgets.CreateIconButton(parent, glyphKey, tooltipTitle, tooltipLines, 
   local ok, btn = pcall(_G.CreateFrame, "Button", nil, parent)
   if not ok or not btn then
     return nil
+  end
+  if btn.__parent == nil then
+    btn.__parent = parent
+  end
+  if btn.__parent == nil then
+    btn.__parent = parent
   end
   btn.__supportsOnClick = true
   btn.__enabled = true

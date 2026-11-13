@@ -398,6 +398,17 @@ function Navigation.RequestContextSwitch(targetContext)
   local gen = Navigation.BumpGeneration()
   Navigation.StopTravelTicker()
   Navigation.ClearArrowTarget()
+  if Navigation.frame then
+    if Navigation.frame.overflowMenu and Navigation.frame.overflowMenu.Hide then
+      Navigation.frame.overflowMenu:Hide()
+    end
+    if _G.GameTooltip and type(_G.GameTooltip.IsOwned) == "function" then
+      local okO, owned = pcall(_G.GameTooltip.IsOwned, _G.GameTooltip, Navigation.frame)
+      if okO and owned and type(_G.GameTooltip.Hide) == "function" then
+        pcall(_G.GameTooltip.Hide, _G.GameTooltip)
+      end
+    end
+  end
   Navigation.activeContext = targetContext
   Navigation.owner.pendingDestination = nil
   if Navigation.owner.provider ~= "none" and Navigation.owner.ownerContext ~= targetContext then
@@ -635,39 +646,370 @@ local function applyArrowTextureToWidget(widget, settings)
   return texMode
 end
 
-local function computeOptionalHudFooterStatus(status)
-  if type(status) ~= "table" then
-    return nil, nil
+Navigation.COMPACT_HUD_STATE_TABLE = {
+  normal = {
+    stateKey = "normal",
+    line2Tone = "text.secondary",
+    arrowMode = "directional",
+    reclaimSpace = false,
+  },
+  arrived = {
+    stateKey = "arrived",
+    line2Tone = "status.ready",
+    arrowMode = "directional",
+    reclaimSpace = false,
+  },
+  grinding_camp = {
+    stateKey = "grinding_camp",
+    line2Tone = "status.ready",
+    arrowMode = "directional",
+    reclaimSpace = false,
+  },
+  facing_unavailable = {
+    stateKey = "facing_unavailable",
+    line2Tone = "status.warning",
+    arrowMode = "non_directional",
+    reclaimSpace = false,
+  },
+  position_unavailable = {
+    stateKey = "position_unavailable",
+    line2Tone = "status.warning",
+    arrowMode = "none",
+    reclaimSpace = false,
+  },
+  different_instance = {
+    stateKey = "different_instance",
+    line2Tone = "status.reserved",
+    arrowMode = "non_directional",
+    reclaimSpace = false,
+  },
+  manual_objective = {
+    stateKey = "manual_objective",
+    line2Tone = "text.secondary",
+    arrowMode = "neutral",
+    reclaimSpace = false,
+  },
+  quest_log_full = {
+    stateKey = "quest_log_full",
+    line2Tone = "status.warning",
+    arrowMode = "none",
+    reclaimSpace = true,
+  },
+  unresolved_history = {
+    stateKey = "unresolved_history",
+    line2Tone = "status.warning",
+    arrowMode = "neutral",
+    reclaimSpace = false,
+  },
+  paused = {
+    stateKey = "paused",
+    line2Tone = "text.muted",
+    arrowMode = "none",
+    reclaimSpace = true,
+  },
+  rxp_owned = {
+    stateKey = "rxp_owned",
+    line2Tone = "status.reserved",
+    arrowMode = "none",
+    reclaimSpace = true,
+  },
+  segment_complete = {
+    stateKey = "segment_complete",
+    line2Tone = "status.ready",
+    arrowMode = "none",
+    reclaimSpace = true,
+  },
+}
+
+Navigation.lastRetainedTitleByContext = Navigation.lastRetainedTitleByContext or {}
+
+local function extractCleanQuestOrStepName(act, context)
+  if type(act) ~= "table" then
+    return nil
   end
-  if status.activeProvider == "rxp" then
-    return "RXP controls navigation", "status.reserved"
-  elseif status.deferred == true then
-    return "Waypoint deferred", "status.warning"
-  elseif status.vectorStatus == "facing_unavailable" then
-    return "Manual direction", "status.warning"
-  elseif status.arrowDelegated == true then
-    return "TomTom arrow delegated", "text.muted"
-  elseif status.activeProvider == "text_manual" and status.hasDirectionalArrow ~= true then
-    return "Manual direction", "text.muted"
+  if context == "riverglades" and (act.questID or act.questKey) and ns.Compat and ns.Compat.LookupRouteQuestMeta then
+    local qMeta = ns.Compat.LookupRouteQuestMeta(act.questKey or act.questID)
+    if qMeta and type(qMeta.name) == "string" and qMeta.name ~= "" then
+      return qMeta.name
+    end
   end
-  return nil, nil
+  local raw = tostring(act.questName or act.shortTitle or act.title or act.actionID or act.stepID or "")
+  if raw == "" then
+    return nil
+  end
+  -- Strip leading action prefixes when no quest metadata record exists so Line 1 stays Quest/Step Name Only (Option A)
+  local stripped = raw
+  local prefixes = {
+    "^Accept%s+",
+    "^Turn in%s+",
+    "^Complete%s+",
+    "^Talk to%s+",
+    "^Speak with%s+",
+    "^Deliver%s+",
+  }
+  for _, pat in ipairs(prefixes) do
+    local nextStr, count = string.gsub(stripped, pat, "", 1)
+    if count and count > 0 and nextStr ~= "" then
+      stripped = nextStr
+      break
+    end
+  end
+  local withoutParens = string.gsub(stripped, "%s*%b()$", "")
+  if withoutParens ~= "" then
+    stripped = withoutParens
+  end
+  return stripped
+end
+
+local function setMenuRowButtonEnabled(btn, enabled)
+  if not btn then
+    return
+  end
+  local isEnabled = (enabled ~= false)
+  btn.__disabled = not isEnabled
+  if Widgets and type(Widgets.SetButtonEnabled) == "function" then
+    pcall(Widgets.SetButtonEnabled, btn, isEnabled)
+  else
+    if type(btn.SetEnabled) == "function" then
+      pcall(btn.SetEnabled, btn, isEnabled)
+    end
+    if type(btn.SetAlpha) == "function" then
+      pcall(btn.SetAlpha, btn, isEnabled and 1.0 or 0.45)
+    end
+  end
+end
+
+local function positionOverflowMenu(f, overflowMenu)
+  if not f or not overflowMenu or not overflowMenu.SetPoint then
+    return
+  end
+  if overflowMenu.ClearAllPoints then
+    overflowMenu:ClearAllPoints()
+  end
+  local menuW = (type(overflowMenu.GetWidth) == "function" and overflowMenu:GetWidth()) or 176
+  local menuH = (type(overflowMenu.GetHeight) == "function" and overflowMenu:GetHeight()) or 214
+  local fScale = (type(f.GetEffectiveScale) == "function" and f:GetEffectiveScale())
+    or (type(f.GetScale) == "function" and f:GetScale())
+    or 1.0
+  local mScale = (type(overflowMenu.GetEffectiveScale) == "function" and overflowMenu:GetEffectiveScale())
+    or fScale
+  local uScale = (UIParent and type(UIParent.GetEffectiveScale) == "function" and UIParent:GetEffectiveScale())
+    or (UIParent and type(UIParent.GetScale) == "function" and UIParent:GetScale())
+    or 1.0
+  local screenW = (UIParent and type(UIParent.GetWidth) == "function" and UIParent:GetWidth()) or 1920
+  local screenH = (UIParent and type(UIParent.GetHeight) == "function" and UIParent:GetHeight()) or 1080
+  local normScreenW = screenW * uScale
+  local normScreenH = screenH * uScale
+
+  local fBottom = (type(f.GetBottom) == "function" and f:GetBottom()) or nil
+  local fRight = (type(f.GetRight) == "function" and f:GetRight()) or nil
+  local fLeft = (type(f.GetLeft) == "function" and f:GetLeft()) or nil
+
+  local openUpward = false
+  if type(fBottom) == "number" and normScreenH > 0 then
+    local fBottomNorm = fBottom * fScale
+    local menuHeightNorm = (menuH + 6) * mScale
+    if (fBottomNorm - menuHeightNorm) < 8 then
+      openUpward = true
+    end
+  end
+
+  local anchorSide = "RIGHT"
+  local xOff = -4
+  if type(fRight) == "number" and type(fLeft) == "number" and normScreenW > 0 then
+    local fRightNorm = fRight * fScale
+    local menuWidthNorm = menuW * mScale
+    if (fRightNorm - menuWidthNorm) < 4 then
+      anchorSide = "LEFT"
+      xOff = 4
+    end
+  end
+
+  overflowMenu.__openedUpward = openUpward
+  overflowMenu.__anchorSide = anchorSide
+  if openUpward then
+    overflowMenu:SetPoint("BOTTOM" .. anchorSide, f, "TOP" .. anchorSide, xOff, 4)
+  else
+    overflowMenu:SetPoint("TOP" .. anchorSide, f, "BOTTOM" .. anchorSide, xOff, -4)
+  end
+end
+
+function Navigation.ResolveCompactHUDLine2(vm, target, vec, bodyTextWidth)
+  if type(vm) ~= "table" then
+    return "", "text.secondary", "none", -1, false, false
+  end
+  local width = tonumber(bodyTextWidth) or 160
+  local isNarrow = width < 140
+  local isVeryNarrow = width < 125
+  local stateKey = vm.stateKey or "normal"
+  local settings = (ns.State and ns.State.GetArrowSettings and ns.State.GetArrowSettings()) or {}
+  local floatingOwnsDistance = (settings.dockedInHud == false)
+    and (target ~= nil and target.floatingRendererEnabled == true)
+
+  -- Non-target / blocking states from table
+  if stateKey == "paused" then
+    return "Paused", "text.muted", "paused", -1, false, floatingOwnsDistance
+  elseif stateKey == "rxp_owned" then
+    return "Controlled by RXP", "status.reserved", "rxp_owned", -1, false, floatingOwnsDistance
+  elseif stateKey == "quest_log_full" then
+    return "Quest log full", "status.warning", "quest_log_full", -1, false, floatingOwnsDistance
+  elseif stateKey == "unresolved_history" then
+    return "Review in Workspace", "status.warning", "unresolved_history", -1, false, floatingOwnsDistance
+  elseif stateKey == "segment_complete" then
+    return "Segment complete", "status.ready", "segment_complete", -1, false, floatingOwnsDistance
+  elseif stateKey == "manual_objective" then
+    local progText = (type(vm.objectiveProgressText) == "string" and vm.objectiveProgressText ~= "")
+      and vm.objectiveProgressText
+      or "Manual step"
+    return progText, "text.secondary", "manual_objective", -1, false, floatingOwnsDistance
+  end
+
+  -- Banked-item blocker takes precedence over ordinary distance on Line 2 when banked supply items exist
+  local bankQty = tonumber(vm.bankSupplyCount) or 0
+  if bankQty > 0 then
+    local bankLine = (width >= 165)
+      and string.format("%d in bank · Withdraw first", bankQty)
+      or string.format("%d in bank", bankQty)
+    return bankLine, "status.warning", "bank_warning", bankQty, false, floatingOwnsDistance
+  end
+
+  if vm.forcePositionUnavailable and (not vec or (vec.status ~= "ok" and vec.status ~= "facing_unavailable")) then
+    return isNarrow and "No position" or "Position unavailable",
+      "status.warning",
+      "position_unavailable",
+      -1,
+      false,
+      floatingOwnsDistance
+  end
+
+  if not vec
+    or vec.status == "unavailable"
+    or vec.status == "missing_transform"
+    or vec.status == "different_zone"
+  then
+    return isNarrow and "No position" or "Position unavailable",
+      "status.warning",
+      "position_unavailable",
+      -1,
+      false,
+      floatingOwnsDistance
+  end
+
+  if vec.status == "different_instance" then
+    return "Other instance", "status.reserved", "different_instance", -1, false, floatingOwnsDistance
+  end
+
+  local isApprox = (vec.isCrossZone == true)
+  local distStr, intYards = formatYardsCompact(vec.yards or 0, isApprox, false)
+  local inCamp = (target and isGrindCampStepKind(target.stepKind) and target.inCampState == true) or false
+  local arrivedFlag = (not inCamp) and (target and target.isArrivedState == true) or false
+
+  if vec.status == "facing_unavailable" then
+    if floatingOwnsDistance then
+      return "No facing", "status.warning", "facing_unavailable", intYards, isApprox, true
+    end
+    local fLine = isVeryNarrow and distStr or (distStr .. " · No facing")
+    return fLine, "status.warning", "facing_unavailable", intYards, isApprox, false
+  end
+
+  if inCamp then
+    if floatingOwnsDistance then
+      return "In camp", "status.ready", "grinding_camp", intYards, isApprox, true
+    end
+    local cLine = isVeryNarrow and ("In camp · " .. tostring(intYards) .. "y") or ("In camp · " .. distStr)
+    return cLine, "status.ready", "grinding_camp", intYards, isApprox, false
+  end
+
+  if arrivedFlag then
+    if floatingOwnsDistance then
+      return "Arrived", "status.ready", "arrived", intYards, isApprox, true
+    end
+    local aLine = isVeryNarrow and ("Arrived · " .. tostring(intYards) .. "y") or ("Arrived · " .. distStr)
+    return aLine, "status.ready", "arrived", intYards, isApprox, false
+  end
+
+  -- Normal directional travel
+  if floatingOwnsDistance then
+    -- Floating arrow is the sole distance display when undocked; show progress or concise step detail on Line 2
+    local undockedStatus = (type(vm.objectiveProgressText) == "string" and vm.objectiveProgressText ~= "" and vm.objectiveProgressText)
+      or (type(vm.undockedStatusText) == "string" and vm.undockedStatusText ~= "" and vm.undockedStatusText)
+      or (type(vm.coordSummary) == "string" and vm.coordSummary ~= "" and vm.coordSummary)
+      or "Active"
+    return undockedStatus, "text.secondary", "normal_undocked", intYards, isApprox, true
+  end
+
+  return distStr, "text.secondary", "normal", intYards, isApprox, false
+end
+
+function Navigation.WriteCompactHUDLine2(f, vm, target, vec, force)
+  if not f or not f.subText then
+    return
+  end
+  vm = vm or f.viewModel or {}
+  local bodyTextWidth = tonumber(f.__bodyTextWidth) or 160
+  local line2Text, line2Tone, subState, intYards, isApprox, floatingOwnsDistance =
+    Navigation.ResolveCompactHUDLine2(vm, target, vec, bodyTextWidth)
+
+  local targetKey = target
+    and string.format(
+      "%s:%s:%.4f:%.4f",
+      tostring(target.context or ""),
+      tostring(target.uiMapID or 0),
+      tonumber(target.x01) or 0,
+      tonumber(target.y01) or 0
+    )
+    or "no_target"
+
+  local compositeKey = string.format(
+    "%d|%s|%s|%s|%s|%d|%s|%s|%s|%d|%d",
+    tonumber(Navigation.generation) or 0,
+    tostring(vm.context or Navigation.activeContext or ""),
+    tostring(vm.stateKey or ""),
+    targetKey,
+    tostring(subState or ""),
+    tonumber(intYards) or -1,
+    tostring(isApprox == true),
+    tostring(floatingOwnsDistance == true),
+    tostring(vm.objectiveProgressText or ""),
+    tonumber(vm.bankSupplyCount) or 0,
+    math.floor(bodyTextWidth)
+  )
+
+  if not force and f.__lastLine2CompositeKey == compositeKey and f.__lastLine2Text == line2Text then
+    return
+  end
+
+  f.__lastLine2CompositeKey = compositeKey
+  f.__lastLine2Text = line2Text
+  if f.__lastLine2Tone ~= line2Tone then
+    f.__lastLine2Tone = line2Tone
+    if Theme and Theme.ApplyFont then
+      Theme.ApplyFont(f.subText, "dense", line2Tone or "text.secondary")
+    end
+  end
+  if target then
+    target.lastHudSubtext = line2Text
+  end
+  f.subText:SetText(line2Text)
+end
+
+function Navigation.RefreshCompactHUDFromVector(target, vec, force)
+  local f = Navigation.frame
+  if not f or not f.subText then
+    return
+  end
+  if f.IsShown and not f:IsShown() and not force then
+    return
+  end
+  local vm = f.viewModel
+  if not vm then
+    return
+  end
+  Navigation.WriteCompactHUDLine2(f, vm, target, vec, force)
 end
 
 local function refreshHUDSubtextFromTarget(target, vec)
-  local f = Navigation.frame
-  if not f or not f.subText or not target or not target.hudCoordPrefix then
-    return
-  end
-  if f.IsShown and not f:IsShown() then
-    return
-  end
-  local distPart = formatHudDistanceSegment(target, vec) or ""
-  local fullLine = target.hudCoordPrefix .. distPart .. (target.hudSuffix or "")
-  if target.lastHudSubtext ~= fullLine then
-    target.lastHudSubtext = fullLine
-    f.subText:SetText(fullLine)
-    layoutHUDFrame(f, Navigation.lastStatus)
-  end
+  Navigation.RefreshCompactHUDFromVector(target, vec, false)
 end
 
 Navigation.updateCircuitLatches = Navigation.updateCircuitLatches or {}
@@ -733,6 +1075,12 @@ local function onDockedLaneUpdateBody(self, elapsed)
 
   local target = Navigation.activeTarget
   if not target or not target.anchor or not target.dockedRendererEnabled then
+    local f = Navigation.frame
+    local vm = f and f.viewModel
+    local settings = (ns.State and ns.State.GetArrowSettings and ns.State.GetArrowSettings()) or {}
+    if vm and vm.showNeutralDockedMarker and settings.dockedInHud ~= false then
+      return
+    end
     if self.Hide then
       self:Hide()
     end
@@ -743,6 +1091,7 @@ local function onDockedLaneUpdateBody(self, elapsed)
   target.lastVecStatus = vec and vec.status or "unavailable"
   updateTargetHysteresis(target, vec)
   updateArrowVisualFromVector(self, target, vec, false, true)
+  Navigation.RefreshCompactHUDFromVector(target, vec, false)
   refreshCapabilityStatusInPlace(target, vec)
 end
 
@@ -750,21 +1099,149 @@ local function onDockedLaneUpdate(self, elapsed)
   runGuardedNavUpdate("docked", self, elapsed, onDockedLaneUpdateBody)
 end
 
+local function renderCompactHUDTooltip(ownerFrame)
+  if not _G.GameTooltip or (_G.GameTooltip.IsForbidden and _G.GameTooltip:IsForbidden()) then
+    return
+  end
+  local f = Navigation.frame
+  local vm = (f and f.viewModel) or {}
+  _G.GameTooltip:SetOwner(ownerFrame or f, "ANCHOR_BOTTOM", 0, -6)
+  _G.GameTooltip:ClearLines()
+
+  -- 1) Complete instruction first (per Council Verdict §1)
+  local primaryInstruction = vm.fullInstruction or vm.titleText or "ForeverHub Navigation"
+  _G.GameTooltip:AddLine(tostring(primaryInstruction), 1.0, 0.96, 0.84, true)
+
+  if vm.titleText and vm.titleText ~= "" and vm.titleText ~= primaryInstruction then
+    _G.GameTooltip:AddLine(tostring(vm.titleText), 0.82, 0.90, 0.98, true)
+  end
+
+  if vm.headerSummary and vm.headerSummary ~= "" then
+    _G.GameTooltip:AddLine(tostring(vm.headerSummary), 0.65, 0.72, 0.82, true)
+  end
+
+  if vm.coordSummary and vm.coordSummary ~= "" then
+    _G.GameTooltip:AddLine(tostring(vm.coordSummary), 0.95, 0.82, 0.35, true)
+  end
+
+  if f and f.__lastLine2Text and f.__lastLine2Text ~= "" then
+    _G.GameTooltip:AddLine("Status: " .. tostring(f.__lastLine2Text), 0.78, 0.86, 0.94, true)
+  end
+
+  if vm.objectiveProgressText and vm.objectiveProgressText ~= "" then
+    _G.GameTooltip:AddLine("Progress: " .. tostring(vm.objectiveProgressText), 0.65, 0.92, 0.75, true)
+  end
+
+  if (tonumber(vm.bankSupplyCount) or 0) > 0 then
+    _G.GameTooltip:AddLine(
+      string.format("Bank alert: %d required item(s) in bank — withdraw before turn-in.", tonumber(vm.bankSupplyCount)),
+      0.95,
+      0.66,
+      0.23,
+      true
+    )
+  end
+
+  if vm.extraNote and vm.extraNote ~= "" then
+    _G.GameTooltip:AddLine(tostring(vm.extraNote), 0.72, 0.78, 0.86, true)
+  end
+
+  local status = Navigation.lastStatus
+  if status and status.navigationLabel and status.navigationLabel ~= "" then
+    _G.GameTooltip:AddLine("Provider: " .. tostring(status.navigationLabel), 0.56, 0.64, 0.74, true)
+  end
+
+  local settings = ns.State and ns.State.GetArrowSettings and ns.State.GetArrowSettings()
+  local dragHint = (settings and settings.hudLocked)
+    and "Locked (use ... menu or /fh rg hud unlock to move)"
+    or "Left-drag to move • Click ... for options"
+  _G.GameTooltip:AddLine(dragHint, 0.55, 0.62, 0.72)
+  _G.GameTooltip:Show()
+end
+
 layoutHUDFrame = function(f, status)
   if not f then
     return
   end
   local settings = (ns.State and ns.State.GetArrowSettings and ns.State.GetArrowSettings()) or {}
-  local hudW = math.max(
-    Theme and Theme.METRICS.hudMinWidth or 280,
-    math.min(Theme and Theme.METRICS.hudMaxWidth or 440, math.floor((tonumber(settings.hudWidth) or 340) + 0.5))
-  )
+  local minW = (Theme and Theme.METRICS and Theme.METRICS.hudMinWidth) or 200
+  local maxW = (Theme and Theme.METRICS and Theme.METRICS.hudMaxWidth) or 440
+  local defW = (Theme and Theme.METRICS and Theme.METRICS.hudDefaultWidth) or 240
+  local hudW = math.max(minW, math.min(maxW, math.floor((tonumber(settings.hudWidth) or defW) + 0.5)))
+
+  local vm = f.viewModel or {}
+  local stateSpec = Navigation.COMPACT_HUD_STATE_TABLE[vm.stateKey or "normal"]
+    or Navigation.COMPACT_HUD_STATE_TABLE.normal
 
   local target = Navigation.activeTarget
-  local hasDockedLane = (target ~= nil and target.dockedRendererEnabled == true)
+  local hasActiveDockedTarget = (target ~= nil and target.dockedRendererEnabled == true)
+    and (not stateSpec.reclaimSpace)
+  local hasNeutralDockedMarker = (not hasActiveDockedTarget)
+    and (vm.showNeutralDockedMarker == true)
+    and (settings.dockedInHud ~= false)
+    and (settings.enabled ~= false)
+    and (settings.renderer ~= "off" and settings.renderer ~= "tomtom")
+    and (not stateSpec.reclaimSpace)
+  local hasDockedLane = hasActiveDockedTarget or hasNeutralDockedMarker
+
+  -- Legacy chrome stays hidden in compact single-row bar while preserving f.moreBtn directly on f
+  if f.headerBar and f.headerBar.Hide then
+    f.headerBar:Hide()
+  end
+  if f.pauseBtn and f.pauseBtn.Hide then
+    f.pauseBtn:Hide()
+  end
+  if f.statusBar and f.statusBar.Hide then
+    f.statusBar:Hide()
+  end
+
+  local titleMetrics = (Theme and Theme.GetRoleMetrics and Theme.GetRoleMetrics("body")) or { lineHeight = 18 }
+  local subMetrics = (Theme and Theme.GetRoleMetrics and Theme.GetRoleMetrics("dense")) or { lineHeight = 16 }
+  local titleLineH = math.max(18, tonumber(titleMetrics.lineHeight) or 18)
+  local subLineH = math.max(16, tonumber(subMetrics.lineHeight) or 16)
+  local padY = 6
+  local lineGap = 2
+  local hudH = math.max(
+    (Theme and Theme.METRICS and Theme.METRICS.hudDefaultHeight) or 48,
+    padY + titleLineH + lineGap + subLineH + padY
+  )
+
+  local laneW = (Theme and Theme.METRICS and Theme.METRICS.hudArrowLaneWidth) or 36
+  local laneH = (Theme and Theme.METRICS and Theme.METRICS.hudArrowLaneHeight) or 36
   if f.dockedArrowLane then
-    if hasDockedLane then
+    if f.dockedArrowLane.ClearAllPoints then
+      f.dockedArrowLane:ClearAllPoints()
+    end
+    f.dockedArrowLane:SetSize(laneW, laneH)
+    f.dockedArrowLane:SetPoint("LEFT", f, "LEFT", 6, 0)
+    if f.dockedArrowLane.distanceText then
+      f.dockedArrowLane.distanceText:SetText("")
+      if f.dockedArrowLane.distanceText.Hide then
+        f.dockedArrowLane.distanceText:Hide()
+      end
+    end
+    if hasActiveDockedTarget then
       applyArrowTextureToWidget(f.dockedArrowLane, settings)
+      if f.dockedArrowLane.Show then
+        f.dockedArrowLane:Show()
+      end
+    elseif hasNeutralDockedMarker then
+      if f.dockedArrowLane.arrowTex and f.dockedArrowLane.arrowTex.Hide then
+        f.dockedArrowLane.arrowTex:Hide()
+      end
+      if f.dockedArrowLane.nonDirMarker then
+        if f.dockedArrowLane.nonDirMarker.SetColorTexture then
+          f.dockedArrowLane.nonDirMarker:SetColorTexture(0.64, 0.71, 0.82, 0.85)
+        elseif f.dockedArrowLane.nonDirMarker.SetVertexColor then
+          f.dockedArrowLane.nonDirMarker:SetVertexColor(0.64, 0.71, 0.82, 0.85)
+        end
+        if f.dockedArrowLane.nonDirMarker.Show then
+          f.dockedArrowLane.nonDirMarker:Show()
+        end
+      end
+      if f.dockedArrowLane.SetAlpha then
+        f.dockedArrowLane:SetAlpha(0.90)
+      end
       if f.dockedArrowLane.Show then
         f.dockedArrowLane:Show()
       end
@@ -773,49 +1250,43 @@ layoutHUDFrame = function(f, status)
     end
   end
 
-  local pad = Theme and Theme.METRICS.hudPadding or 12
-  local headerH = Theme and Theme.METRICS.hudHeaderHeight or 28
-  local bodyLeft = hasDockedLane and (pad + (Theme and Theme.METRICS.hudArrowLaneWidth or 52) + 8) or pad
-  local bodyTextWidth = math.max(140, hudW - bodyLeft - pad)
+  if f.moreBtn then
+    if type(f.moreBtn.GetParent) == "function" and f.moreBtn:GetParent() ~= f and type(f.moreBtn.SetParent) == "function" then
+      pcall(f.moreBtn.SetParent, f.moreBtn, f)
+    end
+    f.moreBtn.__parent = f
+    if f.moreBtn.ClearAllPoints then
+      f.moreBtn:ClearAllPoints()
+    end
+    f.moreBtn:SetSize(24, 24)
+    f.moreBtn:SetPoint("RIGHT", f, "RIGHT", -6, 0)
+    if f.moreBtn.Show then
+      f.moreBtn:Show()
+    end
+  end
+
+  local bodyLeft = hasDockedLane and (6 + laneW + 4) or 10
+  local rightReserved = 6 + 24 + 4
+  local bodyTextWidth = math.max(80, hudW - bodyLeft - rightReserved)
+  local prevBodyWidth = f.__bodyTextWidth
+  f.__bodyTextWidth = bodyTextWidth
 
   if f.stepText then
     if f.stepText.ClearAllPoints then f.stepText:ClearAllPoints() end
-    f.stepText:SetPoint("TOPLEFT", f, "TOPLEFT", bodyLeft, -(headerH + pad))
+    f.stepText:SetPoint("TOPLEFT", f, "TOPLEFT", bodyLeft, -padY)
     if f.stepText.SetWidth then pcall(f.stepText.SetWidth, f.stepText, bodyTextWidth) end
+    if f.stepText.SetWordWrap then f.stepText:SetWordWrap(false) end
+    if f.stepText.SetNonSpaceWrap then pcall(f.stepText.SetNonSpaceWrap, f.stepText, false) end
+    if f.stepText.SetMaxLines then pcall(f.stepText.SetMaxLines, f.stepText, 1) end
   end
-
-  local stepStr = (f.stepText and type(f.stepText.GetText) == "function" and f.stepText:GetText()) or ""
-  local subStr = (f.subText and type(f.subText.GetText) == "function" and f.subText:GetText()) or ""
-  local titleH = Theme and Theme.MeasureWrappedHeight
-    and Theme.MeasureWrappedHeight(f.stepText, stepStr, bodyTextWidth, "trackerAction", 20)
-    or 20
-  local detailH = Theme and Theme.MeasureWrappedHeight
-    and Theme.MeasureWrappedHeight(f.subText, subStr, bodyTextWidth, "dense", 16)
-    or 16
 
   if f.subText then
     if f.subText.ClearAllPoints then f.subText:ClearAllPoints() end
-    f.subText:SetPoint("TOPLEFT", f, "TOPLEFT", bodyLeft, -(headerH + pad + titleH + 4))
+    f.subText:SetPoint("TOPLEFT", f, "TOPLEFT", bodyLeft, -(padY + titleLineH + lineGap))
     if f.subText.SetWidth then pcall(f.subText.SetWidth, f.subText, bodyTextWidth) end
-  end
-
-  local minBodyH = hasDockedLane and 60 or 42
-  local bodyHeight = math.max(minBodyH, titleH + 4 + detailH)
-
-  local footerMsg, footerTone = computeOptionalHudFooterStatus(status)
-  local optionalStatusHeight = 0
-  if f.statusBar and f.statusText then
-    if footerMsg and footerMsg ~= "" then
-      optionalStatusHeight = 20
-      if Theme and Theme.ApplyFont then
-        Theme.ApplyFont(f.statusText, "dense", footerTone or "text.muted")
-      end
-      f.statusText:SetText(footerMsg)
-      if f.statusBar.Show then f.statusBar:Show() end
-    else
-      f.statusText:SetText("")
-      if f.statusBar.Hide then f.statusBar:Hide() end
-    end
+    if f.subText.SetWordWrap then f.subText:SetWordWrap(false) end
+    if f.subText.SetNonSpaceWrap then pcall(f.subText.SetNonSpaceWrap, f.subText, false) end
+    if f.subText.SetMaxLines then pcall(f.subText.SetMaxLines, f.subText, 1) end
   end
 
   if f.dockToggleBtn and f.dockToggleBtn.SetLabel then
@@ -824,20 +1295,42 @@ layoutHUDFrame = function(f, status)
   if f.lockToggleBtn and f.lockToggleBtn.SetLabel then
     f.lockToggleBtn:SetLabel(settings.hudLocked and "Unlock tracker" or "Lock tracker")
   end
+  if f.pauseToggleBtn and f.pauseToggleBtn.SetLabel then
+    f.pauseToggleBtn:SetLabel(vm.stateKey == "paused" and "Resume navigation" or "Pause navigation")
+  end
 
-  local hudH = headerH + pad + bodyHeight + pad + optionalStatusHeight
+  local stepActionsEnabled = (vm.mode ~= "rxp")
+  setMenuRowButtonEnabled(f.nextBtn, stepActionsEnabled and (vm.stateKey ~= "paused"))
+  setMenuRowButtonEnabled(f.prevBtn, stepActionsEnabled and (vm.stateKey ~= "paused"))
+  setMenuRowButtonEnabled(f.pauseToggleBtn, stepActionsEnabled)
+
   f:SetSize(hudW, hudH)
   f.__width = hudW
   f.__height = hudH
+
+  if prevBodyWidth ~= bodyTextWidth and f.viewModel then
+    local vec = (target and target.anchor and ns.Compat and ns.Compat.ComputeNavigationVector)
+      and ns.Compat.ComputeNavigationVector(target.anchor, Navigation._scratchVec)
+      or nil
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, target, vec, true)
+  end
 end
 
 local function createHudMenuRowButton(parent, yOffset, labelText, onClick)
+  local wrappedClick = function(self, ...)
+    if self and self.__disabled then
+      return
+    end
+    if type(onClick) == "function" then
+      onClick(self, ...)
+    end
+  end
   if Widgets and Widgets.CreateGhostButton then
     local b = Widgets.CreateGhostButton(parent, 164, labelText, 24)
     if b then
       Widgets.SafeSetPoint(b, "TOPLEFT", parent, "TOPLEFT", 6, yOffset)
       if type(b.SetOnClick) == "function" then
-        b:SetOnClick(onClick)
+        b:SetOnClick(wrappedClick)
       end
       return b
     end
@@ -853,7 +1346,7 @@ local function createHudMenuRowButton(parent, yOffset, labelText, onClick)
     if self.SetText then self:SetText(txt) end
   end
   if b.SetScript then
-    b:SetScript("OnClick", onClick)
+    b:SetScript("OnClick", wrappedClick)
   end
   return b
 end
@@ -870,7 +1363,11 @@ local function ensureHUDFrame()
   end
 
   local settings = (ns.State and ns.State.GetArrowSettings and ns.State.GetArrowSettings()) or {}
-  local initW = math.max(280, math.min(440, math.floor((tonumber(settings.hudWidth) or 340) + 0.5)))
+  local minW = (Theme and Theme.METRICS and Theme.METRICS.hudMinWidth) or 200
+  local maxW = (Theme and Theme.METRICS and Theme.METRICS.hudMaxWidth) or 440
+  local defW = (Theme and Theme.METRICS and Theme.METRICS.hudDefaultWidth) or 240
+  local initW = math.max(minW, math.min(maxW, math.floor((tonumber(settings.hudWidth) or defW) + 0.5)))
+  local initH = (Theme and Theme.METRICS and Theme.METRICS.hudDefaultHeight) or 48
 
   local ok, f = pcall(
     CreateFrame,
@@ -886,9 +1383,9 @@ local function ensureHUDFrame()
     return nil
   end
 
-  f:SetSize(initW, 112)
+  f:SetSize(initW, initH)
   f.__width = initW
-  f.__height = 112
+  f.__height = initH
   f:SetPoint(
     settings.hudPoint or "TOP",
     UIParent,
@@ -952,102 +1449,80 @@ local function ensureHUDFrame()
 
   f:SetScript("OnDragStart", startHudDrag)
   f:SetScript("OnDragStop", stopHudDrag)
+  f:SetScript("OnEnter", function(self)
+    renderCompactHUDTooltip(self)
+  end)
+  f:SetScript("OnLeave", function()
+    if _G.GameTooltip and (not _G.GameTooltip.IsForbidden or not _G.GameTooltip:IsForbidden()) then
+      _G.GameTooltip:Hide()
+    end
+  end)
 
-  -- 1) 28-unit Header Bar (`[Riverglades / Gold Farm]` + `[Pause]` + `[⋯]`)
+  -- Hidden legacy header container retained for diagnostic compatibility only
   local headerBar = (Widgets and Widgets.CreatePanel and Widgets.CreatePanel(f, "surface.card", nil)) or nil
-  if headerBar then
-    Widgets.SafeSetPoint(headerBar, "TOPLEFT", f, "TOPLEFT", 1, -1)
-    Widgets.SafeSetPoint(headerBar, "TOPRIGHT", f, "TOPRIGHT", -1, -1)
-    Widgets.SafeSetHeight(headerBar, 27)
-    if type(headerBar.EnableMouse) == "function" then pcall(headerBar.EnableMouse, headerBar, true) end
-    if type(headerBar.RegisterForDrag) == "function" then pcall(headerBar.RegisterForDrag, headerBar, "LeftButton") end
-    if type(headerBar.SetScript) == "function" then
-      headerBar:SetScript("OnDragStart", startHudDrag)
-      headerBar:SetScript("OnDragStop", stopHudDrag)
-    end
-    local hdrDiv = Widgets.SafeCreateTexture(headerBar, "BORDER", 2)
-    if hdrDiv then
-      Widgets.SafeSetPoint(hdrDiv, "BOTTOMLEFT", headerBar, "BOTTOMLEFT", 0, 0)
-      Widgets.SafeSetPoint(hdrDiv, "BOTTOMRIGHT", headerBar, "BOTTOMRIGHT", 0, 0)
-      Widgets.SafeSetHeight(hdrDiv, 1)
-      Widgets.SafeSetSolidColor(hdrDiv, "border.subtle", 0.90)
-    end
-    local hdrAccent = Widgets.SafeCreateTexture(headerBar, "ARTWORK", 2)
-    if hdrAccent then
-      Widgets.SafeSetPoint(hdrAccent, "LEFT", headerBar, "LEFT", 10, 0)
-      Widgets.SafeSetSize(hdrAccent, 3, 14)
-      Widgets.SafeSetSolidColor(hdrAccent, "accent.gold", 1.0)
-    end
+  if headerBar and headerBar.Hide then
+    headerBar:Hide()
   end
   f.headerBar = headerBar
-
-  local moreBtn = (Widgets and Widgets.CreateIconButton)
-    and Widgets.CreateIconButton(headerBar or f, "more", "Tracker options", { "Skip, step back, dock/undock arrow, hide tracker, or stop navigation." }, 24, 13)
-    or CreateFrame("Button", nil, headerBar or f)
-  if moreBtn then
-    moreBtn:SetSize(24, 24)
-    moreBtn:SetPoint("RIGHT", headerBar or f, "RIGHT", -6, 0)
-  end
-  f.moreBtn = moreBtn
-
-  local pauseBtn = (Widgets and Widgets.CreateIconButton)
-    and Widgets.CreateIconButton(headerBar or f, "pause", "Pause navigation", { "Pauses active navigation and releases owned map pin." }, 24, 13)
-    or CreateFrame("Button", nil, headerBar or f)
-  if pauseBtn then
-    pauseBtn:SetSize(24, 24)
-    pauseBtn:SetPoint("RIGHT", moreBtn or headerBar or f, moreBtn and "LEFT" or "RIGHT", moreBtn and -4 or -34, 0)
-    local onPauseClick = function()
-      if Navigation.activeContext == "gold_farm" and ns.Events and ns.Events.HandleGoldSubcommand then
-        ns.Events.HandleGoldSubcommand("pause")
-      elseif ns.Events and ns.Events.HandleRivergladesSubcommand then
-        ns.Events.HandleRivergladesSubcommand("pause")
-      end
-    end
-    if type(pauseBtn.SetOnClick) == "function" then
-      pauseBtn:SetOnClick(onPauseClick)
-    elseif pauseBtn.SetScript then
-      pauseBtn:SetScript("OnClick", onPauseClick)
-    end
-  end
-  f.pauseBtn = pauseBtn
 
   local header = (Widgets and Widgets.SafeCreateFontString and Widgets.SafeCreateFontString(headerBar or f, "body", "text.primary"))
     or f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   if header then
-    header:SetPoint("LEFT", headerBar or f, "LEFT", 18, 0)
-    header:SetPoint("RIGHT", pauseBtn or headerBar or f, pauseBtn and "LEFT" or "RIGHT", -6, 0)
-    if header.SetJustifyH then header:SetJustifyH("LEFT") end
     if header.SetWordWrap then header:SetWordWrap(false) end
     header:SetText("Riverglades")
+    if header.Hide then header:Hide() end
   end
   f.headerText = header
 
-  -- 2) Docked 52-wide Arrow Lane (`38x38` NavigationArrow.tga + compact distance label beneath)
+  -- CRITICAL (Astra Release Blocker #1): Parent `moreBtn` (`...`) directly to `f`, NEVER to `headerBar`!
+  local moreBtn = (Widgets and Widgets.CreateIconButton)
+    and Widgets.CreateIconButton(f, "more", "Tracker options", { "Skip, step back, pause/resume, dock/undock arrow, lock, or stop navigation." }, 24, 13)
+    or CreateFrame("Button", nil, f)
+  if moreBtn then
+    if type(moreBtn.SetParent) == "function" then
+      pcall(moreBtn.SetParent, moreBtn, f)
+    end
+    moreBtn.__parent = f
+    if moreBtn.ClearAllPoints then
+      moreBtn:ClearAllPoints()
+    end
+    moreBtn:SetSize(24, 24)
+    moreBtn:SetPoint("RIGHT", f, "RIGHT", -6, 0)
+  end
+  f.moreBtn = moreBtn
+
+  local pauseBtn = (Widgets and Widgets.CreateIconButton)
+    and Widgets.CreateIconButton(f, "pause", "Pause navigation", { "Pauses active navigation and releases owned map pin." }, 24, 13)
+    or CreateFrame("Button", nil, f)
+  if pauseBtn and pauseBtn.Hide then
+    pauseBtn:Hide()
+  end
+  f.pauseBtn = pauseBtn
+
+  -- 1) Compact 36x36 Docked Arrow Lane (Line 2 owns distance; lane distanceText is permanently suppressed)
   local okLane, dockedLane = pcall(CreateFrame, "Frame", nil, f)
   if okLane and dockedLane and type(dockedLane.CreateTexture) == "function" then
-    dockedLane:SetSize(52, 60)
-    dockedLane:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -40)
+    dockedLane:SetSize(36, 36)
+    dockedLane:SetPoint("LEFT", f, "LEFT", 6, 0)
     if dockedLane.EnableMouse then pcall(dockedLane.EnableMouse, dockedLane, false) end
 
     local dArrowTex = dockedLane:CreateTexture(nil, "ARTWORK")
-    dArrowTex:SetSize(38, 38)
-    dArrowTex:SetPoint("TOP", dockedLane, "TOP", 0, -1)
+    dArrowTex:SetSize(32, 32)
+    dArrowTex:SetPoint("CENTER", dockedLane, "CENTER", 0, 0)
     dockedLane.arrowTex = dArrowTex
 
     local dNonDir = dockedLane:CreateTexture(nil, "ARTWORK")
     dNonDir:SetSize(12, 12)
-    dNonDir:SetPoint("CENTER", dockedLane, "TOP", 0, -20)
+    dNonDir:SetPoint("CENTER", dockedLane, "CENTER", 0, 0)
     if dNonDir.Hide then dNonDir:Hide() end
     dockedLane.nonDirMarker = dNonDir
 
     local dDist = (Widgets and Widgets.SafeCreateFontString and Widgets.SafeCreateFontString(dockedLane, "dense", "text.secondary"))
       or dockedLane:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     if dDist then
-      dDist:SetPoint("TOP", dockedLane, "TOP", 0, -42)
-      if dDist.SetWidth then pcall(dDist.SetWidth, dDist, 56) end
-      if dDist.SetJustifyH then dDist:SetJustifyH("CENTER") end
-      if dDist.SetWordWrap then dDist:SetWordWrap(false) end
+      dDist:SetPoint("TOP", dockedLane, "BOTTOM", 0, 0)
       dDist:SetText("")
+      if dDist.Hide then dDist:Hide() end
     end
     dockedLane.distanceText = dDist
 
@@ -1058,13 +1533,15 @@ local function ensureHUDFrame()
   end
   f.dockedArrowLane = dockedLane
 
-  -- 3) Wrapped Body Title & Detail Lines
-  local stepLine = (Widgets and Widgets.SafeCreateFontString and Widgets.SafeCreateFontString(f, "trackerAction", "text.primary"))
+  -- 2) Single-Line Quest/Step Title (Line 1) & Distance/Status (Line 2)
+  local stepLine = (Widgets and Widgets.SafeCreateFontString and Widgets.SafeCreateFontString(f, "body", "text.primary"))
     or f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
   if stepLine then
-    stepLine:SetPoint("TOPLEFT", f, "TOPLEFT", 72, -40)
+    stepLine:SetPoint("TOPLEFT", f, "TOPLEFT", 46, -6)
     if stepLine.SetJustifyH then stepLine:SetJustifyH("LEFT") end
-    if stepLine.SetWordWrap then stepLine:SetWordWrap(true) end
+    if stepLine.SetWordWrap then stepLine:SetWordWrap(false) end
+    if stepLine.SetNonSpaceWrap then pcall(stepLine.SetNonSpaceWrap, stepLine, false) end
+    if stepLine.SetMaxLines then pcall(stepLine.SetMaxLines, stepLine, 1) end
     stepLine:SetText("")
   end
   f.stepText = stepLine
@@ -1072,27 +1549,22 @@ local function ensureHUDFrame()
   local subLine = (Widgets and Widgets.SafeCreateFontString and Widgets.SafeCreateFontString(f, "dense", "text.secondary"))
     or f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   if subLine then
-    subLine:SetPoint("TOPLEFT", f, "TOPLEFT", 72, -62)
+    subLine:SetPoint("TOPLEFT", f, "TOPLEFT", 46, -26)
     if subLine.SetJustifyH then subLine:SetJustifyH("LEFT") end
-    if subLine.SetWordWrap then subLine:SetWordWrap(true) end
+    if subLine.SetWordWrap then subLine:SetWordWrap(false) end
+    if subLine.SetNonSpaceWrap then pcall(subLine.SetNonSpaceWrap, subLine, false) end
+    if subLine.SetMaxLines then pcall(subLine.SetMaxLines, subLine, 1) end
     subLine:SetText("")
   end
   f.subText = subLine
 
-  -- 4) Optional Compact Footer Status Strip (`20` high; hidden unless status needs explanation)
+  -- Hidden legacy status strip retained for diagnostic compatibility only
   local statusBar = (Widgets and Widgets.CreatePanel and Widgets.CreatePanel(f, "surface.elevated", nil))
     or CreateFrame("Frame", nil, f)
   if statusBar then
-    statusBar:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 1, 1)
-    statusBar:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -1, 1)
-    statusBar:SetSize(initW - 2, 19)
     local stText = (Widgets and Widgets.SafeCreateFontString and Widgets.SafeCreateFontString(statusBar, "dense", "text.muted"))
       or statusBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     if stText then
-      stText:SetPoint("LEFT", statusBar, "LEFT", 12, 0)
-      stText:SetPoint("RIGHT", statusBar, "RIGHT", -12, 0)
-      if stText.SetJustifyH then stText:SetJustifyH("LEFT") end
-      if stText.SetWordWrap then stText:SetWordWrap(false) end
       stText:SetText("")
     end
     f.statusText = stText
@@ -1100,12 +1572,12 @@ local function ensureHUDFrame()
   end
   f.statusBar = statusBar
 
-  -- 5) Overflow Menu (`[⋯]`: Skip/Next, Prev, Dock/Undock, Lock/Unlock, Open Workspace, Hide Tracker, Stop)
+  -- 3) Overflow Menu (`[...]`): Skip/Next, Prev, Pause/Resume, Dock/Undock, Lock/Unlock, Open Workspace, Hide Tracker, Stop
   local overflowMenu = (Widgets and Widgets.CreatePanel and Widgets.CreatePanel(f, "surface.elevated", "border.default"))
     or CreateFrame("Frame", nil, f)
   if overflowMenu then
-    overflowMenu:SetSize(176, 188)
-    overflowMenu:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -30)
+    overflowMenu:SetSize(176, 214)
+    overflowMenu:SetPoint("TOPRIGHT", f, "BOTTOMRIGHT", -4, -4)
     if type(overflowMenu.SetFrameLevel) == "function" and type(f.GetFrameLevel) == "function" then
       pcall(overflowMenu.SetFrameLevel, overflowMenu, (f:GetFrameLevel() or 10) + 25)
     end
@@ -1135,7 +1607,18 @@ local function ensureHUDFrame()
       end
     end)
 
-    f.dockToggleBtn = createHudMenuRowButton(overflowMenu, -58, "Undock floating arrow", function()
+    f.pauseToggleBtn = createHudMenuRowButton(overflowMenu, -58, "Pause navigation", function()
+      closeMenu()
+      local isPausedNow = (f.viewModel and f.viewModel.stateKey == "paused")
+      local subcmd = isPausedNow and "start" or "pause"
+      if Navigation.activeContext == "gold_farm" and ns.Events and ns.Events.HandleGoldSubcommand then
+        ns.Events.HandleGoldSubcommand(subcmd)
+      elseif ns.Events and ns.Events.HandleRivergladesSubcommand then
+        ns.Events.HandleRivergladesSubcommand(subcmd)
+      end
+    end)
+
+    f.dockToggleBtn = createHudMenuRowButton(overflowMenu, -84, "Undock floating arrow", function()
       closeMenu()
       local cur = ns.State and ns.State.GetArrowSettings and ns.State.GetArrowSettings()
       if cur then
@@ -1144,7 +1627,7 @@ local function ensureHUDFrame()
       end
     end)
 
-    f.lockToggleBtn = createHudMenuRowButton(overflowMenu, -84, "Unlock tracker", function()
+    f.lockToggleBtn = createHudMenuRowButton(overflowMenu, -110, "Unlock tracker", function()
       closeMenu()
       local cur = ns.State and ns.State.GetArrowSettings and ns.State.GetArrowSettings()
       if cur then
@@ -1153,14 +1636,14 @@ local function ensureHUDFrame()
       end
     end)
 
-    f.openWorkspaceBtn = createHudMenuRowButton(overflowMenu, -110, "Open Workspace", function()
+    f.openWorkspaceBtn = createHudMenuRowButton(overflowMenu, -136, "Open Workspace", function()
       closeMenu()
       if ns.UI and ns.UI.Workspace and ns.UI.Workspace.Show then
         ns.UI.Workspace.Show(Navigation.activeContext == "gold_farm" and "gold" or "riverglades")
       end
     end)
 
-    f.hideTrackerBtn = createHudMenuRowButton(overflowMenu, -136, "Hide tracker", function()
+    f.hideTrackerBtn = createHudMenuRowButton(overflowMenu, -162, "Hide tracker", function()
       closeMenu()
       local cur = ns.State and ns.State.GetArrowSettings and ns.State.GetArrowSettings()
       if cur then
@@ -1170,7 +1653,7 @@ local function ensureHUDFrame()
       Navigation.RefreshArrowSettings()
     end)
 
-    f.closeBtn = createHudMenuRowButton(overflowMenu, -162, "Stop navigation", function()
+    f.closeBtn = createHudMenuRowButton(overflowMenu, -188, "Stop navigation", function()
       closeMenu()
       if Navigation.activeContext == "gold_farm" and ns.Events and ns.Events.HandleGoldSubcommand then
         ns.Events.HandleGoldSubcommand("stop")
@@ -1190,6 +1673,7 @@ local function ensureHUDFrame()
         overflowMenu:Hide()
       else
         layoutHUDFrame(f, Navigation.lastStatus)
+        positionOverflowMenu(f, overflowMenu)
         overflowMenu:Show()
       end
     end
@@ -1334,6 +1818,12 @@ updateArrowVisualFromVector = function(af, target, vec, force, isCompactDocked)
   if not af or not target then
     return
   end
+  if isCompactDocked and af.distanceText then
+    af.distanceText:SetText("")
+    if af.distanceText.Hide then
+      af.distanceText:Hide()
+    end
+  end
   if not vec
     or vec.status == "unavailable"
     or vec.status == "missing_transform"
@@ -1344,7 +1834,7 @@ updateArrowVisualFromVector = function(af, target, vec, force, isCompactDocked)
       af.visibleAlpha = 0
       setArrowSubwidgetsMode(af, false, false)
       if isCompactDocked then
-        if af.distanceText then af.distanceText:SetText("—") end
+        af.lastDistanceLabel = "—"
         if af.SetAlpha then af:SetAlpha(0.35) end
       else
         if af.SetAlpha then af:SetAlpha(0) end
@@ -1362,9 +1852,9 @@ updateArrowVisualFromVector = function(af, target, vec, force, isCompactDocked)
       if af.SetAlpha then
         af:SetAlpha(1)
       end
-      local instLabel = isCompactDocked and "Cross-cont" or "|cff6ca6d9Different instance/continent|r"
+      local instLabel = isCompactDocked and "Other instance" or "|cff6ca6d9Different instance/continent|r"
       af.lastDistanceLabel = instLabel
-      if af.distanceText then
+      if not isCompactDocked and af.distanceText then
         af.distanceText:SetText(instLabel)
       end
       if not isCompactDocked then
@@ -1389,7 +1879,7 @@ updateArrowVisualFromVector = function(af, target, vec, force, isCompactDocked)
       end
       local noFaceStr = isCompactDocked and distStr or ("|cffe2a93bFacing unavailable • " .. distStr .. "|r")
       af.lastDistanceLabel = noFaceStr
-      if af.distanceText then
+      if not isCompactDocked and af.distanceText then
         af.distanceText:SetText(noFaceStr)
       end
       if not isCompactDocked then
@@ -1449,17 +1939,21 @@ updateArrowVisualFromVector = function(af, target, vec, force, isCompactDocked)
   if force or af.lastPresentationState ~= presState or af.lastDisplayedYards ~= intYards then
     af.lastPresentationState = presState
     af.lastDisplayedYards = intYards
-    if af.distanceText then
-      if inCamp then
-        local campStr = isCompactDocked and "|cff5cc98aIn Camp|r" or ("|cff5cc98aIn Camp • " .. distStr .. "|r")
-        af.lastDistanceLabel = campStr
+    if inCamp then
+      local campStr = isCompactDocked and "|cff5cc98aIn Camp|r" or ("|cff5cc98aIn Camp • " .. distStr .. "|r")
+      af.lastDistanceLabel = campStr
+      if not isCompactDocked and af.distanceText then
         af.distanceText:SetText(campStr)
-      elseif arrivedFlag then
-        local arrStr = isCompactDocked and "|cff5cc98aArrived|r" or ("|cff5cc98aArrived • " .. distStr .. "|r")
-        af.lastDistanceLabel = arrStr
+      end
+    elseif arrivedFlag then
+      local arrStr = isCompactDocked and "|cff5cc98aArrived|r" or ("|cff5cc98aArrived • " .. distStr .. "|r")
+      af.lastDistanceLabel = arrStr
+      if not isCompactDocked and af.distanceText then
         af.distanceText:SetText(arrStr)
-      else
-        af.lastDistanceLabel = distStr
+      end
+    else
+      af.lastDistanceLabel = distStr
+      if not isCompactDocked and af.distanceText then
         af.distanceText:SetText(distStr)
       end
     end
@@ -1639,6 +2133,24 @@ local function hasActiveProviderOrRxpMonitorableSession()
   local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
   if rProg and rProg.mode ~= "paused" then
     return true
+  end
+  return false
+end
+
+local function hasVisibleOrRetainedHudSession()
+  if hasActiveProviderOrRxpMonitorableSession() then
+    return true
+  end
+  if Navigation.activeContext == "gold_farm" then
+    local gProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
+    if gProg and gProg.mode == "paused" and gProg.pausedHudRetained == true then
+      return true
+    end
+  else
+    local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
+    if rProg and rProg.mode == "paused" and rProg.pausedHudRetained == true then
+      return true
+    end
   end
   return false
 end
@@ -2281,14 +2793,17 @@ function Navigation.RefreshArrowSettings()
 
     if Navigation.frame then
       if settings and settings.hudHidden then
+        if Navigation.frame.overflowMenu and Navigation.frame.overflowMenu.Hide then
+          Navigation.frame.overflowMenu:Hide()
+        end
         Navigation.frame:Hide()
-      elseif hasActiveProviderOrRxpMonitorableSession() then
+      elseif hasVisibleOrRetainedHudSession() then
         layoutHUDFrame(Navigation.frame, Navigation.lastStatus)
         Navigation.frame:Show()
       end
     end
 
-    refreshHUDSubtextFromTarget(target, vec)
+    Navigation.RefreshCompactHUDFromVector(target, vec, true)
     target.lastCapabilityKey = nil
     refreshCapabilityStatusInPlace(target, vec)
     if Navigation.frame then
@@ -2300,8 +2815,11 @@ function Navigation.RefreshArrowSettings()
 
   if Navigation.frame then
     if settings and settings.hudHidden then
+      if Navigation.frame.overflowMenu and Navigation.frame.overflowMenu.Hide then
+        Navigation.frame.overflowMenu:Hide()
+      end
       Navigation.frame:Hide()
-    elseif hasActiveProviderOrRxpMonitorableSession() then
+    elseif hasVisibleOrRetainedHudSession() then
       layoutHUDFrame(Navigation.frame, Navigation.lastStatus)
       Navigation.frame:Show()
     end
@@ -2463,6 +2981,42 @@ local function showOrHideHUDRespectingPreference(f, status)
   end
 end
 
+local function inspectRivergladesActionMeta(act, route)
+  local objSummaryText = nil
+  local bankSupplyCount = 0
+  if type(act) ~= "table" then
+    return nil, 0
+  end
+  local qref = (type(act.questKey) == "string" and act.questKey ~= "" and act.questKey) or act.questID
+  if qref then
+    if act.kind == "objective" and ns.Compat and ns.Compat.GetQuestObjectivesResult then
+      local objRes = ns.Compat.GetQuestObjectivesResult(qref)
+      if type(objRes) == "table" and objRes.status == "ok" and type(objRes.summaryText) == "string" and objRes.summaryText ~= "" then
+        objSummaryText = objRes.summaryText
+      end
+    end
+    route = route or (ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute())
+    local qMeta = nil
+    if type(route) == "table" then
+      if type(qref) == "number" and type(route.questsByID) == "table" then
+        qMeta = route.questsByID[qref]
+      elseif type(qref) == "string" and type(route.questsByTitleKey) == "table" then
+        qMeta = route.questsByTitleKey[qref]
+      end
+    end
+    if not qMeta and ns.Compat and ns.Compat.LookupRouteQuestMeta then
+      qMeta = ns.Compat.LookupRouteQuestMeta(qref)
+    end
+    if qMeta and qMeta.supplyItemID and ns.State and ns.State.GetBankItemCount then
+      local bankQty = tonumber(ns.State.GetBankItemCount(qMeta.supplyItemID)) or 0
+      if bankQty > 0 then
+        bankSupplyCount = bankQty
+      end
+    end
+  end
+  return objSummaryText, bankSupplyCount
+end
+
 local function updateHUDPresentation(eval, status)
   notifyWorldMapPinsRefresh()
   local f = ensureHUDFrame()
@@ -2471,7 +3025,18 @@ local function updateHUDPresentation(eval, status)
   end
 
   local progress = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-  if not progress or progress.mode == "paused" then
+  if not progress then
+    if Navigation.activeContext == "riverglades" then
+      if f.overflowMenu and f.overflowMenu.Hide then f.overflowMenu:Hide() end
+      f:Hide()
+    end
+    return
+  end
+
+  -- CRITICAL (Astra Release Blocker #2):
+  -- A paused session (`pausedHudRetained == true`) remains visible with `"Paused"` and `"Resume navigation"` in `...`.
+  -- A stopped/idle session (`pausedHudRetained ~= true`) hides the HUD.
+  if progress.mode == "paused" and progress.pausedHudRetained ~= true then
     if Navigation.activeContext == "riverglades" then
       if f.overflowMenu and f.overflowMenu.Hide then f.overflowMenu:Hide() end
       f:Hide()
@@ -2488,10 +3053,12 @@ local function updateHUDPresentation(eval, status)
   local counts = (eval and eval.counts) or { completed = 0, total = 0, skipped = 0 }
   local act = eval and eval.nextAction
   local cleanHeader = "Riverglades"
-  if progress.mode ~= "rxp" and act and (act.questID or act.questKey) and ns.Compat and ns.Compat.LookupRouteQuestMeta then
+  local cleanQuestName = nil
+  if act and (act.questID or act.questKey) and ns.Compat and ns.Compat.LookupRouteQuestMeta then
     local qMeta = ns.Compat.LookupRouteQuestMeta(act.questKey or act.questID)
     local qName = qMeta and qMeta.name or nil
     if type(qName) == "string" and qName ~= "" then
+      cleanQuestName = qName
       local lvl = tonumber(qMeta.questLevel)
       local lvlPrefix = ""
       if lvl and lvl > 0 then
@@ -2506,80 +3073,157 @@ local function updateHUDPresentation(eval, status)
       end
     end
   end
+  if not cleanQuestName and act then
+    cleanQuestName = extractCleanQuestOrStepName(act, "riverglades")
+  end
+  if cleanQuestName and cleanQuestName ~= "" then
+    Navigation.lastRetainedTitleByContext.riverglades = cleanQuestName
+  end
   if Navigation.activeTarget and Navigation.activeTarget.context == "riverglades" then
     Navigation.activeTarget.hudCleanHeader = cleanHeader
   end
-  f.headerText:SetText(cleanHeader)
+  if f.headerText then
+    f.headerText:SetText(cleanHeader)
+  end
+
+  if progress.mode == "paused" then
+    local retainedTitle = cleanQuestName
+      or Navigation.lastRetainedTitleByContext.riverglades
+      or "Riverglades"
+    f.viewModel = {
+      context = "riverglades",
+      mode = "paused",
+      stateKey = "paused",
+      titleText = retainedTitle,
+      fullInstruction = (act and act.title) or retainedTitle,
+      headerSummary = cleanHeader,
+    }
+    f.stepText:SetText(retainedTitle)
+    showOrHideHUDRespectingPreference(f, status)
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
+    return
+  end
 
   if progress.mode == "rxp" then
-    f.stepText:SetText("RXPGuides owns active step progression")
-    f.subText:SetText("Use RXP window for steps, or /fh rg start after deselecting in RXP.")
+    local rxpTitle = cleanQuestName or "RXPGuides"
+    f.viewModel = {
+      context = "riverglades",
+      mode = "rxp",
+      stateKey = "rxp_owned",
+      titleText = rxpTitle,
+      fullInstruction = "RXPGuides owns active step progression",
+      headerSummary = cleanHeader,
+      extraNote = "Use RXP window for steps, or /fh rg start after deselecting in RXP.",
+    }
+    f.stepText:SetText(rxpTitle)
     showOrHideHUDRespectingPreference(f, status)
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
     return
   end
 
   if not act then
     if eval and eval.blockedNotice and eval.blockedNotice.state == "blocked_quest_log_full" then
-      f.stepText:SetText("Quest Log Full — clear a slot to accept next quest")
-      f.subText:SetText(tostring(eval.blockedNotice.action and eval.blockedNotice.action.title or ""))
+      local blockedAct = eval.blockedNotice.action
+      local pendingQuestName = extractCleanQuestOrStepName(blockedAct, "riverglades") or "Quest log full"
+      f.viewModel = {
+        context = "riverglades",
+        mode = progress.mode,
+        stateKey = "quest_log_full",
+        titleText = pendingQuestName,
+        fullInstruction = "Quest Log Full — clear a slot to accept next quest",
+        headerSummary = cleanHeader,
+        extraNote = tostring(blockedAct and blockedAct.title or ""),
+      }
+      f.stepText:SetText(pendingQuestName)
     elseif eval and (
       (eval.blockedNotice and eval.blockedNotice.state == "blocked_unresolved_history")
       or ((counts.blockedUnresolvedHistory or 0) > 0)
     ) then
-      f.stepText:SetText(
-        string.format(
+      local blockedAct = eval.blockedNotice and eval.blockedNotice.action or nil
+      local unresolvedTitle = extractCleanQuestOrStepName(blockedAct, "riverglades") or "Quest history"
+      f.viewModel = {
+        context = "riverglades",
+        mode = progress.mode,
+        stateKey = "unresolved_history",
+        titleText = unresolvedTitle,
+        fullInstruction = string.format(
           "%d custom title quest(s) awaiting pre-install history check",
           tonumber(counts.blockedUnresolvedHistory) or 1
-        )
-      )
-      f.subText:SetText("Open Workspace (/fh rg) or run /fh rg unresolved to review.")
+        ),
+        headerSummary = cleanHeader,
+        extraNote = "Open Workspace (/fh rg) or run /fh rg unresolved to review.",
+        showNeutralDockedMarker = true,
+      }
+      f.stepText:SetText(unresolvedTitle)
     else
-      f.stepText:SetText("Reviewed Riverglades segment complete!")
-      f.subText:SetText("All eligible steps completed or skipped (/fh rg stop to close).")
+      f.viewModel = {
+        context = "riverglades",
+        mode = progress.mode,
+        stateKey = "segment_complete",
+        titleText = "Riverglades",
+        fullInstruction = "Reviewed Riverglades segment complete!",
+        headerSummary = cleanHeader,
+        extraNote = "All eligible steps completed or skipped (/fh rg stop to close).",
+      }
+      f.stepText:SetText("Riverglades")
     end
     showOrHideHUDRespectingPreference(f, status)
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
     return
   end
 
   local plan = (eval and type(eval.plan) == "table") and eval.plan or nil
   local isOffZone = (plan and plan.zoneStatus == "off_zone")
   local isPosUnavail = (plan and plan.zoneStatus == "position_unavailable")
+  local displayTitle = cleanQuestName or tostring(act.title or act.actionID)
+  local fullInstruction = isOffZone
+    and ("Travel to Riverglades · " .. tostring(act.title or act.actionID))
+    or tostring(act.title or act.actionID)
 
-  if isOffZone then
-    f.stepText:SetText("Travel to Riverglades to begin")
-  else
-    f.stepText:SetText(tostring(act.title or act.actionID))
-  end
+  local objProgressText, bankSupplyCount = inspectRivergladesActionMeta(act)
+  f.stepText:SetText(displayTitle)
 
   if act.destination then
     local prefix, suffix = formatRivergladesHudParts(act)
     local t = Navigation.activeTarget
-    if isOffZone then
-      local entryText = "Entry: " .. tostring(act.title or act.actionID) .. " · " .. prefix .. suffix
-      if t and t.context == "riverglades" then
-        t.lastHudSubtext = entryText
-      end
-      f.subText:SetText(entryText)
-    elseif t and t.context == "riverglades" and t.anchor then
+    local vec = nil
+    if t and t.context == "riverglades" and t.anchor then
       t.hudCoordPrefix = prefix
       t.hudSuffix = suffix
-      local vec = ns.Compat.ComputeNavigationVector(t.anchor, Navigation._scratchVec)
+      vec = ns.Compat.ComputeNavigationVector(t.anchor, Navigation._scratchVec)
       updateTargetHysteresis(t, vec)
-      local distPart = formatHudDistanceSegment(t, vec) or ""
-      if distPart == "" and isPosUnavail then
-        distPart = " • Position unavailable"
-      end
-      local fullLine = prefix .. distPart .. suffix
-      t.lastHudSubtext = fullLine
-      f.subText:SetText(fullLine)
-    else
-      local posNote = isPosUnavail and " • Position unavailable" or ""
-      f.subText:SetText(prefix .. posNote .. suffix)
     end
+    f.viewModel = {
+      context = "riverglades",
+      mode = progress.mode,
+      stateKey = isPosUnavail and "position_unavailable" or "normal",
+      titleText = displayTitle,
+      fullInstruction = fullInstruction,
+      headerSummary = cleanHeader,
+      coordSummary = (prefix or "") .. (suffix or ""),
+      undockedStatusText = act.npcName or prefix,
+      objectiveProgressText = objProgressText,
+      bankSupplyCount = bankSupplyCount,
+      forcePositionUnavailable = isPosUnavail,
+    }
+    showOrHideHUDRespectingPreference(f, status)
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, t, vec, true)
   else
-    f.subText:SetText(tostring(act.note or "Manual objective — see quest log / live Questie"))
+    f.viewModel = {
+      context = "riverglades",
+      mode = progress.mode,
+      stateKey = "manual_objective",
+      titleText = displayTitle,
+      fullInstruction = fullInstruction,
+      headerSummary = cleanHeader,
+      objectiveProgressText = objProgressText,
+      bankSupplyCount = bankSupplyCount,
+      extraNote = tostring(act.note or "Manual objective — see quest log / live Questie"),
+      showNeutralDockedMarker = true,
+    }
+    showOrHideHUDRespectingPreference(f, status)
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
   end
-  showOrHideHUDRespectingPreference(f, status)
 end
 
 function Navigation.SyncFromEvaluation(eval, progress, expectedGeneration)
@@ -2829,7 +3473,15 @@ local function updateGoldFarmHUDPresentation(eval, status)
   end
 
   local progress = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
-  if not progress or progress.mode == "paused" or not (eval and eval.farm) then
+  if not progress or not (eval and eval.farm) then
+    if Navigation.activeContext == "gold_farm" then
+      if f.overflowMenu and f.overflowMenu.Hide then f.overflowMenu:Hide() end
+      f:Hide()
+    end
+    return
+  end
+
+  if progress.mode == "paused" and progress.pausedHudRetained ~= true then
     if Navigation.activeContext == "gold_farm" then
       if f.overflowMenu and f.overflowMenu.Hide then f.overflowMenu:Hide() end
       f:Hide()
@@ -2844,53 +3496,114 @@ local function updateGoldFarmHUDPresentation(eval, status)
   end
 
   local farm = eval.farm
+  local step = eval.activeStep
   local cleanHeader = string.format(
     "Gold Farm · %s (%d/%d)",
     tostring(farm.shortLabel or farm.zoneName),
     tonumber(eval.stepIndex) or 1,
     tonumber(eval.totalSteps) or 1
   )
+  local cleanStepTitle = (step and (step.title or step.stepID)) or farm.shortLabel or farm.title or "Gold Farm"
+  Navigation.lastRetainedTitleByContext.gold_farm = tostring(cleanStepTitle)
   if Navigation.activeTarget and Navigation.activeTarget.context == "gold_farm" then
     Navigation.activeTarget.hudCleanHeader = cleanHeader
   end
-  f.headerText:SetText(cleanHeader)
+  if f.headerText then
+    f.headerText:SetText(cleanHeader)
+  end
+
+  if progress.mode == "paused" then
+    local retainedTitle = Navigation.lastRetainedTitleByContext.gold_farm or tostring(farm.shortLabel or farm.title or "Gold Farm")
+    f.viewModel = {
+      context = "gold_farm",
+      mode = "paused",
+      stateKey = "paused",
+      titleText = retainedTitle,
+      fullInstruction = retainedTitle,
+      headerSummary = cleanHeader,
+    }
+    f.stepText:SetText(retainedTitle)
+    showOrHideHUDRespectingPreference(f, status)
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
+    return
+  end
 
   if progress.mode == "rxp" then
-    f.stepText:SetText("RXPGuides owns active gold farm steps")
-    f.subText:SetText("Use RXP window, or /fh gold start after deselecting in RXP.")
+    local rxpTitle = tostring(farm.shortLabel or farm.title or "RXPGuides")
+    f.viewModel = {
+      context = "gold_farm",
+      mode = "rxp",
+      stateKey = "rxp_owned",
+      titleText = rxpTitle,
+      fullInstruction = "RXPGuides owns active gold farm steps",
+      headerSummary = cleanHeader,
+      extraNote = "Use RXP window, or /fh gold start after deselecting in RXP.",
+    }
+    f.stepText:SetText(rxpTitle)
     showOrHideHUDRespectingPreference(f, status)
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
     return
   end
 
-  local step = eval.activeStep
   if not step then
-    f.stepText:SetText(tostring(farm.title))
-    f.subText:SetText("Open Workspace (/fh gold) or run /fh gold stop to close.")
+    local segTitle = tostring(farm.shortLabel or farm.title or "Gold Farm")
+    f.viewModel = {
+      context = "gold_farm",
+      mode = progress.mode,
+      stateKey = "segment_complete",
+      titleText = segTitle,
+      fullInstruction = tostring(farm.title or segTitle),
+      headerSummary = cleanHeader,
+      extraNote = "Open Workspace (/fh gold) or run /fh gold stop to close.",
+    }
+    f.stepText:SetText(segTitle)
     showOrHideHUDRespectingPreference(f, status)
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
     return
   end
 
-  f.stepText:SetText(tostring(step.title or step.stepID))
+  local stepTitle = tostring(step.title or step.stepID)
+  f.stepText:SetText(stepTitle)
   if step.destination then
     local xPct, yPct = ns.Domain.GoldFarms.NormalizedToPercent(step.destination.x01, step.destination.y01)
     local zoneLabel = tostring(step.destination.zoneName or farm.zoneName or "")
     local prefix = string.format("%s (%.1f, %.1f)", zoneLabel, xPct or 0, yPct or 0)
     local suffix = formatGoldFarmHudStepSuffix(step)
     local t = Navigation.activeTarget
+    local vec = nil
     if t and t.context == "gold_farm" and t.anchor then
-      local vec = ns.Compat.ComputeNavigationVector(t.anchor, Navigation._scratchVec)
+      t.hudCoordPrefix = prefix
+      t.hudSuffix = suffix
+      vec = ns.Compat.ComputeNavigationVector(t.anchor, Navigation._scratchVec)
       updateTargetHysteresis(t, vec)
-      local distPart = formatHudDistanceSegment(t, vec) or ""
-      local fullLine = prefix .. distPart .. suffix
-      t.lastHudSubtext = fullLine
-      f.subText:SetText(fullLine)
-    else
-      f.subText:SetText(prefix .. suffix)
     end
+    f.viewModel = {
+      context = "gold_farm",
+      mode = progress.mode,
+      stateKey = "normal",
+      titleText = stepTitle,
+      fullInstruction = string.format("%s — %s", tostring(farm.shortLabel or farm.title or "Gold Farm"), stepTitle),
+      headerSummary = cleanHeader,
+      coordSummary = prefix .. suffix,
+      undockedStatusText = prefix,
+      extraNote = step.note,
+    }
+    showOrHideHUDRespectingPreference(f, status)
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, t, vec, true)
   else
-    f.subText:SetText(tostring(step.note or ""))
+    f.viewModel = {
+      context = "gold_farm",
+      mode = progress.mode,
+      stateKey = "manual_objective",
+      titleText = stepTitle,
+      fullInstruction = stepTitle,
+      headerSummary = cleanHeader,
+      objectiveProgressText = (type(step.note) == "string" and step.note ~= "") and step.note or nil,
+      showNeutralDockedMarker = true,
+    }
+    showOrHideHUDRespectingPreference(f, status)
+    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
   end
-  showOrHideHUDRespectingPreference(f, status)
 end
 
 function Navigation.SyncFromGoldFarmEvaluation(eval, progress, expectedGeneration)

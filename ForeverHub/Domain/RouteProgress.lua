@@ -207,17 +207,22 @@ function RouteProgress.Start(route, progress, ctx, playerPos)
   -- Mutual exclusion: pause any active Gold Farm route before Riverglades acquires navigation
   if ns.State and ns.State.GetGoldFarmProgress then
     local goldProg = ns.State.GetGoldFarmProgress()
-    if goldProg and goldProg.mode ~= "paused" then
-      if ns.Domain and ns.Domain.GoldFarms and ns.Domain.GoldFarms.Pause then
-        ns.Domain.GoldFarms.Pause(nil, goldProg)
-      else
-        goldProg.mode = "paused"
+    if goldProg then
+      if goldProg.mode ~= "paused" then
+        if ns.Domain and ns.Domain.GoldFarms and ns.Domain.GoldFarms.Pause then
+          ns.Domain.GoldFarms.Pause(nil, goldProg)
+        else
+          goldProg.mode = "paused"
+        end
       end
+      goldProg.pausedHudRetained = false
     end
   end
   if ns.UI and ns.UI.Navigation and ns.UI.Navigation.RequestContextSwitch then
     ns.UI.Navigation.RequestContextSwitch("riverglades")
   end
+
+  progress.pausedHudRetained = false
 
   -- Check if user explicitly selected our exported guide in RXPGuides
   if ns.Bridges and ns.Bridges.RXPBridge and ns.Bridges.RXPBridge.IsRivergladesGuideSelected
@@ -238,6 +243,7 @@ function RouteProgress.Pause(route, progress, ctx)
     return false, "Route progress unavailable."
   end
   progress.mode = "paused"
+  progress.pausedHudRetained = true
   local eval = RouteProgress.Reconcile(route, progress, ctx)
   return true, eval
 end
@@ -248,6 +254,7 @@ function RouteProgress.Stop(route, progress, ctx, resetSkips)
     return false, "Route progress unavailable."
   end
   progress.mode = "paused"
+  progress.pausedHudRetained = false
   progress.currentActionID = nil
   progress.currentSubLocationID = nil
   progress.committedAnchorGroupID = nil

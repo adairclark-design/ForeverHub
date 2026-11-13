@@ -40,6 +40,13 @@ Theme.METRICS = {
   tableHeaderHeight = 24,
   ingredientRowMinHeight = 40,
   optionFooterHeight = 32,
+  hudDefaultWidth = 240,
+  hudMinWidth = 200,
+  hudMaxWidth = 440,
+  hudDefaultHeight = 48,
+  hudPadding = 8,
+  hudArrowLaneWidth = 36,
+  hudArrowLaneHeight = 36,
 }
 
 -- Exact Astra v0.8.0 Color Tokens (RGBA + WoW |cffRRGGBB hex)

@@ -854,9 +854,14 @@ function State.MigrateArrowSettings(raw)
     normY = nil
   end
 
-  local hudWidth = tonumber(s.hudWidth) or 340
-  if hudWidth ~= hudWidth or hudWidth < 280 then
-    hudWidth = 280
+  local prevSchema = tonumber(s.schemaVersion) or 0
+  local rawHudWidth = tonumber(s.hudWidth)
+  local hudWidth = rawHudWidth or 240
+  if prevSchema < 3 and rawHudWidth == 340 then
+    hudWidth = 240
+  end
+  if hudWidth ~= hudWidth or hudWidth < 200 then
+    hudWidth = 200
   elseif hudWidth > 440 then
     hudWidth = 440
   end
@@ -872,7 +877,7 @@ function State.MigrateArrowSettings(raw)
   end
 
   return {
-    schemaVersion = 2,
+    schemaVersion = 3,
     renderer = renderer,
     enabled = (renderer ~= "off"),
     locked = (s.locked == true),
@@ -907,7 +912,7 @@ end
 
 function State.GetArrowSettings()
   local charDB = State.GetCharDB()
-  if type(charDB.arrowSettings) ~= "table" or charDB.arrowSettings.schemaVersion ~= 2 then
+  if type(charDB.arrowSettings) ~= "table" or charDB.arrowSettings.schemaVersion ~= 3 then
     charDB.arrowSettings = State.MigrateArrowSettings(charDB.arrowSettings)
   end
   return charDB.arrowSettings

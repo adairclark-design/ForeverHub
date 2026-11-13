@@ -4518,19 +4518,75 @@ function SelfTest.RunWorkspaceUISuite()
       end
     end)
 
-    -- UI-07: Surface D (Tracker HUD & Docked/Floating Arrow) Mutual Exclusion & Non-Stopping Hide Tracker
-    check("UI-07. Surface D (Tracker HUD): 340w Docked Default, Arrow Mutual Exclusion & Non-Stopping Hide", function()
+    -- UI-07: Surface D (Compact Tracker HUD 240x48, Schema v3 Migration, Parent-Chain Visibility & 8 State Transitions)
+    check("UI-07. Surface D (Compact Tracker HUD): 240x48 Default, Schema v3 Migration, Parent-Chain Visibility & State Transitions", function()
       local Nav = ns.UI.Navigation
       if Nav and type(_G.CreateFrame) == "function" then
         local arrowSettings = ns.State.GetArrowSettings()
         local prog = ns.State.GetRouteProgress()
+        local gfProg = ns.State.GetGoldFarmProgress()
         local savedArrowSettings = deepCopyTable(arrowSettings)
-        local savedProgMode = prog.mode
+        local savedProg = deepCopyTable(prog)
+        local savedGfProg = deepCopyTable(gfProg)
         local prevSuppress = Nav.suppressHUDCreation
+
+        local function getWidgetParent(w)
+          if type(w) ~= "table" then
+            return nil
+          end
+          if type(w.GetParent) == "function" then
+            return w:GetParent()
+          end
+          return w.__parent
+        end
+
+        local function isEffectivelyVisible(widget)
+          local cur = widget
+          local depth = 0
+          while cur and depth < 12 do
+            if type(cur.IsShown) == "function" and cur:IsShown() ~= true then
+              return false
+            end
+            local parent = getWidgetParent(cur)
+            if not parent or parent == cur or parent == _G.UIParent then
+              break
+            end
+            cur = parent
+            depth = depth + 1
+          end
+          return widget ~= nil
+        end
+
+        local function fireButtonClick(btn)
+          if not btn then return end
+          if type(btn.__onClick) == "function" then
+            btn:__onClick("LeftButton")
+          elseif btn.__scripts and type(btn.__scripts["OnClick"]) == "function" then
+            btn.__scripts["OnClick"](btn, "LeftButton")
+          elseif type(btn.GetScript) == "function" and type(btn:GetScript("OnClick")) == "function" then
+            btn:GetScript("OnClick")(btn, "LeftButton")
+          end
+        end
 
         -- If live frames had not yet been instantiated before this suite, keep any newly created frames hidden in navSnap
         -- so real WoW never creates duplicate global frame names on repeated `/fh selftest` runs.
         local okNavTest, errNavTest = pcall(function()
+          -- 1) Schema v2 -> v3 idempotent migration & custom width [200, 440] checks
+          local mockSettings = ns.State.MigrateArrowSettings({ schemaVersion = 2, hudWidth = 340 })
+          assertTrue(mockSettings.schemaVersion == 3, "MigrateArrowSettings must upgrade schemaVersion to 3")
+          assertTrue(mockSettings.hudWidth == 240, "v2 default hudWidth 340 must migrate to 240")
+          -- Idempotency: user explicitly sets 340 on v3 -> must stay 340!
+          mockSettings.hudWidth = 340
+          mockSettings = ns.State.MigrateArrowSettings(mockSettings)
+          assertTrue(mockSettings.hudWidth == 340, "v3 custom hudWidth 340 must not be overwritten on repeat migration")
+          -- Clamp range [200, 440]
+          mockSettings.hudWidth = 150
+          mockSettings = ns.State.MigrateArrowSettings(mockSettings)
+          assertTrue(mockSettings.hudWidth == 200, "hudWidth below 200 must clamp to 200")
+          mockSettings.hudWidth = 520
+          mockSettings = ns.State.MigrateArrowSettings(mockSettings)
+          assertTrue(mockSettings.hudWidth == 440, "hudWidth above 440 must clamp to 440")
+
           -- Only instantiate test HUD/Arrow frames when no live HUD/Arrow existed prior to snapshot isolation,
           -- or in headless unit tests where live frames are pure Lua tables.
           local canInstantiateIsolatedFrames = (navSnap.frame == nil and navSnap.arrowFrame == nil)
@@ -4543,18 +4599,31 @@ function SelfTest.RunWorkspaceUISuite()
           arrowSettings.enabled = true
           arrowSettings.dockedInHud = true
           arrowSettings.hudHidden = false
-          arrowSettings.hudWidth = 340
+          arrowSettings.hudLocked = false
+          arrowSettings.hudWidth = 240
           arrowSettings.renderer = "foreverhub"
 
           prog.mode = "standalone"
+          prog.pausedHudRetained = false
           Nav.SetArrowTarget(
             "riverglades",
             { uiMapID = 2548, x01 = 0.6062, y01 = 0.8153, zoneName = "Riverglades" },
-            "Farholde Keep Flight Path",
-            "Farholde Keep Flight Path",
+            "Turn in We've Been Robbed! (Booty Bay)",
+            "We've Been Robbed!",
             15,
             "native_waypoint"
           )
+          Nav.SyncFromEvaluation({
+            counts = { completed = 1, total = 10, skipped = 0 },
+            nextAction = {
+              actionID = "test_turnin_robbed",
+              kind = "turnin",
+              title = "Turn in We've Been Robbed! (Booty Bay)",
+              questName = "We've Been Robbed!",
+              npcName = "Fleet Master Seahorn",
+              destination = { uiMapID = 2548, x01 = 0.6062, y01 = 0.8153, zoneName = "Riverglades" },
+            },
+          }, prog)
           Nav.RefreshArrowSettings()
 
           local snapDocked = Nav.GetLiveArrowSnapshot()
@@ -4564,9 +4633,179 @@ function SelfTest.RunWorkspaceUISuite()
           )
           if Nav.frame then
             local hudW = (type(Nav.frame.GetWidth) == "function" and Nav.frame:GetWidth()) or Nav.frame.__width
-            assertTrue(hudW == 340, "Default Tracker HUD width must be 340")
+            local hudH = (type(Nav.frame.GetHeight) == "function" and Nav.frame:GetHeight()) or Nav.frame.__height
+            assertTrue(hudW == 240, "Default Compact Tracker HUD width must be 240")
+            assertTrue(hudH == 48, "Default Compact Tracker HUD height must be 48 at 1.0 text scale")
 
-            -- Regression guard for v0.8.1/v0.8.2: tick the 20 Hz docked arrow lane OnUpdate callback & verify single-shot circuit breaker
+            -- Release Blocker #1: Parent-chain effective visibility of `moreBtn` (`...`) when `headerBar` is hidden
+            assertTrue(
+              Nav.frame.moreBtn ~= nil and getWidgetParent(Nav.frame.moreBtn) == Nav.frame,
+              "moreBtn (...) must be parented directly to ForeverHubRivergladesHUD, not headerBar"
+            )
+            assertTrue(
+              isEffectivelyVisible(Nav.frame.moreBtn),
+              "moreBtn (...) must remain effectively visible through its entire parent chain when headerBar is hidden"
+            )
+            assertTrue(
+              Nav.frame.dockedArrowLane
+                and Nav.frame.dockedArrowLane.distanceText
+                and (Nav.frame.dockedArrowLane.distanceText:GetText() or "") == "",
+              "Docked arrow lane distanceText must be empty so distance is never duplicated or truncated under the arrow"
+            )
+            assertTrue(
+              Nav.frame.stepText:GetText() == "We've Been Robbed!",
+              "Line 1 must show clean quest name only (Option A) without duplicated action prefix"
+            )
+
+            -- Transition 1: Active -> Paused -> Resumed -> Stopped (Release Blocker #2)
+            ns.Domain.RouteProgress.Pause(prog)
+            assertTrue(prog.mode == "paused" and prog.pausedHudRetained == true, "Pause must set pausedHudRetained = true")
+            Nav.SyncFromEvaluation({ counts = { completed = 1, total = 10, skipped = 0 } }, prog)
+            assertTrue(Nav.frame:IsShown() == true, "Paused session must remain visible in HUD so Resume is reachable")
+            assertTrue(Nav.frame.subText:GetText() == "Paused", "Paused HUD Line 2 must display 'Paused'")
+            ns.Domain.RouteProgress.Start(nil, prog)
+            assertTrue(prog.mode == "standalone" and prog.pausedHudRetained == false, "Resume must clear pausedHudRetained")
+            ns.Domain.RouteProgress.Stop(prog)
+            assertTrue(prog.mode == "paused" and prog.pausedHudRetained == false, "Stop must set pausedHudRetained = false")
+            Nav.SyncFromEvaluation({ counts = { completed = 1, total = 10, skipped = 0 } }, prog)
+            assertTrue(Nav.frame:IsShown() == false, "Stopped session must hide the HUD")
+
+            -- Restore active standalone session
+            ns.Domain.RouteProgress.Start(nil, prog)
+
+            -- Transition 2: Active -> Blocked (Quest Log Full & Unresolved History) -> Active
+            Nav.SyncFromEvaluation({
+              counts = { completed = 1, total = 10, skipped = 0 },
+              blockedNotice = {
+                state = "blocked_quest_log_full",
+                action = { title = "Accept Screecher Spirits", questName = "Screecher Spirits" },
+              },
+            }, prog)
+            assertTrue(Nav.frame:IsShown() == true, "Blocked quest log full state must show HUD")
+            assertTrue(Nav.frame.stepText:GetText() == "Screecher Spirits", "Blocked quest log full Line 1 must show pending quest")
+            assertTrue(Nav.frame.subText:GetText() == "Quest log full", "Blocked quest log full Line 2 must show 'Quest log full'")
+
+            Nav.SyncFromEvaluation({
+              counts = { completed = 1, total = 10, skipped = 0, blockedUnresolvedHistory = 2 },
+              blockedNotice = {
+                state = "blocked_unresolved_history",
+                action = { title = "Accept Ancientuck", questName = "Ancientuck" },
+              },
+            }, prog)
+            assertTrue(Nav.frame.subText:GetText() == "Review in Workspace", "Unresolved history Line 2 must show 'Review in Workspace'")
+
+            -- Transition 3: ForeverHub -> RXP -> ForeverHub (with disabled step actions in RXP mode)
+            local rxpBridge = ns.Bridges and ns.Bridges.RXPBridge
+            local savedIsRgSelected = rxpBridge and rxpBridge.IsRivergladesGuideSelected
+            if rxpBridge then
+              rxpBridge.IsRivergladesGuideSelected = function()
+                return true
+              end
+            end
+            prog.mode = "rxp"
+            Nav.SyncFromEvaluation({ counts = { completed = 1, total = 10, skipped = 0 } }, prog)
+            if rxpBridge then
+              rxpBridge.IsRivergladesGuideSelected = savedIsRgSelected
+            end
+            assertTrue(Nav.frame.subText:GetText() == "Controlled by RXP", "RXP mode Line 2 must show 'Controlled by RXP'")
+            assertTrue(Nav.frame.nextBtn and Nav.frame.nextBtn.__disabled == true, "Skip button must be disabled in RXP mode")
+            assertTrue(Nav.frame.prevBtn and Nav.frame.prevBtn.__disabled == true, "Prev button must be disabled in RXP mode")
+            assertTrue(Nav.frame.pauseToggleBtn and Nav.frame.pauseToggleBtn.__disabled == true, "Pause button must be disabled in RXP mode")
+            prog.mode = "standalone"
+
+            -- Transition 4: Riverglades -> Gold Farm context switch closes overflowMenu
+            if Nav.frame.overflowMenu and Nav.frame.overflowMenu.Show then
+              Nav.frame.overflowMenu:Show()
+            end
+            gfProg.mode = "standalone"
+            gfProg.selectedFarmID = "feralas_nagash"
+            Nav.SyncFromGoldFarmEvaluation({
+              farm = { farmID = "feralas_nagash", shortLabel = "Feralas", title = "Feralas Naga", zoneName = "Feralas" },
+              stepIndex = 1,
+              totalSteps = 3,
+              activeStep = {
+                stepID = "step_1",
+                kind = "grind_camp",
+                title = "Southern Isle Cave",
+                destination = { uiMapID = 1444, x01 = 0.28, y01 = 0.72, zoneName = "Feralas" },
+              },
+            }, gfProg)
+            assertTrue(
+              Nav.frame.overflowMenu == nil or Nav.frame.overflowMenu:IsShown() == false,
+              "Context switch from Riverglades to Gold Farm must close overflowMenu"
+            )
+            assertTrue(Nav.frame.stepText:GetText() == "Southern Isle Cave", "Gold Farm Line 1 must show step name")
+            gfProg.mode = "paused"
+            gfProg.pausedHudRetained = false
+
+            -- Transition 5: Target A -> Target B at identical distance invalidates composite Line 2 cache key
+            local savedCompute = ns.Compat.ComputeNavigationVector
+            ns.Compat.ComputeNavigationVector = function()
+              return { status = "ok", yards = 125, isCrossZone = false, rotationRadians = 0, absTurnRadians = 0 }
+            end
+            local okVecTests, errVecTests = pcall(function()
+              Nav.SyncFromEvaluation({
+                counts = { completed = 1, total = 10, skipped = 0 },
+                nextAction = {
+                  actionID = "target_a",
+                  kind = "accept",
+                  title = "Accept Target Alpha",
+                  questName = "Target Alpha",
+                  destination = { uiMapID = 2548, x01 = 0.20, y01 = 0.20, zoneName = "Riverglades" },
+                },
+              }, prog)
+              local keyA = Nav.frame.__lastLine2CompositeKey
+              assertTrue(Nav.frame.subText:GetText() == "125 yds", "Docked normal navigation Line 2 must show numeric distance")
+
+              Nav.SyncFromEvaluation({
+                counts = { completed = 1, total = 10, skipped = 0 },
+                nextAction = {
+                  actionID = "target_b",
+                  kind = "accept",
+                  title = "Accept Target Beta",
+                  questName = "Target Beta",
+                  destination = { uiMapID = 2548, x01 = 0.80, y01 = 0.80, zoneName = "Riverglades" },
+                },
+              }, prog)
+              local keyB = Nav.frame.__lastLine2CompositeKey
+              assertTrue(keyA ~= keyB, "Composite Line 2 cache key must change when switching from Target A to Target B at equal distance")
+
+              -- Transition 6: Docked -> Undocked -> HUD Hidden
+              arrowSettings.dockedInHud = false
+              Nav.RefreshArrowSettings()
+              local snapUndocked = Nav.GetLiveArrowSnapshot()
+              assertTrue(
+                snapUndocked.floatingVisible == true and snapUndocked.dockedVisible == false,
+                "Undocked mode must show floating arrow and hide docked arrow lane"
+              )
+              assertTrue(
+                Nav.frame.subText:GetText() ~= "125 yds",
+                "When undocked, floating arrow is the sole distance display; HUD Line 2 must not duplicate numeric distance"
+              )
+              arrowSettings.dockedInHud = true
+              Nav.RefreshArrowSettings()
+
+              -- Transition 7: Valid vector -> Unavailable -> Recovered
+              ns.Compat.ComputeNavigationVector = function()
+                return { status = "unavailable" }
+              end
+              Nav.RefreshCompactHUDFromVector(Nav.activeTarget, { status = "unavailable" }, false)
+              assertTrue(
+                Nav.frame.subText:GetText() == "Position unavailable" or Nav.frame.subText:GetText() == "No position",
+                "Unavailable vector must replace distance on Line 2 with Position unavailable / No position"
+              )
+              ns.Compat.ComputeNavigationVector = function()
+                return { status = "ok", yards = 88, isCrossZone = false, rotationRadians = 0, absTurnRadians = 0 }
+              end
+              Nav.RefreshCompactHUDFromVector(Nav.activeTarget, { status = "ok", yards = 88, isCrossZone = false }, false)
+              assertTrue(Nav.frame.subText:GetText() == "88 yds", "Recovered vector must restore numeric distance on Line 2")
+            end)
+            ns.Compat.ComputeNavigationVector = savedCompute
+            if not okVecTests then
+              error(errVecTests, 2)
+            end
+
+            -- Transition 8: Tick 20 Hz docked arrow lane OnUpdate callback & verify single-shot circuit breaker
             local dockedLane = Nav.frame.dockedArrowLane
             if dockedLane and dockedLane.arrowTex then
               local dockedUpdate = (dockedLane.__scripts and dockedLane.__scripts["OnUpdate"])
@@ -4576,7 +4815,6 @@ function SelfTest.RunWorkspaceUISuite()
               dockedUpdate(dockedLane, 0.10)
               assertTrue(Nav.activeTarget ~= nil and Nav.activeTarget.lastVecStatus ~= nil, "Docked arrow OnUpdate must evaluate vector cleanly")
 
-              -- Verify Astra P1 #4 circuit-breaker latch: injected error trips once, hides lane, and does NOT repeat on subsequent ticks
               local savedComputeVec = ns.Compat.ComputeNavigationVector
               local savedLastErr = Nav.lastUpdateError
               local faultCalls = 0
@@ -4606,15 +4844,17 @@ function SelfTest.RunWorkspaceUISuite()
               end
             end
 
+            -- Verify locked HUD preserves mouse/overflow click while Hide tracker keeps navigation running
+            arrowSettings.hudLocked = true
+            fireButtonClick(Nav.frame.moreBtn)
+            assertTrue(
+              Nav.frame.overflowMenu and Nav.frame.overflowMenu:IsShown() == true,
+              "Clicking moreBtn (...) while hudLocked = true must still open overflowMenu"
+            )
+
             local hideBtn = Nav.frame.hideTrackerBtn
             if hideBtn then
-              if type(hideBtn.__onClick) == "function" then
-                hideBtn:__onClick("LeftButton")
-              elseif hideBtn.__scripts and type(hideBtn.__scripts["OnClick"]) == "function" then
-                hideBtn.__scripts["OnClick"](hideBtn, "LeftButton")
-              elseif type(hideBtn.GetScript) == "function" and type(hideBtn:GetScript("OnClick")) == "function" then
-                hideBtn:GetScript("OnClick")(hideBtn, "LeftButton")
-              end
+              fireButtonClick(hideBtn)
               assertTrue(arrowSettings.hudHidden == true, "Hide tracker must mark hudHidden = true")
               assertTrue(prog.mode == "standalone" and Nav.activeTarget ~= nil, "Hide tracker MUST keep active navigation running")
               local snapHidden = Nav.GetLiveArrowSnapshot()
@@ -4626,6 +4866,9 @@ function SelfTest.RunWorkspaceUISuite()
           end
         end)
 
+        if Nav.TryReleaseOwnedResource then
+          pcall(Nav.TryReleaseOwnedResource)
+        end
         Nav.ClearArrowTarget()
         if Nav.frame and Nav.frame.Hide then
           Nav.frame:Hide()
@@ -4656,7 +4899,18 @@ function SelfTest.RunWorkspaceUISuite()
         for k, v in pairs(savedArrowSettings) do
           arrowSettings[k] = v
         end
-        prog.mode = savedProgMode
+        for k in pairs(prog) do
+          prog[k] = nil
+        end
+        for k, v in pairs(savedProg) do
+          prog[k] = v
+        end
+        for k in pairs(gfProg) do
+          gfProg[k] = nil
+        end
+        for k, v in pairs(savedGfProg) do
+          gfProg[k] = v
+        end
 
         if not okNavTest then
           error(errNavTest, 2)
