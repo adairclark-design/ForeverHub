@@ -9,56 +9,234 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: foreverhub-release-publication
+  cancel-in-progress: false
+
 jobs:
   verify-and-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - name: Checkout Release Tag (No Persisted Credentials)
+        timeout-minutes: 2
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
 
-      - name: Fetch Matching Source Tag & Verify Provenance + Release Bundle
+      - name: Validate Tag Syntax, Fetch Source Tag & Emit Verified Release Bundle
+        timeout-minutes: 3
         env:
           TAG_NAME: ${{ github.ref_name }}
           REPO_SLUG: ${{ github.repository }}
         run: |
           set -euo pipefail
-          case "${TAG_NAME}" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "ERROR: Invalid release tag syntax: ${TAG_NAME}" >&2; exit 1 ;;
-          esac
-          git fetch --no-tags "https://github.com/${REPO_SLUG}.git" "refs/tags/${TAG_NAME}-src:refs/tags/${TAG_NAME}-src"
+          echo "=== Runner & Tool Provenance ==="
+          uname -a
+          if [[ -r /etc/os-release ]]; then
+            head -n 6 /etc/os-release
+          fi
+          git --version
+          python3 --version
+          gh --version
+
+          if [[ ! "${TAG_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Invalid semantic-version release tag syntax: ${TAG_NAME}" >&2
+            exit 1
+          fi
+          if [[ ! "${REPO_SLUG}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Invalid repository slug: ${REPO_SLUG}" >&2
+            exit 1
+          fi
+
+          REMOTE_URL="https://github.com/${REPO_SLUG}.git"
+          SRC_REF="refs/tags/${TAG_NAME}-src"
+
+          # Fail immediately (without retry) if source tag is absent on remote; retry bounded transient network errors only
+          attempt=1
+          while true; do
+            set +e
+            git ls-remote --exit-code "${REMOTE_URL}" "${SRC_REF}" >/dev/null
+            ls_rc=$?
+            set -e
+            if [[ "${ls_rc}" -eq 0 ]]; then
+              break
+            elif [[ "${ls_rc}" -eq 2 ]]; then
+              echo "::error::Required source tag ${TAG_NAME}-src is missing on origin. Push ${TAG_NAME}-src before ${TAG_NAME}." >&2
+              exit 1
+            fi
+            if [[ "${attempt}" -ge 3 ]]; then
+              echo "::error::Transient network failure querying ${SRC_REF} after ${attempt} attempts (rc=${ls_rc})." >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+            attempt=$((attempt + 1))
+          done
+
+          attempt=1
+          until git fetch --no-tags "${REMOTE_URL}" "${SRC_REF}:${SRC_REF}"; do
+            if [[ "${attempt}" -ge 3 ]]; then
+              echo "::error::git fetch of ${SRC_REF} failed after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+            attempt=$((attempt + 1))
+          done
+
+          BUNDLE_DIR="$(mktemp -d "${RUNNER_TEMP}/fh-bundle.XXXXXX")"
+          echo "FH_BUNDLE_DIR=${BUNDLE_DIR}" >> "${GITHUB_ENV}"
+
           python3 scripts/verify_exported_release.py \
             --tag "${TAG_NAME}" \
             --require-source-tag \
-            --emit-release-bundle "${RUNNER_TEMP}/fh-release-bundle"
+            --emit-release-bundle "${BUNDLE_DIR}"
 
-      - name: Upload 3 Approved Forever Assets to Draft, Verify Round-Trip, Then Publish Immutable Release
+      - name: Enforce Monotonic SemVer Ordering, Reconcile Draft, Verify Round-Trip & Publish Immutable Release
+        timeout-minutes: 3
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
           REPO_SLUG: ${{ github.repository }}
         run: |
           set -euo pipefail
-          BUNDLE_DIR="${RUNNER_TEMP}/fh-release-bundle"
-          VERIFY_DIR="${RUNNER_TEMP}/fh-draft-verify"
-          # Upload ONLY ForeverHub-${{ github.ref_name }}-forever.zip, .sha256, and release.json (never unsuffixed .zip)
-          gh release create "${TAG_NAME}" \
-            --repo "${REPO_SLUG}" \
-            --draft \
-            --verify-tag \
-            --title "ForeverHub ${TAG_NAME}" \
-            --notes-file "${BUNDLE_DIR}/RELEASE_NOTES.md" \
-            "${BUNDLE_DIR}/ForeverHub-${TAG_NAME}-forever.zip" \
-            "${BUNDLE_DIR}/ForeverHub-${TAG_NAME}-forever.zip.sha256" \
-            "${BUNDLE_DIR}/release.json"
-          mkdir -p "${VERIFY_DIR}"
-          gh release download "${TAG_NAME}" --repo "${REPO_SLUG}" --dir "${VERIFY_DIR}"
+          WORK_META_DIR="$(mktemp -d "${RUNNER_TEMP}/fh-reconcile.XXXXXX")"
+          RELEASES_JSON="${WORK_META_DIR}/releases.json"
+          PLAN_JSON="${WORK_META_DIR}/plan.json"
+
+          attempt=1
+          until gh api --paginate --slurp "repos/${REPO_SLUG}/releases" > "${RELEASES_JSON}"; do
+            if [[ "${attempt}" -ge 3 ]]; then
+              echo "::error::Failed to query existing releases via GitHub API after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+            attempt=$((attempt + 1))
+          done
+
           python3 scripts/verify_exported_release.py \
             --tag "${TAG_NAME}" \
             --require-source-tag \
-            --verify-downloaded-dir "${VERIFY_DIR}"
-          gh release edit "${TAG_NAME}" --repo "${REPO_SLUG}" --draft=false --latest
+            --reconcile-releases-json "${RELEASES_JSON}" \
+            --reconcile-plan-out "${PLAN_JSON}"
+
+          PLAN_ACTION="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["action"])' "${PLAN_JSON}")"
+          if [[ "${PLAN_ACTION}" == "create_draft" ]]; then
+            # Attach strictly the 3 Forever-suffixed/metadata assets to Draft (never unsuffixed .zip)
+            gh release create "${TAG_NAME}" \
+              --repo "${REPO_SLUG}" \
+              --draft \
+              --verify-tag \
+              --title "ForeverHub ${TAG_NAME}" \
+              --notes-file "${FH_BUNDLE_DIR}/RELEASE_NOTES.md" \
+              "${FH_BUNDLE_DIR}/ForeverHub-${TAG_NAME}-forever.zip" \
+              "${FH_BUNDLE_DIR}/ForeverHub-${TAG_NAME}-forever.zip.sha256" \
+              "${FH_BUNDLE_DIR}/release.json"
+          elif [[ "${PLAN_ACTION}" == "resume_draft" ]]; then
+            echo "Resuming verified interrupted draft release for ${TAG_NAME}"
+            gh release edit "${TAG_NAME}" \
+              --repo "${REPO_SLUG}" \
+              --draft \
+              --verify-tag \
+              --title "ForeverHub ${TAG_NAME}" \
+              --notes-file "${FH_BUNDLE_DIR}/RELEASE_NOTES.md"
+            while IFS= read -r missing_asset; do
+              [[ -z "${missing_asset}" ]] && continue
+              gh release upload "${TAG_NAME}" \
+                --repo "${REPO_SLUG}" \
+                "${FH_BUNDLE_DIR}/${missing_asset}"
+            done < <(python3 -c 'import json, sys; [print(x) for x in json.load(open(sys.argv[1], encoding="utf-8"))["missingAssets"]]' "${PLAN_JSON}")
+          else
+            echo "::error::Unexpected release reconciliation action: ${PLAN_ACTION}" >&2
+            exit 1
+          fi
+
+          DRAFT_VERIFY_DIR=""
+          attempt=1
+          while true; do
+            DRAFT_VERIFY_DIR="$(mktemp -d "${RUNNER_TEMP}/fh-draft-verify.XXXXXX")"
+            if gh release download "${TAG_NAME}" --repo "${REPO_SLUG}" --dir "${DRAFT_VERIFY_DIR}"; then
+              break
+            fi
+            if [[ "${attempt}" -ge 3 ]]; then
+              echo "::error::Failed to download draft assets for ${TAG_NAME} after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+            attempt=$((attempt + 1))
+          done
+
+          python3 scripts/verify_exported_release.py \
+            --tag "${TAG_NAME}" \
+            --require-source-tag \
+            --verify-downloaded-dir "${DRAFT_VERIFY_DIR}" \
+            --compare-bundle-dir "${FH_BUNDLE_DIR}"
+
+          gh release edit "${TAG_NAME}" --repo "${REPO_SLUG}" --draft=false --verify-tag --latest
+
+      - name: Post-Publication Anonymous & Immutable Release Verification
+        timeout-minutes: 2
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          report_post_pub_incident() {
+            echo "::error title=POST-PUBLICATION INCIDENT::Release ${TAG_NAME} was published, but post-publication verification failed. Do NOT attempt asset replacement on an immutable release; inspect https://github.com/${REPO_SLUG}/releases/tag/${TAG_NAME} immediately." >&2
+          }
+          trap report_post_pub_incident ERR
+
+          POST_DIR="$(mktemp -d "${RUNNER_TEMP}/fh-post-pub.XXXXXX")"
+          TAG_JSON="${POST_DIR}/release_by_tag.json"
+          LATEST_JSON="${POST_DIR}/release_latest.json"
+
+          # Allow brief read-replica convergence for anonymous /releases/latest after draft->published flip
+          attempt=1
+          while true; do
+            if curl -fsSL --max-time 15 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/${REPO_SLUG}/releases/tags/${TAG_NAME}" -o "${TAG_JSON}" && \
+               curl -fsSL --max-time 15 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/${REPO_SLUG}/releases/latest" -o "${LATEST_JSON}" && \
+               python3 -c 'import json, sys; d = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if d.get("tag_name") == sys.argv[2] and d.get("draft") is False and d.get("immutable") is True else 1)' "${LATEST_JSON}" "${TAG_NAME}"; then
+              break
+            fi
+            if [[ "${attempt}" -ge 5 ]]; then
+              echo "Anonymous /releases/latest did not converge to immutable ${TAG_NAME} after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep 2
+            attempt=$((attempt + 1))
+          done
+
+          ANON_DL_DIR=""
+          attempt=1
+          while true; do
+            ANON_DL_DIR="$(mktemp -d "${RUNNER_TEMP}/fh-anon-assets.XXXXXX")"
+            if curl -fsSL --max-time 30 \
+                 "https://github.com/${REPO_SLUG}/releases/download/${TAG_NAME}/ForeverHub-${TAG_NAME}-forever.zip" \
+                 -o "${ANON_DL_DIR}/ForeverHub-${TAG_NAME}-forever.zip" && \
+               curl -fsSL --max-time 15 \
+                 "https://github.com/${REPO_SLUG}/releases/download/${TAG_NAME}/ForeverHub-${TAG_NAME}-forever.zip.sha256" \
+                 -o "${ANON_DL_DIR}/ForeverHub-${TAG_NAME}-forever.zip.sha256" && \
+               curl -fsSL --max-time 15 \
+                 "https://github.com/${REPO_SLUG}/releases/download/${TAG_NAME}/release.json" \
+                 -o "${ANON_DL_DIR}/release.json"; then
+              break
+            fi
+            if [[ "${attempt}" -ge 3 ]]; then
+              echo "Anonymous asset download failed after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+            attempt=$((attempt + 1))
+          done
+
+          python3 scripts/verify_exported_release.py \
+            --tag "${TAG_NAME}" \
+            --require-source-tag \
+            --repo-slug "${REPO_SLUG}" \
+            --verify-published-tag-json "${TAG_JSON}" \
+            --verify-published-json "${LATEST_JSON}" \
+            --verify-downloaded-dir "${ANON_DL_DIR}" \
+            --compare-bundle-dir "${FH_BUNDLE_DIR}"

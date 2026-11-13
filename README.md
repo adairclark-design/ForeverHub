@@ -17,10 +17,11 @@
 
 ## Installation & Updates
 
-### Option 1 — WowUp (`Install from URL` — Ongoing 1-Click Updates)
+### Option 1 — WowUp (`Install from URL` — Recommended for Ongoing Updates)
 Download WowUp from [wowup.io](https://wowup.io/). Either **WowUp with Wago** or **WowUp with CurseForge** supports this installation method; existing WowUp-CF users can keep it. Select **World of Warcraft: Forever** and verify its installation path. Close WoW, then choose **Get Addons → Install from URL** and paste `https://github.com/adairclark-design/ForeverHub`.
 
-- **Wrong-Client Warning (`Retail` vs `Forever`):** GitHub Releases publish only `ForeverHub-v0.8.7-forever.zip`, its `.sha256` file, and `release.json` to prevent silent `Retail` matching. Because WowUp's URL dialog shows a warning alert when no asset matches the selected client but leaves the fallback Install button active, **click Cancel if you see a missing-asset / compatibility warning**, switch the client dropdown to **World of Warcraft: Forever**, and import again.
+- **Updating:** Update through WowUp whenever a new ForeverHub version is released. *(Automatic updates are a separate optional setting in WowUp that you must enable if desired.)*
+- **Wrong-Client Warning (`Retail` vs `Forever`):** GitHub Releases publish only `ForeverHub-v0.8.7-forever.zip`, its `.sha256` file, and `release.json` to prevent silent `Retail` matching. Because WowUp's URL dialog shows a warning alert when no asset matches the selected client while leaving the underlying `Install` button active, **close the entire `Install from URL` dialog (`Cancel` / `×`) without clicking `Install`** if a missing-asset or compatibility warning appears — dismissing the warning alert alone does not cancel the pending import. Switch the client dropdown to **World of Warcraft: Forever**, then import again.
 - **Do not paste a raw `.zip` URL into WowUp:** Installing a direct `.zip` link in WowUp performs a one-time ignored install that will never receive updates. Always paste `https://github.com/adairclark-design/ForeverHub`.
 
 #### Migrating an Existing Manual Installation to WowUp
@@ -31,9 +32,9 @@ Do not rely on WowUp's *Re-scan Folders* to attach a manually installed folder t
 4. Confirm a single `AddOns/ForeverHub` folder, version `0.8.7`, and a persistent `GitHub` update source in WowUp.
 5. Before launching WoW, verify your `SavedVariables` files remain unchanged, then launch WoW: Forever and check your existing settings.
 
-### Option 2 — Manual `.zip` Install (Fallback)
+### Option 2 — Other Installation Methods (Manual `.zip` or Windows Installer)
 1. **Close World of Warcraft: Forever** completely.
-2. Download **`ForeverHub-v0.8.7-forever.zip`** from **Releases** under **Assets** (or `ForeverHub-v0.8.7.zip` from https://foreverhub.cc/addon). **Do not** download GitHub's automatic `Source code (zip)` / `Source code (tar.gz)` archives or click `Code → Download ZIP`.
+2. Download **`ForeverHub-v0.8.7-forever.zip`** from **Releases** under **Assets** (or use the Windows PowerShell installer / `ForeverHub-v0.8.7.zip` on https://foreverhub.cc/addon). **Do not** download GitHub's automatic `Source code (zip)` / `Source code (tar.gz)` archives or click `Code → Download ZIP`.
 3. Use Battle.net's **Options (⚙) → Show in Explorer / Reveal in Finder**, then open `_forever_/Interface/AddOns/` (create `Interface` and `AddOns` if missing; if Explorer already opened inside `_forever_`, do not create a nested `_forever_` folder).
 4. Extract the `.zip` to a temporary folder, copy the inner `ForeverHub` folder into `AddOns` (replacing any old `ForeverHub` folder while leaving `WTF/` untouched), and verify this exact path exists before launching WoW:
    ```text
@@ -44,5 +45,6 @@ Do not rely on WowUp's *Re-scan Folders* to attach a manually installed folder t
 See [`CHANGELOG.md`](CHANGELOG.md) for release notes across `v0.8.5` – `v0.8.7`.
 
 ## Maintainer Security & Release Controls
-- Default GitHub Actions permissions are restricted to `contents: read`; `contents: write` is granted solely to the tag-publishing job with `persist-credentials: false`.
-- Repository Rulesets protect `main` and `refs/tags/v*` against deletion and force-pushes, and **GitHub Immutable Releases** lock published release assets and tags after publication.
+- Default GitHub Actions permissions are restricted to `contents: read`; `contents: write` is granted solely to the serialized tag-publishing job with `persist-credentials: false` and 40-SHA-pinned actions.
+- Repository Rulesets protect `main` and `refs/tags/v*` against deletion and force-pushes, tag creation is restricted to the repository admin role, and **GitHub Immutable Releases** lock published release assets and tags after publication.
+- **Owner-Operated Branch Policy:** `main` currently permits direct owner commits while blocking history rewriting or deletion. Before adding any collaborators, pull requests, code review, and required workflow/verifier status checks must be enforced on `main`.
