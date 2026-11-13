@@ -79,11 +79,14 @@ function RouteProgress.Reconcile(route, progress, ctx, playerPos)
   local eval = RoutePlanner.EvaluateRoute(route, progress, ctx, pos)
 
   -- Clear user-pinned action once it completes or is no longer available
+  local pinCleared = false
   if progress.pinnedActionID then
     local pinEv = eval.byActionID and eval.byActionID[progress.pinnedActionID]
     if not pinEv or pinEv.state ~= "available" then
       progress.pinnedActionID = nil
       progress.pinnedSubLocationID = nil
+      pinCleared = true
+      progress.committedDecisionSig = nil
     elseif progress.pinnedSubLocationID and pinEv.action and type(pinEv.action.subLocations) == "table" then
       local activeSubs = RoutePlanner.ResolveActiveSubLocations(pinEv.action, ctx)
       local stillActive = false
@@ -95,10 +98,14 @@ function RouteProgress.Reconcile(route, progress, ctx, playerPos)
       end
       if not stillActive then
         progress.pinnedSubLocationID = nil
+        pinCleared = true
       end
     end
   else
     progress.pinnedSubLocationID = nil
+  end
+  if pinCleared then
+    eval = RoutePlanner.EvaluateRoute(route, progress, ctx, pos)
   end
 
   -- Record observed quest completion evidence on quests confirmed completed by API
@@ -157,15 +164,36 @@ function RouteProgress.Reconcile(route, progress, ctx, playerPos)
   end
 
   local nextSubID = nil
-  if eval.nextAction and type(eval.nextAction.subLocations) == "table" and #eval.nextAction.subLocations > 0 then
-    local _, _, activeSub = RoutePlanner.ResolveActiveActionTarget(eval.nextAction, progress, ctx, pos)
-    nextSubID = activeSub and activeSub.subID or nil
+  if eval.nextAction then
+    local _, _, activeSub = RoutePlanner.ResolveActiveActionTarget(eval.nextAction, progress, ctx, pos, route)
+    if type(eval.nextAction.subLocations) == "table" and #eval.nextAction.subLocations > 0 then
+      nextSubID = activeSub and activeSub.subID or nil
+    end
   end
+
+  local prevAnchor = progress.committedAnchorGroupID
+  local prevInsert = progress.insertedGroupID
+  if eval.plan then
+    progress.committedAnchorGroupID = eval.plan.anchorGroupID
+    progress.insertedGroupID = eval.plan.insertedGroupID
+    if eval.plan.deferDecisionCommit ~= true then
+      progress.committedDecisionSig = eval.plan.decisionSig
+    end
+    if prevAnchor ~= progress.committedAnchorGroupID or prevInsert ~= progress.insertedGroupID then
+      progress.routingEpoch = math.max(0, math.floor(tonumber(progress.routingEpoch) or 0)) + 1
+    end
+  else
+    progress.committedAnchorGroupID = nil
+    progress.insertedGroupID = nil
+    progress.committedDecisionSig = nil
+  end
+
   progress.currentActionID = eval.nextAction and eval.nextAction.actionID or nil
   progress.currentSubLocationID = nextSubID
   eval.mode = progress.mode
   eval.currentActionID = progress.currentActionID
   eval.currentSubLocationID = progress.currentSubLocationID
+  eval.routingEpoch = progress.routingEpoch
   return eval
 end
 
@@ -222,6 +250,9 @@ function RouteProgress.Stop(route, progress, ctx, resetSkips)
   progress.mode = "paused"
   progress.currentActionID = nil
   progress.currentSubLocationID = nil
+  progress.committedAnchorGroupID = nil
+  progress.insertedGroupID = nil
+  progress.committedDecisionSig = nil
   progress.pinnedActionID = nil
   progress.pinnedSubLocationID = nil
   if resetSkips == true then
@@ -253,6 +284,9 @@ function RouteProgress.SkipCurrentAction(route, progress, ctx)
   }
   progress.currentActionID = nil
   progress.currentSubLocationID = nil
+  progress.committedAnchorGroupID = nil
+  progress.insertedGroupID = nil
+  progress.committedDecisionSig = nil
   progress.pinnedActionID = nil
   progress.pinnedSubLocationID = nil
 
@@ -329,6 +363,7 @@ function RouteProgress.FocusActionFromMapPin(actionID, subLocationID, route, pro
   end
   progress.pinnedActionID = actionID
   progress.pinnedSubLocationID = (type(subLocationID) == "string" and subLocationID ~= "") and subLocationID or nil
+  progress.committedDecisionSig = nil
 
   local rxpSelected = ns.Bridges
     and ns.Bridges.RXPBridge
@@ -358,6 +393,7 @@ function RouteProgress.ClearPinnedFocus(route, progress, ctx, playerPos)
   end
   progress.pinnedActionID = nil
   progress.pinnedSubLocationID = nil
+  progress.committedDecisionSig = nil
   local eval = RouteProgress.Reconcile(route, progress, ctx, playerPos)
   return true, eval
 end

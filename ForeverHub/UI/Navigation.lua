@@ -2541,21 +2541,40 @@ local function updateHUDPresentation(eval, status)
     return
   end
 
-  f.stepText:SetText(tostring(act.title or act.actionID))
+  local plan = (eval and type(eval.plan) == "table") and eval.plan or nil
+  local isOffZone = (plan and plan.zoneStatus == "off_zone")
+  local isPosUnavail = (plan and plan.zoneStatus == "position_unavailable")
+
+  if isOffZone then
+    f.stepText:SetText("Travel to Riverglades to begin")
+  else
+    f.stepText:SetText(tostring(act.title or act.actionID))
+  end
+
   if act.destination then
     local prefix, suffix = formatRivergladesHudParts(act)
     local t = Navigation.activeTarget
-    if t and t.context == "riverglades" and t.anchor then
+    if isOffZone then
+      local entryText = "Entry: " .. tostring(act.title or act.actionID) .. " · " .. prefix .. suffix
+      if t and t.context == "riverglades" then
+        t.lastHudSubtext = entryText
+      end
+      f.subText:SetText(entryText)
+    elseif t and t.context == "riverglades" and t.anchor then
       t.hudCoordPrefix = prefix
       t.hudSuffix = suffix
       local vec = ns.Compat.ComputeNavigationVector(t.anchor, Navigation._scratchVec)
       updateTargetHysteresis(t, vec)
       local distPart = formatHudDistanceSegment(t, vec) or ""
+      if distPart == "" and isPosUnavail then
+        distPart = " • Position unavailable"
+      end
       local fullLine = prefix .. distPart .. suffix
       t.lastHudSubtext = fullLine
       f.subText:SetText(fullLine)
     else
-      f.subText:SetText(prefix .. suffix)
+      local posNote = isPosUnavail and " • Position unavailable" or ""
+      f.subText:SetText(prefix .. posNote .. suffix)
     end
   else
     f.subText:SetText(tostring(act.note or "Manual objective — see quest log / live Questie"))

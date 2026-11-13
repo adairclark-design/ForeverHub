@@ -1297,8 +1297,20 @@ function State.MigrateRouteProgress(rawProgress, compiledRoute)
     mode = "paused"
   end
 
+  local sameRevision = (tonumber(p.revision) == nil) or (tonumber(p.revision) == revision)
+  local committedAnchorGroupID = (sameRevision and type(p.committedAnchorGroupID) == "string" and p.committedAnchorGroupID ~= "")
+      and p.committedAnchorGroupID
+    or nil
+  local insertedGroupID = (sameRevision and type(p.insertedGroupID) == "string" and p.insertedGroupID ~= "")
+      and p.insertedGroupID
+    or nil
+  local committedDecisionSig = (sameRevision and type(p.committedDecisionSig) == "string" and p.committedDecisionSig ~= "")
+      and p.committedDecisionSig
+    or nil
+  local routingEpoch = math.max(0, math.floor(tonumber(p.routingEpoch) or 0))
+
   return {
-    routeStateVersion = 3,
+    routeStateVersion = 4,
     routeID = routeID,
     revision = revision,
     mode = mode,
@@ -1306,6 +1318,10 @@ function State.MigrateRouteProgress(rawProgress, compiledRoute)
     includeEliteBounties = (p.includeEliteBounties == true),
     currentActionID = curActionID,
     currentSubLocationID = currentSubLocationID,
+    committedAnchorGroupID = committedAnchorGroupID,
+    insertedGroupID = insertedGroupID,
+    committedDecisionSig = committedDecisionSig,
+    routingEpoch = routingEpoch,
     pinnedActionID = pinnedActionID,
     pinnedSubLocationID = pinnedSubLocationID,
     explicitlySkippedActions = skipped,
@@ -1337,7 +1353,7 @@ function State.GetRouteProgress()
   local expectedRev = tonumber(compiled and compiled.revision) or 1
   if
     type(charDB.routeProgress) ~= "table"
-    or charDB.routeProgress.routeStateVersion ~= 3
+    or charDB.routeProgress.routeStateVersion ~= 4
     or charDB.routeProgress.revision ~= expectedRev
   then
     charDB.routeProgress = State.MigrateRouteProgress(charDB.routeProgress, compiled)

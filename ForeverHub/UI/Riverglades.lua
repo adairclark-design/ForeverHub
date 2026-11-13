@@ -685,6 +685,9 @@ function RivergladesUI.RenderInHost(viewportWidth, viewportHeight, isCompact, sn
   -- (A) Current Action Card
   local cur = RivergladesUI.currentCard
   if cur then
+    if cur.heading then
+      cur.heading:SetText(vm.currentAction.headingText or "CURRENT ROUTE STEP")
+    end
     local rightActionsW = 124 + (vm.currentAction.hasAction and 98 or 0) + (vm.currentAction.isPinned and 82 or 0)
     local curTextW = math.max(180, detailContentW - 24 - rightActionsW)
     if cur.titleText then

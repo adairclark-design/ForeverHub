@@ -141,7 +141,7 @@ function RXPBridge.BuildRivergladesGuideText(route)
     local usable = RoutePlanner.IsUsableReviewStatus
       and RoutePlanner.IsUsableReviewStatus(act and act.reviewStatus)
       or (type(act) == "table" and act.reviewStatus == "verified")
-    if type(act) == "table" and usable then
+    if type(act) == "table" and usable and act.isAtlasSideQuest ~= true then
       local destOk = RoutePlanner.ValidateActionDestination(act, route)
       if destOk then
         local isOptional = (act.isGroupBranch == true) or (act.isEliteBounty == true)

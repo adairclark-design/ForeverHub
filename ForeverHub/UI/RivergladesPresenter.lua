@@ -307,7 +307,7 @@ function RivergladesPresenter.Build(snapshot, uiState)
           and ns.Domain.RoutePlanner
           and ns.Domain.RoutePlanner.ResolveActiveActionTarget
         then
-          local rd, rn = ns.Domain.RoutePlanner.ResolveActiveActionTarget(act, prog, nil, nil, route)
+          local rd, rn = ns.Domain.RoutePlanner.ResolveActiveActionTarget(act, prog, nil, nil, route, { recordDrift = false })
           if type(rd) == "table" then
             resolvedDest = rd
           end
@@ -462,14 +462,31 @@ function RivergladesPresenter.Build(snapshot, uiState)
   end
 
   local userConfirmedCount = #(snapshot.userDecisions or {})
+  local nextAct = eval.nextAction
+  local plan = type(eval.plan) == "table" and eval.plan or nil
+
+  local readySubText = "None ready yet"
+  if totalReady > 0 then
+    if nextAct and nextAct.kind == "turnin" then
+      readySubText = "Turn in now at hub"
+    elseif plan and plan.hubReturnPlanned == true then
+      readySubText = "Batched for hub return"
+    else
+      readySubText = "Ready turn-ins deferred while you finish nearby quests"
+    end
+  end
+
   local kpis = {
     {
       value = tostring(totalReady),
       label = "Ready turn-ins",
-      sub = totalReady > 0 and "Turn in now at hub" or "None ready yet",
+      sub = readySubText,
       token = totalReady > 0 and "status.ready" or "text.primary",
       tooltipTitle = "Ready Turn-Ins",
-      tooltipLines = { "Active Riverglades quests whose objectives are 100% complete in your Quest Log." },
+      tooltipLines = {
+        "Active Riverglades quests whose objectives are 100% complete in your Quest Log.",
+        "Travel-aware routing defers distant leaf returns to reduce backtracking; click any turn-in row to focus it immediately.",
+      },
     },
     {
       value = tostring(totalActiveObj),
@@ -505,12 +522,11 @@ function RivergladesPresenter.Build(snapshot, uiState)
     },
   }
 
-  local nextAct = eval.nextAction
   local currentActionVM
   if nextAct then
     local nextDest, nextNpcName = nextAct.destination, nextAct.npcName
     if ns.Domain and ns.Domain.RoutePlanner and ns.Domain.RoutePlanner.ResolveActiveActionTarget then
-      local rd, rn = ns.Domain.RoutePlanner.ResolveActiveActionTarget(nextAct, prog, nil, nil, route)
+      local rd, rn = ns.Domain.RoutePlanner.ResolveActiveActionTarget(nextAct, prog, nil, nil, route, { recordDrift = false })
       if type(rd) == "table" then
         nextDest = rd
       end
@@ -532,11 +548,38 @@ function RivergladesPresenter.Build(snapshot, uiState)
     elseif nextAct.note and nextAct.note ~= "" then
       table.insert(detailParts, nextAct.note)
     end
+
+    local reasonCode = plan and plan.selectionReason or nil
+    local reasonLabel = plan and plan.selectionReasonLabel or nil
+    local anchorLabel = plan and plan.anchorLabel or nil
+    if plan and plan.insertedGroupID and anchorLabel and anchorLabel ~= "" then
+      table.insert(detailParts, "Planned anchor: " .. tostring(anchorLabel))
+    elseif anchorLabel and anchorLabel ~= "" and anchorLabel ~= nextNpcName and plan and plan.zoneStatus == "in_zone" then
+      table.insert(detailParts, "Anchor: " .. tostring(anchorLabel))
+    end
+
+    local cardTitle = tostring(nextAct.title or nextAct.actionID)
+    local cardDetail = table.concat(detailParts, " · ")
+    if plan and plan.zoneStatus == "off_zone" then
+      cardTitle = "Travel to Riverglades to begin"
+      cardDetail = "Entry step: " .. tostring(nextAct.title or nextAct.actionID) .. (cardDetail ~= "" and (" · " .. cardDetail) or "")
+    end
+
+    local headingText = "CURRENT ROUTE STEP"
+    if type(reasonLabel) == "string" and reasonLabel ~= "" then
+      headingText = "CURRENT ROUTE STEP · " .. reasonLabel
+    end
+
     currentActionVM = {
       hasAction = true,
       actionID = nextAct.actionID,
-      title = tostring(nextAct.title or nextAct.actionID),
-      detail = table.concat(detailParts, " · "),
+      title = cardTitle,
+      detail = cardDetail,
+      headingText = headingText,
+      reasonCode = reasonCode,
+      reasonLabel = reasonLabel,
+      anchorLabel = anchorLabel,
+      zoneStatus = plan and plan.zoneStatus or "in_zone",
       providerText = navModeSub,
       isRunning = (prog.mode == "standalone"),
       isRxp = (snapshot.rxpSelected or prog.mode == "rxp"),
@@ -551,6 +594,11 @@ function RivergladesPresenter.Build(snapshot, uiState)
       hasAction = false,
       title = totalUnresolved > 0 and "Waiting on unresolved quest history" or "Riverglades route caught up",
       detail = emptyMsg,
+      headingText = "CURRENT ROUTE STEP",
+      reasonCode = "idle",
+      reasonLabel = "Route caught up",
+      anchorLabel = nil,
+      zoneStatus = "idle",
       providerText = navModeSub,
       isRunning = (prog.mode == "standalone"),
       isRxp = (snapshot.rxpSelected or prog.mode == "rxp"),

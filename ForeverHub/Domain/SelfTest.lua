@@ -1173,8 +1173,9 @@ function SelfTest.RunRivergladesSuite()
     assertTrue(string.find(text, "^#forever\n") ~= nil, "RXP export must begin with #forever header")
     assertTrue(string.find(text, "%.goto 2548,66%.72,81%.07", 1) ~= nil, "RXP export must emit numeric .goto 2548,66.72,81.07")
     assertTrue(string.find(text, "%.accept 94879", 1) ~= nil, "RXP export must emit verified .accept 94879")
-    assertTrue(string.find(text, "95562", 1, true) == nil, "Quarantined quest 95562 must NEVER appear in RXP export")
-    assertTrue(string.find(text, "%.accept 94980", 1) == nil, "Unverified 94980 must NEVER emit .accept/.turnin in RXP export")
+    assertTrue(string.find(text, "95562", 1, true) == nil, "Atlas side quest 95562 must NEVER appear in linear RXP export")
+    assertTrue(string.find(text, "95331", 1, true) == nil, "Placeholder quest 95331 must NEVER appear in RXP export")
+    assertTrue(string.find(text, "%.accept 94980", 1) == nil, "Item-started atlas quest 94980 must NEVER emit .accept in RXP export")
   end)
 
   -- Gate 5: pcall success with RegisterGuide logical failure (false / deferred nil) handled cleanly
@@ -2331,8 +2332,9 @@ function SelfTest.RunRivergladesSuite()
         byID[a.actionID] = a
         if a.destination then
           assertTrue(
-            a.destination.coordConfidence == "artifact_verified",
-            "Every active automated step in v0.8.4 must be artifact_verified: " .. tostring(a.actionID)
+            a.destination.coordConfidence == "artifact_verified"
+              or (a.destination.coordConfidence == "subzone_verified" and a.reviewStatus == "estimated"),
+            "Every active automated step in v0.8.7 must be artifact_verified or subzone_verified (estimated): " .. tostring(a.actionID)
           )
         end
       end
@@ -2681,8 +2683,31 @@ function SelfTest.RunRivergladesSuite()
       end
       assertTrue(sawSelected95267, "WorldMapPins must render objective pin for 95267 at (74.3, 72.4)")
 
-      -- 2b. Selecting quarantined 95123 (A Blast Ye Scurvy Dogs!) while WANTED: Trapclaw owns the arrow emits anti-misdirection warning!
+      -- 2b. Selecting promoted 95123 (A Blast Ye Scurvy Dogs!) now renders a subzone_verified pin with NO unverified warning,
+      -- while selecting quarantined placeholder 95331 (REUSE ME) emits the anti-misdirection warning banner!
       ns.State.overrideSelectedQuest = { questID = 95123, title = "A Blast Ye Scurvy Dogs!", level = 44 }
+      local entries95123, counts95123 = ns.UI.WorldMapPins.CollectPinEntries(
+        2548,
+        route,
+        pinProg,
+        { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
+        pinCtx,
+        { status = "ok", uiMapID = 2548, x01 = 0.8030, y01 = 0.5440 }
+      )
+      assertTrue(counts95123.selectedQuestNotice == nil, "Promoted quest 95123 must NOT emit an unverified warning banner")
+      local saw95123Pin = false
+      for _, e in ipairs(entries95123) do
+        if e.actionID == "rg_pf_obj_95123" then
+          assertTrue(
+            e.isSelectedQuest == true and e.coordConfidence == "subzone_verified",
+            "95123 map pin must carry coordConfidence='subzone_verified' and isSelectedQuest=true"
+          )
+          saw95123Pin = true
+        end
+      end
+      assertTrue(saw95123Pin, "WorldMapPins must render objective pin for 95123 at Windstead")
+
+      ns.State.overrideSelectedQuest = { questID = 95331, title = "REUSE ME", level = 45 }
       local _, countsQuar = ns.UI.WorldMapPins.CollectPinEntries(
         2548,
         route,
@@ -2694,7 +2719,7 @@ function SelfTest.RunRivergladesSuite()
       assertTrue(
         countsQuar.selectedQuestNotice ~= nil
           and countsQuar.selectedQuestNotice.status == "quarantined_objective"
-          and string.find(countsQuar.selectedQuestNotice.bannerText, "A Blast Ye Scurvy Dogs!", 1, true) ~= nil
+          and string.find(countsQuar.selectedQuestNotice.bannerText, "REUSE ME", 1, true) ~= nil
           and string.find(countsQuar.selectedQuestNotice.bannerText, "Location unverified", 1, true) ~= nil
           and string.find(countsQuar.selectedQuestNotice.bannerText, "Arrow: WANTED: Trapclaw", 1, true) ~= nil,
         "Selecting quarantined quest must warn player that it has no FH pin and explicitly name the quest owning the arrow"
@@ -2876,6 +2901,341 @@ function SelfTest.RunRivergladesSuite()
     if not okGate16 then
       error(errGate16, 2)
     end
+  end)
+
+  -- Gate 17: v0.8.7 Snargl's Snout (94679) & Accepted Elite Quest Map Visibility with Elites: OFF
+  check("RG-17. Accepted Elite Quests Always Show World Map Pins & Focus When Clicked (Snargl's Snout 94679)", function()
+    local savedSel17 = ns.State.overrideSelectedQuest
+    local ok17, err17 = pcall(function()
+      -- Default solo profile: includeEliteBounties == false (Elites: OFF)
+      local prog17 = ns.State.MigrateRouteProgress({
+        mode = "standalone",
+        includeEliteBounties = false,
+      }, route)
+      local ctx17 = makeMockCtx({
+        level = 40,
+        active = { [94679] = true, [94678] = true },
+        objectives = { [94679] = false, [94678] = false },
+      })
+      local pos17 = { status = "ok", uiMapID = 2548, x01 = 0.3940, y01 = 0.7460 }
+
+      -- 1. Unpinned solo HUD keeps [40+] Snargl's Snout ineligible so solo players aren't auto-sent into an elite camp
+      local posBristle17 = { status = "ok", uiMapID = 2548, x01 = 0.3038, y01 = 0.6334 }
+      local evalSolo = RouteProgress.Reconcile(route, prog17, ctx17, posBristle17)
+      assertTrue(
+        evalSolo.byActionID["rg_el_obj_94679"].state == "ineligible"
+          and evalSolo.byActionID["rg_el_obj_94679"].reason == "optional_elite_bounty_disabled",
+        "Unpinned Snargl's Snout objective must remain ineligible in default solo HUD auto-routing"
+      )
+      assertTrue(
+        evalSolo.nextAction ~= nil and evalSolo.nextAction.actionID == "rg_hb_obj_94678",
+        "Solo HUD at Bristle Hills must prefer solo Gnoll Infestation (94678) over unpinned elite Snargl's Snout"
+      )
+
+      -- 2. WorldMapPins MUST still render Snargl's Snout objective pins on map 2548 with Elites: OFF!
+      ns.State.overrideSelectedQuest = { questID = 94679, title = "Snargl's Snout", level = 40 }
+      local entries17, counts17 = ns.UI.WorldMapPins.CollectPinEntries(
+        2548,
+        route,
+        prog17,
+        { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
+        ctx17,
+        pos17
+      )
+      assertTrue(counts17.selectedQuestNotice == nil, "Accepted Snargl's Snout must NEVER show an unverified/missing pin warning")
+      local snarglPinCount = 0
+      for _, e in ipairs(entries17) do
+        if e.actionID == "rg_el_obj_94679" then
+          snarglPinCount = snarglPinCount + 1
+          assertTrue(
+            e.coordConfidence == "subzone_verified" and e.isSelectedQuest == true,
+            "Snargl's Snout map pin must be subzone_verified and selected"
+          )
+        end
+      end
+      assertTrue(snarglPinCount == 2, "Snargl's Snout must render both West & East Bristle Hills camp pins, got: " .. tostring(snarglPinCount))
+
+      -- 3. Clicking Snargl's Snout on the map (pinnedActionID) immediately focuses it in HUD & Arrow even with Elites: OFF!
+      prog17.pinnedActionID = "rg_el_obj_94679"
+      local evalPinned = RouteProgress.Reconcile(route, prog17, ctx17, pos17)
+      assertTrue(
+        evalPinned.byActionID["rg_el_obj_94679"].state == "available"
+          and evalPinned.nextAction ~= nil
+          and evalPinned.nextAction.actionID == "rg_el_obj_94679",
+        "Manually pinning Snargl's Snout on the World Map must focus rg_el_obj_94679 even when Elites: OFF"
+      )
+
+      -- 4. Looting Snargl's Snout (1/1) auto-retires the pin and surfaces Cedric Dalton turn-in (39.4, 74.6)!
+      local ctx17Done = makeMockCtx({
+        level = 40,
+        active = { [94679] = true, [94678] = true },
+        objectives = { [94679] = true, [94678] = false },
+      })
+      local evalTurnIn = RouteProgress.Reconcile(route, prog17, ctx17Done, pos17)
+      assertTrue(
+        evalTurnIn.byActionID["rg_el_turnin_94679"].state == "available"
+          and evalTurnIn.nextAction ~= nil
+          and evalTurnIn.nextAction.actionID == "rg_el_turnin_94679",
+        "Completed Snargl's Snout must immediately guide turn-in to Cedric Dalton at Southern Watch"
+      )
+    end)
+    ns.State.overrideSelectedQuest = savedSel17
+    if not ok17 then
+      error(err17, 2)
+    end
+  end)
+
+  -- Gate 18: v0.8.7 Full Riverglades Atlas Side-Quest Coverage & Tier Isolation
+  check("RG-18. Full Riverglades Atlas Side-Quests Render Map Pins Without Hijacking Core Solo Route", function()
+    local prog18 = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
+    -- Standing right beside Farmer Elbrim (52.7, 43.8) while holding a core Sunnyglade quest (94879)
+    local ctx18 = makeMockCtx({
+      level = 40,
+      active = { [94879] = true },
+      completed = { [94885] = true },
+      objectives = { [94879] = false },
+    })
+    local pos18 = { status = "ok", uiMapID = 2548, x01 = 0.5270, y01 = 0.4380 }
+
+    -- 1. Unaccepted isAtlasSideQuest accept (94829 What We Lost at 52.7, 43.8, 0 yd away!) stays in optional pool and NEVER hijacks core solo routing!
+    local evalUnaccepted = RouteProgress.Reconcile(route, prog18, ctx18, pos18)
+    assertTrue(
+      evalUnaccepted.byActionID["rg_atlas_accept_94829"].state == "available",
+      "What We Lost (94829) accept must be available on World Map"
+    )
+    assertTrue(
+      evalUnaccepted.nextAction ~= nil
+        and evalUnaccepted.nextAction.actionID ~= "rg_atlas_accept_94829"
+        and evalUnaccepted.nextAction.isAtlasSideQuest ~= true,
+      "Unaccepted atlas side quest at 0 yd must NOT hijack core solo routing, got: " .. tostring(evalUnaccepted.nextAction and evalUnaccepted.nextAction.actionID)
+    )
+    -- And when standing near Sunnyglade (45.2, 52.2), active 94879 objective is chosen directly over unaccepted atlas side quests
+    local evalSunnyglade18 = RouteProgress.Reconcile(
+      route,
+      ns.State.MigrateRouteProgress({ mode = "standalone" }, route),
+      ctx18,
+      { status = "ok", uiMapID = 2548, x01 = 0.4520, y01 = 0.5220 }
+    )
+    assertTrue(
+      evalSunnyglade18.nextAction ~= nil and evalSunnyglade18.nextAction.actionID == "rg_a_06_obj_sunnyglade_94879",
+      "Core Sunnyglade objective must be chosen near Sunnyglade, got: " .. tostring(evalSunnyglade18.nextAction and evalSunnyglade18.nextAction.actionID)
+    )
+
+    -- 2. WorldMapPins renders [!] Available pins for atlas side quests on Riverglades (2548) AND external maps (e.g. Dalaran 1416 for 96771)
+    local entriesRG = ns.UI.WorldMapPins.CollectPinEntries(
+      2548,
+      route,
+      prog18,
+      { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
+      ctx18,
+      pos18
+    )
+    local sawElbrimAccept = false
+    for _, e in ipairs(entriesRG) do
+      if e.actionID == "rg_atlas_accept_94829" then
+        sawElbrimAccept = true
+      end
+    end
+    assertTrue(sawElbrimAccept, "WorldMapPins(2548) must render [!] Accept What We Lost at Farmer Elbrim")
+
+    prog18.includeGroupBranches = true
+    local entriesDalaran = ns.UI.WorldMapPins.CollectPinEntries(
+      1416,
+      route,
+      prog18,
+      { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
+      ctx18,
+      pos18
+    )
+    local saw96771 = false
+    for _, e in ipairs(entriesDalaran) do
+      if e.actionID == "rg_kd_accept_96771" then
+        saw96771 = true
+      end
+    end
+    assertTrue(saw96771, "WorldMapPins(1416) must render [!] Accept Vengeance of the Highborne in Dalaran")
+
+    -- 3. Once the player accepts an atlas side quest in Riverglades (e.g. 94829 What We Lost), local proximity guides its objective!
+    local ctxAccepted = makeMockCtx({
+      level = 40,
+      active = { [94829] = true },
+      objectives = { [94829] = false },
+    })
+    local evalAccepted = RouteProgress.Reconcile(route, prog18, ctxAccepted, pos18)
+    assertTrue(
+      evalAccepted.nextAction ~= nil and evalAccepted.nextAction.actionID == "rg_atlas_obj_94829",
+      "Accepted atlas side quest on same map must guide player to its objective (52.2, 50.7)"
+    )
+
+    -- 4. Zero playable quests are quarantined: ONLY developer placeholder 95331 (REUSE ME) remains in quarantinedActions
+    assertTrue(
+      type(route.quarantinedActions) == "table"
+        and #route.quarantinedActions == 1
+        and route.quarantinedActions[1].questID == 95331,
+      "Only unobtainable developer placeholder 95331 (REUSE ME) may remain in quarantinedActions"
+    )
+  end)
+
+  -- Gate 19: v0.8.7 Travel-Aware Routing, Counterfactual Batching, En-Route Insertion & Zero-Mutation Reads
+  check("RG-19. Travel-Aware Service-Group Planner, Counterfactual AND-Gates & Commitment Stability", function()
+    local synthRoute = {
+      routeID = "rg_selftest_v087_travel_aware",
+      revision = 1,
+      primaryUiMapID = 2548,
+      areaIdToUiMapId = { [16591] = 2548, [357] = 1444 },
+      questsByID = {
+        [1001] = { questID = 1001, title = "Far Leaf Turnin" },
+        [1002] = { questID = 1002, title = "Nearby Camp Kill" },
+        [1003] = { questID = 1003, title = "Nearby Hub Pickup" },
+        [2001] = { questID = 2001, title = "Joint Gate A" },
+        [2002] = { questID = 2002, title = "Joint Gate B" },
+        [2003] = { questID = 2003, title = "Unlocked Camp Quest" },
+      },
+      questSuccessors = {
+        [2001] = { 2003 },
+        [2002] = { 2003 },
+      },
+      actions = {
+        {
+          actionID = "st_turnin_1001",
+          kind = "turnin",
+          questID = 1001,
+          title = "Turn in Far Leaf",
+          npcID = 9001,
+          npcName = "Far Captain",
+          reviewStatus = "verified",
+          requires = { op = "quest_objectives_complete", questID = 1001 },
+          eligibility = { faction = "Alliance" },
+          completionPredicate = { type = "quest_completed", questID = 1001 },
+          destination = { coordinateSpace = "uiMap01", coordConfidence = "artifact_verified", uiMapID = 2548, areaID = 16591, x01 = 0.5500, y01 = 0.2000 },
+        },
+        {
+          actionID = "st_obj_1002",
+          kind = "objective",
+          questID = 1002,
+          title = "Clear Nearby Camp",
+          reviewStatus = "verified",
+          requires = { op = "quest_active", questID = 1002 },
+          eligibility = { faction = "Alliance" },
+          completionPredicate = { type = "quest_objectives_complete_or_turned_in", questID = 1002 },
+          destination = { coordinateSpace = "uiMap01", coordConfidence = "artifact_verified", uiMapID = 2548, areaID = 16591, x01 = 0.1583, y01 = 0.2000 },
+        },
+        {
+          actionID = "st_accept_1003",
+          kind = "accept",
+          questID = 1003,
+          title = "Accept Nearby Pickup",
+          npcID = 9003,
+          npcName = "Scout",
+          reviewStatus = "verified",
+          requires = { op = "true" },
+          eligibility = { faction = "Alliance" },
+          completionPredicate = { type = "quest_active_or_completed", questID = 1003 },
+          destination = { coordinateSpace = "uiMap01", coordConfidence = "artifact_verified", uiMapID = 2548, areaID = 16591, x01 = 0.1583, y01 = 0.2000 },
+        },
+        {
+          actionID = "st_obj_1003",
+          kind = "objective",
+          questID = 1003,
+          title = "Scout Objective",
+          reviewStatus = "verified",
+          requires = { op = "quest_active", questID = 1003 },
+          eligibility = { faction = "Alliance" },
+          completionPredicate = { type = "quest_objectives_complete_or_turned_in", questID = 1003 },
+          destination = { coordinateSpace = "uiMap01", coordConfidence = "artifact_verified", uiMapID = 2548, areaID = 16591, x01 = 0.1700, y01 = 0.2100 },
+        },
+      },
+    }
+
+    -- 1. 210 yd objective beats 1,500 yd leaf turn-in
+    local progA = ns.State.MigrateRouteProgress({ mode = "standalone" }, synthRoute)
+    local ctxA = makeMockCtx({
+      level = 40,
+      active = { [1001] = true, [1002] = true },
+      completed = { [1003] = true },
+      objectives = { [1001] = true, [1002] = false },
+    })
+    local posStart = { status = "ok", uiMapID = 2548, x01 = 0.1000, y01 = 0.2000 }
+    local evalA = RouteProgress.Reconcile(synthRoute, progA, ctxA, posStart)
+    assertTrue(
+      evalA.nextAction ~= nil and evalA.nextAction.actionID == "st_obj_1002",
+      "210 yd objective must beat 1,620 yd leaf turn-in, got: " .. tostring(evalA.nextAction and evalA.nextAction.actionID)
+    )
+    assertTrue(
+      evalA.plan ~= nil and evalA.plan.hubReturnPlanned == false and evalA.plan.deferredReadyCount == 1,
+      "Deferred ready leaf turn-in must set hubReturnPlanned=false and deferredReadyCount=1"
+    )
+
+    -- 2. Continuity check at 219 / 220 / 221 yards (zero priority cliff)
+    local ctxLeafOnly = makeMockCtx({
+      level = 40,
+      active = { [1001] = true },
+      completed = { [1002] = true, [1003] = true },
+      objectives = { [1001] = true },
+    })
+    local function leafScoreAtYards(yd)
+      local x = 0.5500 - (yd / 3600.0)
+      local ev = RoutePlanner.EvaluateRoute(
+        synthRoute,
+        ns.State.MigrateRouteProgress({ mode = "standalone" }, synthRoute),
+        ctxLeafOnly,
+        { status = "ok", uiMapID = 2548, x01 = x, y01 = 0.2000 }
+      )
+      local sb = ev.plan.groupScores["sg_npc_9001"]
+      return sb and sb.score or 0
+    end
+    local s219, s220, s221 = leafScoreAtYards(219.0), leafScoreAtYards(220.0), leafScoreAtYards(221.0)
+    assertTrue(
+      math.abs(s220 - s219) < 4.0 and math.abs(s221 - s220) < 4.0,
+      string.format("Continuous score must have zero cliff across 219/220/221 yd (got %.2f / %.2f / %.2f)", s219, s220, s221)
+    )
+
+    -- 3. Joint AND-gate + camp-overlap counterfactual batch valuation on real Riverglades route (94879 + 94881 -> 94907 near active 94889)
+    local ctxSingle94879 = makeMockCtx({
+      level = 40,
+      active = { [94879] = true, [94881] = true, [94889] = true },
+      objectives = { [94879] = true, [94881] = false, [94889] = false },
+    })
+    local ctxJointNoWestCamp = makeMockCtx({
+      level = 40,
+      active = { [94879] = true, [94881] = true },
+      objectives = { [94879] = true, [94881] = true },
+    })
+    local ctxJointWithWestCamp = makeMockCtx({
+      level = 40,
+      active = { [94879] = true, [94881] = true, [94889] = true },
+      objectives = { [94879] = true, [94881] = true, [94889] = false },
+    })
+    local posSunny = { status = "ok", uiMapID = 2548, x01 = 0.4800, y01 = 0.5400 }
+    local evSingle = RoutePlanner.EvaluateRoute(route, ns.State.MigrateRouteProgress({ mode = "standalone" }, route), ctxSingle94879, posSunny)
+    local evNoWest = RoutePlanner.EvaluateRoute(route, ns.State.MigrateRouteProgress({ mode = "standalone" }, route), ctxJointNoWestCamp, posSunny)
+    local evJoint = RoutePlanner.EvaluateRoute(route, ns.State.MigrateRouteProgress({ mode = "standalone" }, route), ctxJointWithWestCamp, posSunny)
+    local sbSingle = evSingle.plan.groupScores["sg_farholde_citadel"]
+    local sbNoWest = evNoWest.plan.groupScores["sg_farholde_citadel"]
+    local sbJoint = evJoint.plan.groupScores["sg_farholde_citadel"]
+    assertTrue(
+      sbSingle ~= nil and sbSingle.unlockBenefit == 0,
+      "Completing 94879 alone must NOT falsely credit AND-gated 94907"
+    )
+    assertTrue(
+      sbNoWest ~= nil and sbNoWest.unlockBenefit == 0,
+      "Unlocking 94907 without an active Western Conduit camp quest must not claim double-clear credit across the zone"
+    )
+    assertTrue(
+      sbJoint ~= nil and sbJoint.unlockBenefit > 150,
+      "Joint completion of 94879 + 94881 while holding Western Conduit quest 94889 must award double-clear avoidance credit"
+    )
+
+    -- 4. Pure read-only Evaluate / Presenter snapshot never mutates progress or drift table
+    local progPure = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
+    RouteProgress.Reconcile(route, progPure, ctxJointWithWestCamp, posSunny)
+    local savedEpoch = progPure.routingEpoch
+    local savedSig = progPure.committedDecisionSig
+    RouteProgress.Evaluate(route, progPure, ctxJointWithWestCamp, { status = "ok", uiMapID = 2548, x01 = 0.6100, y01 = 0.7900 })
+    assertTrue(
+      progPure.routingEpoch == savedEpoch and progPure.committedDecisionSig == savedSig,
+      "RouteProgress.Evaluate must remain 100% pure and never mutate progress commitment state"
+    )
   end)
 
   ns.State.overridePlayerPosition = savedGlobalPlayerPos

@@ -123,7 +123,8 @@ local function createDiagnosticsDrawer(parent)
   if not drawer then
     return nil
   end
-  Widgets.SafeSetSize(drawer, 430, 236)
+  local UPDATE_PORTAL_URL = "https://foreverhub.cc/addon"
+  Widgets.SafeSetSize(drawer, 456, 336)
   Widgets.SafeSetPoint(drawer, "TOPRIGHT", parent, "TOPRIGHT", -16, -46)
   if type(drawer.SetFrameLevel) == "function" and type(parent.GetFrameLevel) == "function" then
     pcall(drawer.SetFrameLevel, drawer, (parent:GetFrameLevel() or 10) + 30)
@@ -136,7 +137,7 @@ local function createDiagnosticsDrawer(parent)
   if hdr then
     Widgets.SafeSetPoint(hdr, "TOPLEFT", drawer, "TOPLEFT", 14, -12)
     if type(hdr.SetText) == "function" then
-      hdr:SetText("About & Diagnostics")
+      hdr:SetText("About, Changelog & Updates")
     end
   end
 
@@ -157,7 +158,45 @@ local function createDiagnosticsDrawer(parent)
   end
   drawer.body = body
 
-  local doctorBtn = Widgets.CreateSecondaryButton(drawer, 128, "Print Doctor", 26)
+  local urlLabel = Widgets.SafeCreateFontString(drawer, "dense", "accent.gold")
+  if urlLabel then
+    Widgets.SafeSetPoint(urlLabel, "BOTTOMLEFT", drawer, "BOTTOMLEFT", 14, 74)
+    if type(urlLabel.SetText) == "function" then
+      urlLabel:SetText("Check website for updates (offline addon — copy URL):")
+    end
+  end
+  drawer.urlLabel = urlLabel
+
+  local okBox, urlBox = pcall(_G.CreateFrame, "EditBox", nil, drawer)
+  if okBox and urlBox then
+    Widgets.SafeSetSize(urlBox, 428, 24)
+    Widgets.SafeSetPoint(urlBox, "BOTTOMLEFT", drawer, "BOTTOMLEFT", 14, 46)
+    Widgets.ApplySurface(urlBox, "surface.inset", "border.subtle", 1.0)
+    if type(urlBox.SetAutoFocus) == "function" then pcall(urlBox.SetAutoFocus, urlBox, false) end
+    if _G.GameFontHighlightSmall and type(urlBox.SetFontObject) == "function" then
+      pcall(urlBox.SetFontObject, urlBox, _G.GameFontHighlightSmall)
+    end
+    if type(urlBox.SetTextInsets) == "function" then pcall(urlBox.SetTextInsets, urlBox, 8, 8, 2, 2) end
+    if type(urlBox.SetText) == "function" then pcall(urlBox.SetText, urlBox, UPDATE_PORTAL_URL) end
+    if type(urlBox.SetScript) == "function" then
+      urlBox:SetScript("OnEscapePressed", function(eb)
+        if type(eb.ClearFocus) == "function" then pcall(eb.ClearFocus, eb) end
+      end)
+      urlBox:SetScript("OnEditFocusGained", function(eb)
+        if type(eb.SetText) == "function" then pcall(eb.SetText, eb, UPDATE_PORTAL_URL) end
+        if type(eb.HighlightText) == "function" then pcall(eb.HighlightText, eb) end
+      end)
+      urlBox:SetScript("OnTextChanged", function(eb, userInput)
+        if userInput and type(eb.SetText) == "function" then
+          pcall(eb.SetText, eb, UPDATE_PORTAL_URL)
+          if type(eb.HighlightText) == "function" then pcall(eb.HighlightText, eb) end
+        end
+      end)
+    end
+    drawer.updateUrlBox = urlBox
+  end
+
+  local doctorBtn = Widgets.CreateSecondaryButton(drawer, 108, "Print Doctor", 26)
   if doctorBtn then
     Widgets.SafeSetPoint(doctorBtn, "BOTTOMLEFT", drawer, "BOTTOMLEFT", 14, 12)
     doctorBtn:SetOnClick(function()
@@ -167,14 +206,36 @@ local function createDiagnosticsDrawer(parent)
     end)
   end
 
-  local selfTestBtn = Widgets.CreateGhostButton(drawer, 132, "Run Self-Tests", 26)
+  local selfTestBtn = Widgets.CreateGhostButton(drawer, 118, "Run Self-Tests", 26)
   if selfTestBtn then
-    Widgets.SafeSetPoint(selfTestBtn, "LEFT", doctorBtn, "RIGHT", 8, 0)
+    Widgets.SafeSetPoint(selfTestBtn, "LEFT", doctorBtn, "RIGHT", 6, 0)
     selfTestBtn:SetOnClick(function()
       if ns.Events and ns.Events.RunSelfTestCommand then
         ns.Events.RunSelfTestCommand()
       end
     end)
+  end
+
+  local updateCheckBtn = Widgets.CreateSecondaryButton(drawer, 190, "Check website for updates", 26)
+  if updateCheckBtn then
+    Widgets.SafeSetPoint(updateCheckBtn, "LEFT", selfTestBtn, "RIGHT", 6, 0)
+    updateCheckBtn:SetOnClick(function()
+      if drawer.updateUrlBox then
+        if type(drawer.updateUrlBox.SetText) == "function" then
+          pcall(drawer.updateUrlBox.SetText, drawer.updateUrlBox, UPDATE_PORTAL_URL)
+        end
+        if type(drawer.updateUrlBox.SetFocus) == "function" then
+          pcall(drawer.updateUrlBox.SetFocus, drawer.updateUrlBox)
+        end
+        if type(drawer.updateUrlBox.HighlightText) == "function" then
+          pcall(drawer.updateUrlBox.HighlightText, drawer.updateUrlBox)
+        end
+      end
+      if ns.Compat and type(ns.Compat.Print) == "function" then
+        ns.Compat.Print(string.format("Installed: v%s — Check website for updates: %s", tostring(ns.version or "0.8.7"), UPDATE_PORTAL_URL))
+      end
+    end)
+    drawer.updateCheckBtn = updateCheckBtn
   end
 
   function drawer:RefreshDiagnostics()
@@ -184,7 +245,7 @@ local function createDiagnosticsDrawer(parent)
     Theme.ApplyFont(self.body, "dense", "text.secondary")
     local meta = (ns.Data and ns.Data.meta) or {}
     local rgMeta = (ns.RivergladesData and ns.RivergladesData.meta) or {}
-    local buildVer, buildNum, _, tocNum = "1.16.x", "65465", "", "16001"
+    local buildVer, buildNum, _, tocNum = "1.60.1", "70862", "", "16001"
     if type(_G.GetBuildInfo) == "function" then
       local v, b, _, t = _G.GetBuildInfo()
       buildVer = tostring(v or buildVer)
@@ -193,14 +254,21 @@ local function createDiagnosticsDrawer(parent)
     end
     local hasAuc = (ns.Providers and ns.Providers.Auctionator and ns.Providers.Auctionator.IsAvailable and ns.Providers.Auctionator.IsAvailable()) or false
     local invName = (ns.Providers and ns.Providers.Syndicator and ns.Providers.Syndicator.GetActiveBackendName and ns.Providers.Syndicator.GetActiveBackendName()) or "None"
+    local curVer = tostring(ns.version or "0.8.7")
     local lines = {
-      string.format("ForeverHub v%s  ·  Client %s (Build %s, TOC %s)", tostring(ns.version or "0.8.0"), buildVer, buildNum, tocNum),
-      string.format("Crates Corpus: %s (%s)", tostring(meta.corpusRevisionID or "unknown"), string.sub(tostring(meta.compiledContentSha256 or "unknown"), 1, 12)),
-      string.format("Riverglades Rev %s (%s)", tostring(rgMeta.datasetRevision or "?"), string.sub(tostring(rgMeta.compiledContentSha256 or "unknown"), 1, 12)),
+      string.format("Installed: v%s  ·  Client %s (Build %s, TOC %s)", curVer, buildVer, buildNum, tocNum),
+      string.format("Crates: %s (%s) · Riverglades Rev %s (%s)", tostring(meta.corpusRevisionID or "unknown"), string.sub(tostring(meta.compiledContentSha256 or "unknown"), 1, 8), tostring(rgMeta.datasetRevision or "?"), string.sub(tostring(rgMeta.compiledContentSha256 or "unknown"), 1, 8)),
       string.format("Providers: Auctionator=%s · AccountInv=%s", hasAuc and "OK" or "Missing", tostring(invName)),
-      "Note: Filling a crate yields a Sealed Crate for Merchant's Favor (0 rep; Shipping Label = 2,000 rep).",
+      "",
+      string.format("Changelog (v%s):", curVer),
+      "• Mapped all 124 playable Riverglades & Krol'dok quests (330 steps)",
+      "• Fixed Snargl's Snout & accepted Elite quest pins on World Map",
+      "• Added Search Area badges + live auto-snap for unpinned spawns",
     }
     self.body:SetText(table.concat(lines, "\n"))
+    if self.updateUrlBox and type(self.updateUrlBox.SetText) == "function" then
+      pcall(self.updateUrlBox.SetText, self.updateUrlBox, UPDATE_PORTAL_URL)
+    end
   end
 
   Widgets.SafeShow(drawer, false)
@@ -323,7 +391,7 @@ function Workspace.EnsureCreated()
   if subtitleText then
     Widgets.SafeSetPoint(subtitleText, "LEFT", titleText or titleBar or f, "RIGHT", 10, -1)
     if type(subtitleText.SetText) == "function" then
-      subtitleText:SetText("Planning & Route Workspace")
+      subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.7")))
     end
   end
   f.subtitleText = subtitleText
@@ -332,6 +400,8 @@ function Workspace.EnsureCreated()
   local closeBtn = Widgets.CreateIconButton(titleBar or f, "close", "Close ForeverHub", { "Press Escape or /fh to toggle." }, 28, 14)
   if closeBtn then
     Widgets.SafeSetPoint(closeBtn, "RIGHT", titleBar or f, "RIGHT", -12, 0)
+  end
+  if closeBtn then
     closeBtn:SetOnClick(function()
       Workspace.Hide()
     end)
@@ -341,8 +411,8 @@ function Workspace.EnsureCreated()
   local infoBtn = Widgets.CreateIconButton(
     titleBar or f,
     "info",
-    "About & Diagnostics",
-    { "Inspect version, dataset SHA-256 provenance, and provider health." },
+    "About, Changelog & Updates",
+    { "Inspect installed version, local changelog, update URL, and diagnostics." },
     28,
     15
   )
@@ -573,6 +643,9 @@ function Workspace.Refresh()
   end
   if f.subtitleText then
     Theme.ApplyFont(f.subtitleText, "dense", "text.muted")
+    if type(f.subtitleText.SetText) == "function" then
+      f.subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.7")))
+    end
   end
 
   if f.scaleBtn then

@@ -273,6 +273,12 @@ function WorldMapPins.CollectPinEntries(targetMapID, route, progress, settings, 
           include = true
           isSkipped = true
         end
+      elseif kind == "objective" and ev.state == "ineligible" and ev.reason == "optional_elite_bounty_disabled" then
+        -- Always display accepted Elite quest objectives on the World Map even when Elites: OFF!
+        local reqOk = RoutePlanner.EvaluatePredicate(act.requires, progress, ctx, route) == true
+        if reqOk then
+          include = true
+        end
       end
 
       if include then
@@ -667,11 +673,17 @@ local function showPinTooltip(pin)
     if primary.isSelectedQuest then
       statusLine = statusLine .. "  " .. col("status.reserved", "· Selected in Quest Log")
     end
+    local confSuffix = ""
+    if primary.coordConfidence == "subzone_verified" then
+      confSuffix = " · Search Area"
+    elseif primary.coordConfidence == "estimated" then
+      confSuffix = " · Est."
+    end
     local coordText = string.format(
       "(%.1f, %.1f)%s",
       xPct or 0,
       yPct or 0,
-      (primary.coordConfidence == "estimated") and " · Est." or ""
+      confSuffix
     )
     safeTipAddDoubleLine(tip, statusLine, coordText, secR, secG, secB, mutR, mutG, mutB)
 
@@ -683,6 +695,9 @@ local function showPinTooltip(pin)
       end
       if primary.progressText and primary.progressText ~= "" then
         tip:AddLine(tostring(primary.progressText), rdyR, rdyG, rdyB, true)
+      end
+      if primary.coordConfidence == "subzone_verified" then
+        tip:AddLine("Verified subzone search area — locks onto exact target on mouseover/combat", mutR, mutG, mutB, true)
       end
     end
   else
@@ -717,7 +732,9 @@ local function showPinTooltip(pin)
           if e.progressText and e.progressText ~= "" then
             table.insert(detailParts, tostring(e.progressText))
           end
-          if e.coordConfidence == "estimated" then
+          if e.coordConfidence == "subzone_verified" then
+            table.insert(detailParts, "Search Area")
+          elseif e.coordConfidence == "estimated" then
             table.insert(detailParts, "Est. coords")
           end
           if #detailParts > 0 then

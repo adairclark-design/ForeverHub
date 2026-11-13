@@ -2072,6 +2072,74 @@ function Compat.IsQuestLogFullResult()
   return { status = "unknown", value = nil }
 end
 
+function Compat.GetQuestLogCapacityResult()
+  if ns.State and ns.State.overrideQuestLogCapacity ~= nil then
+    local ov = ns.State.overrideQuestLogCapacity
+    if type(ov) == "table" then
+      if ov.status ~= "ok" then
+        return { status = "unknown", isFull = nil, count = nil, max = nil, freeSlots = nil }
+      end
+      local c = tonumber(ov.count)
+      local m = tonumber(ov.max)
+      if c and m and m > 0 then
+        local effMax = math.max(c, m)
+        return {
+          status = "ok",
+          isFull = (c >= effMax),
+          count = c,
+          max = effMax,
+          freeSlots = math.max(0, effMax - c),
+        }
+      end
+      if type(ov.isFull) == "boolean" then
+        return {
+          status = "ok",
+          isFull = ov.isFull,
+          count = nil,
+          max = nil,
+          freeSlots = ov.isFull and 0 or nil,
+        }
+      end
+    elseif type(ov) == "boolean" then
+      return {
+        status = "ok",
+        isFull = ov,
+        count = nil,
+        max = nil,
+        freeSlots = ov and 0 or nil,
+      }
+    end
+    return { status = "unknown", isFull = nil, count = nil, max = nil, freeSlots = nil }
+  end
+
+  local raw = Compat.IsQuestLogFullResult()
+  if type(raw) ~= "table" or raw.status ~= "ok" then
+    return { status = "unknown", isFull = nil, count = nil, max = nil, freeSlots = nil }
+  end
+  local c = tonumber(raw.count)
+  local m = tonumber(raw.max)
+  if c and m and m > 0 then
+    local effMax = math.max(c, m)
+    return {
+      status = "ok",
+      isFull = (c >= effMax),
+      count = c,
+      max = effMax,
+      freeSlots = math.max(0, effMax - c),
+    }
+  end
+  if type(raw.value) == "boolean" then
+    return {
+      status = "ok",
+      isFull = raw.value,
+      count = nil,
+      max = nil,
+      freeSlots = raw.value and 0 or nil,
+    }
+  end
+  return { status = "unknown", isFull = nil, count = nil, max = nil, freeSlots = nil }
+end
+
 function Compat.ValidateUiMap(uiMapID)
   uiMapID = tonumber(uiMapID)
   if not uiMapID then
@@ -3361,7 +3429,8 @@ local function findNearestDirectoryNpc(route, uiMapID, x01, y01, maxNormRadius)
   return bestNpc
 end
 
-function Compat.ResolveLiveQuestTargetOverride(action, route, progress, ctx)
+function Compat.ResolveLiveQuestTargetOverride(action, route, progress, ctx, opts)
+  local recordDrift = not (type(opts) == "table" and opts.recordDrift == false)
   if type(action) ~= "table" then
     return nil
   end
@@ -3396,7 +3465,9 @@ function Compat.ResolveLiveQuestTargetOverride(action, route, progress, ctx)
 
   local onRes = (ctx and type(ctx.isOnQuest) == "function") and ctx.isOnQuest(qRef) or Compat.IsOnQuestResult(qRef)
   if type(onRes) ~= "table" or onRes.status ~= "ok" or onRes.value ~= true then
-    Compat.liveQuestTargetDrifts[action.actionID] = nil
+    if recordDrift then
+      Compat.liveQuestTargetDrifts[action.actionID] = nil
+    end
     return nil
   end
 
@@ -3507,7 +3578,9 @@ function Compat.ResolveLiveQuestTargetOverride(action, route, progress, ctx)
   end
 
   if not candMapID or not candX or not candY or candX <= 0 or candX >= 1 or candY <= 0 or candY >= 1 then
-    Compat.liveQuestTargetDrifts[action.actionID] = nil
+    if recordDrift then
+      Compat.liveQuestTargetDrifts[action.actionID] = nil
+    end
     return nil
   end
 
@@ -3516,7 +3589,9 @@ function Compat.ResolveLiveQuestTargetOverride(action, route, progress, ctx)
   local npcChanged = hasExplicitNpcIdentity and staticNpcID ~= nil and candNpcID ~= staticNpcID
 
   if not crossZone and not npcChanged and distYards < minDriftYards then
-    Compat.liveQuestTargetDrifts[action.actionID] = nil
+    if recordDrift then
+      Compat.liveQuestTargetDrifts[action.actionID] = nil
+    end
     return nil
   end
 
@@ -3541,6 +3616,8 @@ function Compat.ResolveLiveQuestTargetOverride(action, route, progress, ctx)
       coordConfidence = "live_client_healed",
     },
   }
-  Compat.liveQuestTargetDrifts[action.actionID] = override
+  if recordDrift then
+    Compat.liveQuestTargetDrifts[action.actionID] = override
+  end
   return override
 end

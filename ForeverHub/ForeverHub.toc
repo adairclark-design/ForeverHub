@@ -2,7 +2,7 @@
 ## Title: ForeverHub |cff00ccffCrate, Writ, Riverglades & Gold Advisor|r
 ## Notes: Reservation-aware Waylaid Crate & Writ advisor, reviewed Riverglades route assistant, quest reward vendor-value advisor, and verified Level 40 Mage raw gold farm navigator for WoW: Forever.
 ## Author: ForeverHub
-## Version: 0.8.6
+## Version: 0.8.7
 ## IconTexture: Interface\AddOns\ForeverHub\Textures\NavigationArrow
 ## AddonCompartmentFunc: ForeverHub_OnAddonCompartmentClick
 ## AddonCompartmentFuncOnEnter: ForeverHub_OnAddonCompartmentEnter
