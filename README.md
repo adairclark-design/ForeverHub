@@ -1,10 +1,10 @@
-# ForeverHub (v0.8.6) — World of Warcraft: Forever Addon
+# ForeverHub (v0.8.7) — World of Warcraft: Forever Addon
 
 **ForeverHub** is a standalone, MIT-licensed addon for **World of Warcraft: Forever** (`Interface: 16001` / `1.60.1.70862`) with zero external network dependencies.
 
 - **Official Website Download:** https://foreverhub.cc/addon
-- **Standard Archive:** `ForeverHub-v0.8.6.zip` (`SHA-256`: `a495e868cf02153fe621d6b46f18c02e3ae47c4806119f0d2c5cf9ba14a7cf21`)
-- **WowUp Flavor Alias (Identical Bytes):** `ForeverHub-v0.8.6-forever.zip` (`SHA-256`: `a495e868cf02153fe621d6b46f18c02e3ae47c4806119f0d2c5cf9ba14a7cf21`)
+- **Standard Archive:** `ForeverHub-v0.8.7.zip` (`SHA-256`: `8766de142cdfb84c0ba3c328836596e208ad379622721a56bfe1e48153acb988`)
+- **WowUp Flavor Alias (Identical Bytes):** `ForeverHub-v0.8.7-forever.zip` (`SHA-256`: `8766de142cdfb84c0ba3c328836596e208ad379622721a56bfe1e48153acb988`)
 
 ## Included Modules & Scope
 
@@ -19,16 +19,20 @@
 
 ### Option 1 — Manual `.zip` Install (Recommended)
 1. Close **World of Warcraft: Forever**.
-2. Download `ForeverHub-v0.8.6.zip` from **Releases** (do *not* click `Code → Download ZIP`), or from https://foreverhub.cc/addon.
+2. Download `ForeverHub-v0.8.7.zip` from **Releases** (do *not* click `Code → Download ZIP`), or from https://foreverhub.cc/addon.
 3. Use Battle.net's **Options → Show in Explorer** to open your WoW folder, then open `Interface/AddOns/` inside `_forever_` (if Explorer already opened `_forever_`, do not create a nested `_forever_` folder).
 4. Extract the `.zip` to a temporary folder, copy the inner `ForeverHub` folder into `AddOns` (replacing any old `ForeverHub` folder while preserving `WTF/`), and verify this exact file path exists:
    ```text
    _forever_/Interface/AddOns/ForeverHub/ForeverHub.toc
    ```
 
-### Option 2 — WowUp (`Install from URL` — Optional)
-1. If your **WowUp** installation detects your **WoW Forever** (`_forever_`) client, click **Get Addons → Install from URL** and paste this GitHub repository URL.
-   *(Releases include `ForeverHub-v0.8.6-forever.zip` matching WowUp's Classic-family `-forever` asset suffix convention; use Option 1 if your manager does not list `_forever_`.)*
+### Option 2 — WowUp (`Install from URL` — Recommended Addon Manager)
+1. Install or open **WowUp** (which supports **World of Warcraft: Forever** `_forever_` clients as well as single-TOC and `-forever` release assets).
+2. Select your **World of Warcraft: Forever** client, click **Get Addons → Install from URL**, and paste this GitHub repository URL.
+   *(Releases include both `ForeverHub-v0.8.7.zip` and `ForeverHub-v0.8.7-forever.zip` with identical verified bytes; use Option 1 if you prefer manual installation.)*
+
+## Changelog
+See [`CHANGELOG.md`](CHANGELOG.md) for release notes across `v0.8.5` – `v0.8.7`.
 
 ## Maintainer Tag Protection Note
 Configure a GitHub Repository Ruleset on `refs/tags/v*` blocking tag deletion and force-pushes so published release tags remain immutable.
