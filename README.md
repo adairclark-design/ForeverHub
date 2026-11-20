@@ -1,18 +1,18 @@
-# ForeverHub (v0.8.8) — World of Warcraft: Forever Addon
+# ForeverHub (v0.8.9) — World of Warcraft: Forever Addon
 
 **ForeverHub** is a standalone, MIT-licensed addon for **World of Warcraft: Forever** (`Interface: 16001` / `1.60.1.70862`) with zero external network dependencies.
 
 - **Official Website & Fallback Installer:** https://foreverhub.cc/addon
-- **WowUp / GitHub Release Archive:** `ForeverHub-v0.8.8-forever.zip` (`SHA-256`: `a4df2bcef8e81bd8c569880d6066460153ec0d8b8c5b193c5382755cf67eedc2`)
-- **Website Standard Archive (Identical Bytes):** `ForeverHub-v0.8.8.zip` (`SHA-256`: `a4df2bcef8e81bd8c569880d6066460153ec0d8b8c5b193c5382755cf67eedc2`)
+- **WowUp / GitHub Release Archive:** `ForeverHub-v0.8.9-forever.zip` (`SHA-256`: `695e4aefda388adab41ce2235a6bc1ebcd77780505c9894a7089112b13c6fafe`)
+- **Website Standard Archive (Identical Bytes):** `ForeverHub-v0.8.9.zip` (`SHA-256`: `695e4aefda388adab41ce2235a6bc1ebcd77780505c9894a7089112b13c6fafe`)
 
 ## Included Modules & Scope
 
 | Module | Faction / Level Scope | Command |
 |---|---|---|
-| **3-Tab Workspace: Crates & Artisan's Writs** | All Factions & Classes (Lv 1–60) | `/fh` |
-| **Riverglades Quest Chains, Auto-Advance & World Map Pins** | Alliance (Lv 36–47 · Full Zone Hubs & Bounties) | `/fh rg` |
-| **Gold & Mount Workspace + Purse Rate Meter** | Alliance Mage (~Lv 40 · 5 Verified Candidate Spots) | `/fh gold` |
+| **4-Tab Workspace: Gold & Grind Radar, Crates & Writs, Market Advisor, Research** | All Factions & Classes (Lv 1–60) | `/fh` |
+| **Lv 46–60 Arcane ST Grind Radar & `FH_Target` Macro** | Alliance Mage (19 Source-Verified Subcamps + 7 Experimental) | `/fh gold` |
+| **Lv 40 Mount Gold Farms + Purse Rate Meter** | Alliance Mage (~Lv 40 · 5 Verified Candidate Spots) | `/fh gold` |
 | **Quest Reward Vendor Advisor & Diagnostics** | All Factions & Classes (Lv 1–60) | `/fh doctor` |
 
 ## Installation & Updates
@@ -21,7 +21,7 @@
 Download WowUp from [wowup.io](https://wowup.io/). Either **WowUp with Wago** or **WowUp with CurseForge** supports this installation method; existing WowUp-CF users can keep it. Select **World of Warcraft: Forever** and verify its installation path. Close WoW, then choose **Get Addons → Install from URL** and paste `https://github.com/adairclark-design/ForeverHub`.
 
 - **Updating:** Update through WowUp whenever a new ForeverHub version is released. *(Automatic updates are a separate optional setting in WowUp that you must enable if desired.)*
-- **Wrong-Client Warning (`Retail` vs `Forever`):** GitHub Releases publish only `ForeverHub-v0.8.8-forever.zip`, its `.sha256` file, and `release.json` to prevent silent `Retail` matching. Because WowUp's URL dialog shows an **Addon Import Warning** alert when no asset matches the selected client while leaving the underlying `Install` button active, **click `Okay` on the alert and then click `Close` on the `Install Addon URL` dialog (`Close` / `×`) without clicking `Install`** — dismissing the warning alert alone does not cancel the pending import. Switch the client dropdown to **World of Warcraft: Forever**, then import again.
+- **Wrong-Client Warning (`Retail` vs `Forever`):** GitHub Releases publish only `ForeverHub-v0.8.9-forever.zip`, its `.sha256` file, and `release.json` to prevent silent `Retail` matching. Because WowUp's URL dialog shows an **Addon Import Warning** alert when no asset matches the selected client while leaving the underlying `Install` button active, **click `Okay` on the alert and then click `Close` on the `Install Addon URL` dialog (`Close` / `×`) without clicking `Install`** — dismissing the warning alert alone does not cancel the pending import. Switch the client dropdown to **World of Warcraft: Forever**, then import again.
 - **Do not paste a raw `.zip` URL into WowUp:** Installing a direct `.zip` link in WowUp performs a one-time ignored install that will never receive updates. Always paste `https://github.com/adairclark-design/ForeverHub`.
 
 #### Migrating an Existing Manual Installation to WowUp
@@ -29,12 +29,12 @@ Do not rely on WowUp's *Re-scan Folders* to attach a manually installed folder t
 1. **Close WoW completely.** Back up your existing `_forever_/Interface/AddOns/ForeverHub` folder and relevant account/character `WTF/Account/.../SavedVariables/ForeverHub.lua` (including `.bak`) files outside the game directory.
 2. Verify WowUp's selected client points to your intended `_forever_` installation.
 3. Choose **Get Addons → Install from URL** and install using `https://github.com/adairclark-design/ForeverHub`. *(If a folder conflict prevents adoption, move the old `AddOns/ForeverHub` folder outside `AddOns`, leave `WTF` untouched, and install again.)*
-4. Confirm a single `AddOns/ForeverHub` folder, version `0.8.8`, and a persistent `GitHub` update source in WowUp.
+4. Confirm a single `AddOns/ForeverHub` folder, version `0.8.9`, and a persistent `GitHub` update source in WowUp.
 5. Before launching WoW, verify your `SavedVariables` files remain unchanged, then launch WoW: Forever and check your existing settings.
 
 ### Option 2 — Other Installation Methods (Manual `.zip` or Windows Installer)
 1. **Close World of Warcraft: Forever** completely.
-2. Download **`ForeverHub-v0.8.8-forever.zip`** from **Releases** under **Assets** (or use the Windows PowerShell installer / `ForeverHub-v0.8.8.zip` on https://foreverhub.cc/addon). **Do not** download GitHub's automatic `Source code (zip)` / `Source code (tar.gz)` archives or click `Code → Download ZIP`.
+2. Download **`ForeverHub-v0.8.9-forever.zip`** from **Releases** under **Assets** (or use the Windows PowerShell installer / `ForeverHub-v0.8.9.zip` on https://foreverhub.cc/addon). **Do not** download GitHub's automatic `Source code (zip)` / `Source code (tar.gz)` archives or click `Code → Download ZIP`.
 3. Use Battle.net's **Options (⚙) → Show in Explorer / Reveal in Finder**, then open `_forever_/Interface/AddOns/` (create `Interface` and `AddOns` if missing; if Explorer already opened inside `_forever_`, do not create a nested `_forever_` folder).
 4. Extract the `.zip` to a temporary folder, copy the inner `ForeverHub` folder into `AddOns` (replacing any old `ForeverHub` folder while leaving `WTF/` untouched), and verify this exact path exists before launching WoW:
    ```text
@@ -42,7 +42,7 @@ Do not rely on WowUp's *Re-scan Folders* to attach a manually installed folder t
    ```
 
 ## Changelog
-See [`CHANGELOG.md`](CHANGELOG.md) for release notes across `v0.8.5` – `v0.8.8`.
+See [`CHANGELOG.md`](CHANGELOG.md) for release notes across `v0.8.5` – `v0.8.9`.
 
 ## Maintainer Security & Release Controls
 - Default GitHub Actions permissions are restricted to `contents: read`; `contents: write` is granted solely to the serialized tag-publishing job with `persist-credentials: false` and 40-SHA-pinned actions.
