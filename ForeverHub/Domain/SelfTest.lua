@@ -6,21 +6,27 @@ ns.Domain.SelfTest = SelfTest
 
 SelfTest._running = {
   core = false,
-  riverglades = false,
   gold_farms = false,
   workspace_ui = false,
+  phase0_market = false,
+  spawn_radar = false,
+  sunken_temple_rc1 = false,
 }
 SelfTest.cachedReports = {
   core = nil,
-  riverglades = nil,
   gold_farms = nil,
   workspace_ui = nil,
+  phase0_market = nil,
+  spawn_radar = nil,
+  sunken_temple_rc1 = nil,
 }
 SelfTest.suiteRunCounts = {
   core = 0,
-  riverglades = 0,
   gold_farms = 0,
   workspace_ui = 0,
+  phase0_market = 0,
+  spawn_radar = 0,
+  sunken_temple_rc1 = 0,
 }
 
 local function deepCopyTable(val)
@@ -66,7 +72,6 @@ end
 local function snapshotAndIsolateNavigation(charDB)
   local nav = ns.UI and ns.UI.Navigation or nil
   local wmp = ns.UI and ns.UI.WorldMapPins or nil
-  local rgProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress() or nil
   local gfProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress() or nil
   local snap = {
     savedCTimer = _G.C_Timer,
@@ -77,7 +82,6 @@ local function snapshotAndIsolateNavigation(charDB)
     savedDBNavOwner = charDB and deepCopyTable(charDB.navigationOwner) or nil,
     savedDBArrowSettings = charDB and deepCopyTable(charDB.arrowSettings) or nil,
     savedDBWorldMapPinSettings = charDB and deepCopyTable(charDB.worldMapPinSettings) or nil,
-    savedRgOwnedWp = rgProg and deepCopyTable(rgProg.ownedWaypoint) or nil,
     savedGfOwnedWp = gfProg and deepCopyTable(gfProg.ownedWaypoint) or nil,
     savedEventsReconcilePending = ns.Events and ns.Events.reconcilePending or false,
     savedOverrideFacing = ns.State and ns.State.overridePlayerFacing or nil,
@@ -216,11 +220,7 @@ local function restoreNavigationSnapshot(snap, charDB)
     charDB.arrowSettings = snap.savedDBArrowSettings
     charDB.worldMapPinSettings = snap.savedDBWorldMapPinSettings
   end
-  local rgProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress() or nil
   local gfProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress() or nil
-  if rgProg then
-    rgProg.ownedWaypoint = snap.savedRgOwnedWp
-  end
   if gfProg then
     gfProg.ownedWaypoint = snap.savedGfOwnedWp
   end
@@ -237,12 +237,16 @@ function SelfTest.GetDoctorSuiteSummary(suiteKey)
   if not rep then
     if suiteKey == "core" and SelfTest.RunAll then
       rep = SelfTest.RunAll()
-    elseif suiteKey == "riverglades" and SelfTest.RunRivergladesSuite then
-      rep = SelfTest.RunRivergladesSuite()
     elseif suiteKey == "gold_farms" and SelfTest.RunGoldFarmsSuite then
       rep = SelfTest.RunGoldFarmsSuite()
     elseif suiteKey == "workspace_ui" and SelfTest.RunWorkspaceUISuite then
       rep = SelfTest.RunWorkspaceUISuite()
+    elseif suiteKey == "phase0_market" and SelfTest.RunPhase0MarketSuite then
+      rep = SelfTest.RunPhase0MarketSuite()
+    elseif suiteKey == "spawn_radar" and SelfTest.RunSpawnRadarSuite then
+      rep = SelfTest.RunSpawnRadarSuite()
+    elseif suiteKey == "sunken_temple_rc1" and SelfTest.RunSunkenTempleCoachSuite then
+      rep = SelfTest.RunSunkenTempleCoachSuite()
     end
   end
   if not rep then
@@ -954,2313 +958,6 @@ function SelfTest.RunAll()
 end
 
 -- ============================================================================
--- v0.4.0 Riverglades Route, Navigation, Reward Value & Mount Acceptance Suite
--- Covers GPT Astra's 10 Mandatory v0.4.0 Offline Acceptance Gates
--- ============================================================================
-
-function SelfTest.RunRivergladesSuite()
-  if SelfTest._running.riverglades then
-    error("Recursive SelfTest.RunRivergladesSuite invocation forbidden", 2)
-  end
-  SelfTest._running.riverglades = true
-  SelfTest.suiteRunCounts.riverglades = (SelfTest.suiteRunCounts.riverglades or 0) + 1
-
-  local results = {}
-  local passed = 0
-  local failed = 0
-
-  local function check(name, fn)
-    local ok, err = pcall(fn)
-    if ok then
-      passed = passed + 1
-      table.insert(results, { name = name, passed = true })
-    else
-      failed = failed + 1
-      table.insert(results, { name = name, passed = false, error = tostring(err) })
-    end
-  end
-
-  local RoutePlanner = ns.Domain.RoutePlanner
-  local RouteProgress = ns.Domain.RouteProgress
-  local RewardValue = ns.Domain.RewardValue
-  local route = ns.RivergladesData and ns.RivergladesData.route
-
-  local charDB = ns.State and ns.State.GetCharDB and ns.State.GetCharDB() or nil
-  local savedRGProg = charDB and deepCopyTable(charDB.routeProgress) or nil
-  local savedGFProg = charDB and deepCopyTable(charDB.goldFarmProgress) or nil
-  local savedSuiteDiscoveredIds = _G.ForeverHubDB and deepCopyTable(_G.ForeverHubDB.discoveredQuestIds or {}) or nil
-  local savedSuiteDiscoveredTitles = _G.ForeverHubDB and deepCopyTable(_G.ForeverHubDB.discoveredQuestTitlesById or {}) or nil
-  local navSnap = snapshotAndIsolateNavigation(charDB)
-
-  local function makeMockCtx(overrides)
-    overrides = overrides or {}
-    local completed = overrides.completed or {}
-    local active = overrides.active or {}
-    local objectives = overrides.objectives or {}
-    local items = overrides.items or {}
-    return {
-      getPlayerFaction = function()
-        return overrides.faction ~= nil and overrides.faction or "Alliance"
-      end,
-      getPlayerLevel = function()
-        return overrides.level or 40
-      end,
-      getPlayerClassAndRace = function()
-        return { classToken = overrides.classToken or "MAGE", raceToken = overrides.raceToken or "HUMAN" }
-      end,
-      isQuestCompleted = function(qid)
-        local v = completed[qid]
-        if v == "unknown" or v == "unavailable" or v == "restricted" then
-          return { status = v, value = nil }
-        end
-        return { status = "ok", value = (v == true) }
-      end,
-      isOnQuest = function(qid)
-        local v = active[qid]
-        if v == "unknown" or v == "unavailable" then
-          return { status = v, value = nil }
-        end
-        return { status = "ok", value = (v == true) }
-      end,
-      getQuestObjectives = function(qid)
-        local v = objectives[qid]
-        if type(v) == "table" then
-          return v
-        end
-        if v == "unknown" or v == "unavailable" then
-          return { status = v, allFinished = nil }
-        end
-        return { status = "ok", allFinished = (v == true) }
-      end,
-      isQuestLogFull = function()
-        return { status = "ok", value = (overrides.questLogFull == true) }
-      end,
-      getBagItemCount = function(itemID)
-        return { status = "ok", count = tonumber(items[itemID]) or 0 }
-      end,
-    }
-  end
-
-  local savedGlobalPlayerPos = ns.State.overridePlayerPosition
-  ns.State.overridePlayerPosition = { status = "unavailable", reason = "selftest_isolated" }
-
-  -- Gate 1: AND (preQuestGroup) vs OR (preQuestSingle) prerequisites, breadcrumbs, exclusiveTo, faction/class/level
-  check("RG-1. AND vs OR Prerequisites, Exclusive Branches & Faction/Class/Level Restrictions", function()
-    assertTrue(type(route) == "table" and type(route.actions) == "table", "Compiled Riverglades route missing")
-    local prog = ns.State.MigrateRouteProgress({}, route)
-
-    -- 94907 (A Small Favor) uses `all` (AND) requiring BOTH 94879 AND 94881 completed
-    local evalOnlyOne = RoutePlanner.EvaluateRoute(route, prog, makeMockCtx({ completed = { [94879] = true, [94881] = false } }))
-    assertTrue(
-      evalOnlyOne.byActionID["rg_a_09_accept_94907"].state == "blocked_prerequisite",
-      "A Small Favor (94907) must stay blocked when only 1 of 2 AND prerequisites is complete"
-    )
-    local evalBoth = RoutePlanner.EvaluateRoute(route, prog, makeMockCtx({ completed = { [94879] = true, [94881] = true } }))
-    assertTrue(
-      evalBoth.byActionID["rg_a_09_accept_94907"].state == "available",
-      "A Small Favor (94907) must unlock when BOTH 94879 and 94881 are complete"
-    )
-
-    -- Krol'dok entrance (`rg_a_16_opt_kroldok_entrance`) uses `any` (OR / preQuestSingle): unlocked if EITHER 94982 OR 94984 is active
-    local evalOrSingle = RoutePlanner.EvaluateRoute(route, prog, makeMockCtx({ active = { [94982] = true } }))
-    assertTrue(
-      evalOrSingle.byActionID["rg_a_16_opt_kroldok_entrance"].state == "available",
-      "OR (any / preQuestSingle) must unlock when 1 listed quest is active"
-    )
-
-    -- Exclusive branch & class/faction/level checks on synthetic action
-    local exAction = {
-      actionID = "test_exclusive_mage",
-      kind = "accept",
-      questID = 94879,
-      reviewStatus = "verified",
-      eligibility = { faction = "Alliance", minLevel = 40, classes = { "MAGE" }, exclusiveTo = { 99001, 99002 } },
-      requires = { op = "quest_completed", questID = 88000 }, -- external breadcrumb outside Riverglades
-      completionPredicate = { type = "quest_completed", questID = 94879 },
-      destination = { uiMapID = 2548, areaID = 16724, x01 = 0.6672, y01 = 0.8107, coordinateSpace = "uiMap01" },
-    }
-    assertTrue(
-      RoutePlanner.EvaluateAction(exAction, route, prog, makeMockCtx({ faction = "Horde", completed = { [88000] = true } })).state == "ineligible",
-      "Horde character must be ineligible for Alliance action"
-    )
-    assertTrue(
-      RoutePlanner.EvaluateAction(exAction, route, prog, makeMockCtx({ classToken = "WARRIOR", completed = { [88000] = true } })).state == "ineligible",
-      "Wrong class must be ineligible"
-    )
-    assertTrue(
-      RoutePlanner.EvaluateAction(exAction, route, prog, makeMockCtx({ level = 39, completed = { [88000] = true } })).state == "ineligible",
-      "Below minLevel must be ineligible"
-    )
-    assertTrue(
-      RoutePlanner.EvaluateAction(exAction, route, prog, makeMockCtx({ completed = { [88000] = true, [99002] = true } })).state == "ineligible",
-      "Completed exclusiveTo branch must mark sibling branch ineligible"
-    )
-    assertTrue(
-      RoutePlanner.EvaluateAction(exAction, route, prog, makeMockCtx({ completed = { [88000] = false } })).state == "blocked_prerequisite",
-      "Missing external breadcrumb must block action"
-    )
-    assertTrue(
-      RoutePlanner.EvaluateAction(exAction, route, prog, makeMockCtx({ completed = { [88000] = true } })).state == "available",
-      "Satisfied breadcrumb + eligible Mage must become available"
-    )
-  end)
-
-  -- Gate 2: Unknown prerequisite or missing/ambiguous map conversion NEVER becomes available
-  check("RG-2. Closed-Fail Provenance: Unknown Prerequisite or Unmapped Area Never Becomes Available", function()
-    local prog = ns.State.MigrateRouteProgress({}, route)
-
-    -- Quarantined 94890 action must evaluate to blocked_unverified
-    local qAct = route.quarantinedActions and route.quarantinedActions[1]
-    assertTrue(qAct ~= nil, "Quarantined action manifest missing")
-    local evQuarantined = RoutePlanner.EvaluateAction(qAct, route, prog, makeMockCtx())
-    assertTrue(evQuarantined.state == "blocked_unverified", "Unreviewed action must be blocked_unverified")
-
-    -- API returning unavailable/restricted on prerequisite must produce blocked_unverified, NEVER available
-    local evalApiUnk = RoutePlanner.EvaluateRoute(route, prog, makeMockCtx({ completed = { [94879] = true, [94881] = "unavailable" } }))
-    assertTrue(
-      evalApiUnk.byActionID["rg_a_09_accept_94907"].state == "blocked_unverified",
-      "Unavailable prerequisite status must produce blocked_unverified, never available"
-    )
-
-    -- Unmapped AreaTable ID or (0, 0) coordinate must fail closed
-    local unmappedAct = {
-      actionID = "test_bad_map",
-      kind = "travel",
-      reviewStatus = "verified",
-      eligibility = {},
-      requires = { op = "true" },
-      completionPredicate = { type = "manual_or_arrival" },
-      destination = { uiMapID = 2548, areaID = 99999, x01 = 0.5, y01 = 0.5, coordinateSpace = "uiMap01" },
-    }
-    assertTrue(
-      RoutePlanner.EvaluateAction(unmappedAct, route, prog, makeMockCtx()).state == "blocked_unverified",
-      "Unmapped AreaTable conversion must be blocked_unverified"
-    )
-    local zeroCoordAct = {
-      actionID = "test_zero_coord",
-      kind = "travel",
-      reviewStatus = "verified",
-      eligibility = {},
-      requires = { op = "true" },
-      completionPredicate = { type = "manual_or_arrival" },
-      destination = { uiMapID = 2548, areaID = 16591, x01 = 0, y01 = 0, coordinateSpace = "uiMap01" },
-    }
-    assertTrue(
-      RoutePlanner.EvaluateAction(zeroCoordAct, route, prog, makeMockCtx()).state == "blocked_unverified",
-      "(0, 0) sentinel coordinate must be blocked_unverified"
-    )
-  end)
-
-  -- Gate 3: Coordinate round-trips and known Riverglades landmark checks
-  check("RG-3. Normalized (0..1) <-> Percent (0..100) Round-Trips & Verified Landmarks", function()
-    local xPct, yPct = RoutePlanner.NormalizedToPercent(0.6672, 0.8107)
-    assertTrue(math.abs(xPct - 66.72) < 1e-6 and math.abs(yPct - 81.07) < 1e-6, "0..1 -> 0..100 conversion mismatch")
-    local x01, y01 = RoutePlanner.PercentToNormalized(xPct, yPct)
-    assertTrue(math.abs(x01 - 0.6672) < 1e-6 and math.abs(y01 - 0.8107) < 1e-6, "0..100 -> 0..1 round-trip mismatch")
-
-    local lm = route.landmarksByKey or {}
-    assertTrue(lm.farholde_keep_fp and lm.farholde_keep_fp.uiMapID == 2548, "Missing Farholde Keep FP landmark")
-    assertTrue(math.abs(lm.farholde_keep_fp.x01 - 0.6062) < 1e-4, "Farholde FP x01 mismatch")
-    assertTrue(math.abs(lm.powderfuse_tanaris_pier.x01 - 0.8024) < 1e-4, "Powderfuse Pier x01 mismatch")
-    assertTrue(math.abs(lm.kroldok_stronghold_entrance.x01 - 0.4850) < 1e-4, "Krol'dok entrance x01 must be 0.4850")
-    assertTrue(math.abs(lm.kroldok_stronghold_entrance.y01 - 0.2610) < 1e-4, "Krol'dok entrance y01 must be 0.2610")
-  end)
-
-  -- Gate 4: Numeric .goto 2548,x,y output, #forever header, and exclusion of unverified quests
-  check("RG-4. RXP Export Emits #forever + Numeric .goto 2548 & Excludes Quarantined Steps", function()
-    local text, err = ns.Bridges.RXPBridge.BuildRivergladesGuideText(route)
-    assertTrue(type(text) == "string" and err == nil, "BuildRivergladesGuideText failed: " .. tostring(err))
-    assertTrue(string.find(text, "^#forever\n") ~= nil, "RXP export must begin with #forever header")
-    assertTrue(string.find(text, "%.goto 2548,66%.72,81%.07", 1) ~= nil, "RXP export must emit numeric .goto 2548,66.72,81.07")
-    assertTrue(string.find(text, "%.accept 94879", 1) ~= nil, "RXP export must emit verified .accept 94879")
-    assertTrue(string.find(text, "95562", 1, true) == nil, "Atlas side quest 95562 must NEVER appear in linear RXP export")
-    assertTrue(string.find(text, "95331", 1, true) == nil, "Placeholder quest 95331 must NEVER appear in RXP export")
-    assertTrue(string.find(text, "%.accept 94980", 1) == nil, "Item-started atlas quest 94980 must NEVER emit .accept in RXP export")
-  end)
-
-  -- Gate 5: pcall success with RegisterGuide logical failure (false / deferred nil) handled cleanly
-  check("RG-5. RXP Registration Distinguishes pcall Success from Rejected or Deferred Guide", function()
-    local savedRXP = _G.RXPGuides
-    local savedRegFlag = ns.Bridges.RXPBridge.rivergladesRegistered
-    local ok, err = pcall(function()
-      -- Case A: pcall succeeds, RegisterGuide returns false (rejected by RXP parser/filter)
-      _G.RXPGuides = {
-        addonLoaded = true,
-        guides = {},
-        RegisterGuide = function()
-          return false
-        end,
-      }
-      local regOkA, statusA = ns.Bridges.RXPBridge.RegisterRivergladesGuide(false, route)
-      assertTrue(regOkA == false and statusA == "rejected", "RegisterGuide returning false must be treated as rejected")
-
-      -- Case B: pcall succeeds, addonLoaded == false, RegisterGuide queues and returns nil (deferred, not yet accepted)
-      _G.RXPGuides = {
-        addonLoaded = false,
-        guides = {},
-        RegisterGuide = function()
-          return nil
-        end,
-      }
-      local regOkB, statusB = ns.Bridges.RXPBridge.RegisterRivergladesGuide(false, route)
-      assertTrue(regOkB == false and statusB == "deferred", "Deferred RegisterGuide before RXP load must report deferred")
-
-      -- Case C: RegisterGuide accepts guide while another guide is selected -> registered, NOT hijacked!
-      _G.RXPGuides = {
-        addonLoaded = true,
-        currentGuide = { group = "RestedXP Speedrun Guide (A)", name = "38-40 Dustwallow" },
-        guides = {},
-        RegisterGuide = function(txt)
-          local key = ns.Bridges.RXPBridge.RIVERGLADES_GUIDE_GROUP .. "||" .. ns.Bridges.RXPBridge.RIVERGLADES_GUIDE_NAME
-          _G.RXPGuides.guides[key] = { text = txt }
-          return true
-        end,
-      }
-      local regOkC, statusC = ns.Bridges.RXPBridge.RegisterRivergladesGuide(false, route)
-      assertTrue(regOkC == true and statusC == "registered", "Accepted guide must report registered without claiming selected")
-      assertTrue(
-        _G.RXPGuides.currentGuide.name == "38-40 Dustwallow",
-        "Exporting guide must NEVER overwrite unrelated active RXP guide"
-      )
-    end)
-    _G.RXPGuides = savedRXP
-    ns.Bridges.RXPBridge.rivergladesRegistered = savedRegFlag
-    if not ok then
-      error(err, 2)
-    end
-  end)
-
-  -- Gate 6: No-RXP / no-TomTom / unsupported-native navigation remains usable via text fallback
-  check("RG-6. Text/Manual Fallback Works Without RXP, TomTom, or Native Waypoints", function()
-    local savedRXP = _G.RXPGuides
-    local savedTT = _G.TomTom
-    local savedWpOv = ns.State.overrideNativeWaypointState
-    local savedCombat = ns.State.overrideInCombat
-    local ok, err = pcall(function()
-      _G.RXPGuides = nil
-      _G.TomTom = nil
-      ns.State.overrideInCombat = false
-      ns.State.overrideNativeWaypointState = { supported = false, current = nil }
-
-      local prog = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-      local eval = RouteProgress.Reconcile(route, prog, makeMockCtx())
-      local navStatus = ns.UI.Navigation.SyncFromEvaluation(eval, prog)
-      assertTrue(navStatus.activeProvider == "text_manual", "Must fall back cleanly to text_manual")
-      assertTrue(navStatus.hasDirectionalArrow == false, "Text fallback must NEVER claim a directional arrow exists")
-      assertTrue(eval.nextAction ~= nil and eval.nextAction.actionID == "rg_a_01_farholde_fp", "First action must still be selectable")
-    end)
-    _G.RXPGuides = savedRXP
-    _G.TomTom = savedTT
-    ns.State.overrideNativeWaypointState = savedWpOv
-    ns.State.overrideInCombat = savedCombat
-    if not ok then
-      error(err, 2)
-    end
-  end)
-
-  -- Gate 7: Reward stack quantities, ties, missing/loading prices, and stale async callbacks
-  check("RG-7. Reward Stack Quantities, Ties, Partial Pricing & Stale Async Callback Rejection", function()
-    local savedPrices = ns.State.overrideItemSellPrices
-    local savedLoads = ns.State.requestedItemLoads
-    local ok, err = pcall(function()
-      ns.State.requestedItemLoads = {}
-      -- Stack of 5x 400c (2000c) must beat 1x 1500c (1500c), while choice 3 is still loading ("loading")
-      ns.State.overrideItemSellPrices = {
-        [70001] = 1500,
-        [70002] = 400,
-        [70003] = "loading",
-      }
-      local snapPartial = {
-        status = "ok",
-        questID = 94879,
-        questTitle = "Scraps of Knowledge",
-        choices = {
-          { choiceIndex = 1, itemID = 70001, name = "Heavy Mace", quantity = 1 },
-          { choiceIndex = 2, itemID = 70002, name = "Mana Potion Bundle", quantity = 5 },
-          { choiceIndex = 3, itemID = 70003, name = "Uncached Robe", quantity = 1 },
-        },
-      }
-      local eval1, gen1 = ns.UI.RewardAdvisor.OnQuestComplete(snapPartial)
-      assertTrue(eval1.status == "partial", "Uncached choice must produce partial status, not complete")
-      assertTrue(
-        eval1.headlineLabel == "Highest value among priced rewards",
-        "Partial pricing must state 'Highest value among priced rewards'"
-      )
-      assertTrue(eval1.bestVendorCopper == 2000 and eval1.bestChoices[1].choiceIndex == 2, "5x 400c (2000c) must beat 1x 1500c")
-      assertTrue(ns.State.requestedItemLoads[70003] == 1, "Must request async item load for uncached item 70003")
-
-      -- Advance quest generation (e.g. player opened a second quest) and verify late callback from gen1 is discarded!
-      ns.State.overrideItemSellPrices = { [80001] = 1200, [80002] = 1200 }
-      local snapTie = {
-        status = "ok",
-        questID = 94881,
-        questTitle = "Curious Trinkets",
-        choices = {
-          { choiceIndex = 1, itemID = 80001, name = "Cloth Bracers", quantity = 1 },
-          { choiceIndex = 2, itemID = 80002, name = "Plate Bracers", quantity = 1 },
-        },
-      }
-      local evalTie, gen2 = ns.UI.RewardAdvisor.OnQuestComplete(snapTie)
-      assertTrue(gen2 > gen1, "Generation must increment monotonically")
-      assertTrue(evalTie.status == "complete" and evalTie.isTie == true and #evalTie.bestChoices == 2, "Exact copper tie must report both choices")
-
-      local handledStale, staleReason = ns.UI.RewardAdvisor.OnItemInfoReceived(70003, true, gen1, snapTie)
-      assertTrue(handledStale == false and staleReason == "stale_generation_discarded", "Late callback from old generation must be discarded")
-      ns.UI.RewardAdvisor.OnQuestFinished()
-    end)
-    ns.State.overrideItemSellPrices = savedPrices
-    ns.State.overrideItemLoads = nil
-    ns.State.requestedItemLoads = savedLoads
-    if not ok then
-      error(err, 2)
-    end
-  end)
-
-  -- Gate 8: Duplicate/reordered events, reload migration by actionID, abandonment, quest-log-full & explicit skips
-  check("RG-8. Migration by ActionID, Explicit Skips, Abandonment, Quest-Log-Full & Proximity Safety", function()
-    -- 1. Migration rejects numeric currentActionID, keeps valid actionID skips, and archives removed actionIDs
-    local migrated = ns.State.MigrateRouteProgress({
-      currentActionID = 3, -- invalid numeric index!
-      explicitlySkippedActions = {
-        ["rg_a_01_farholde_fp"] = { skippedAt = 10, reason = "manual_next" },
-        ["obsolete_removed_step_v0"] = { skippedAt = 5, reason = "manual_next" },
-      },
-    }, route)
-    assertTrue(migrated.currentActionID == nil, "Migration must reject numeric array index currentActionID")
-    assertTrue(migrated.explicitlySkippedActions["rg_a_01_farholde_fp"] ~= nil, "Valid actionID skip must survive migration")
-    assertTrue(migrated.explicitlySkippedActions["obsolete_removed_step_v0"] == nil, "Removed actionID must move out of active skips")
-    assertTrue(migrated.archivedSkippedActions["obsolete_removed_step_v0"] ~= nil, "Removed actionID must be preserved in archive")
-
-    -- 2. Manual `Next` records explicit skip WITHOUT marking quest completed!
-    local savedWorldSizes = ns.State.overrideMapWorldSizes
-    local okRG8, errRG8 = pcall(function()
-      local prog = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-      -- Without world-size transform on custom map 2548, travel arrival MUST retain manual completion
-      ns.State.overrideMapWorldSizes = {}
-      local evalNoTransform = RouteProgress.Reconcile(route, prog, makeMockCtx(), { status = "ok", uiMapID = 2548, x01 = 0.6062, y01 = 0.8153 })
-      assertTrue(
-        evalNoTransform.nextAction and evalNoTransform.nextAction.actionID == "rg_a_01_farholde_fp",
-        "Missing world transform on 2548 must retain manual completion instead of normalized % guessing"
-      )
-
-      -- With world-size transform available, complete initial travel steps via world-yard arrival
-      ns.State.overrideMapWorldSizes = { [2548] = { width = 3600, height = 2400 } }
-      RouteProgress.Reconcile(route, prog, makeMockCtx(), { status = "ok", uiMapID = 2548, x01 = 0.6062, y01 = 0.8153 })
-      RouteProgress.Reconcile(route, prog, makeMockCtx(), { status = "ok", uiMapID = 2548, x01 = 0.6464, y01 = 0.8420 })
-      -- Standing right on Ashe Amberhall (0.6672, 0.8107) MUST NOT auto-complete `rg_a_03_accept_94879`!
-      local evalAtNpc = RouteProgress.Reconcile(route, prog, makeMockCtx(), { status = "ok", uiMapID = 2548, x01 = 0.6672, y01 = 0.8107 })
-      assertTrue(evalAtNpc.nextAction.actionID == "rg_a_03_accept_94879", "Proximity must NEVER auto-complete quest accept steps")
-
-      -- Quest-log-full blocks pickup cleanly
-      local evalFull = RouteProgress.Reconcile(route, prog, makeMockCtx({ questLogFull = true }))
-      assertTrue(evalFull.byActionID["rg_a_03_accept_94879"].state == "blocked_quest_log_full", "Full quest log must block accept step")
-
-      -- Explicit `Next` skips `rg_a_03_accept_94879` without completing 94879
-      local skipOk, skipRes = RouteProgress.SkipCurrentAction(route, prog, makeMockCtx())
-      assertTrue(skipOk and skipRes.skippedActionID == "rg_a_03_accept_94879", "SkipCurrentAction must skip rg_a_03_accept_94879")
-      assertTrue(prog.explicitlySkippedActions["rg_a_03_accept_94879"] ~= nil, "Explicit skip must be recorded")
-      assertTrue(skipRes.evaluation.byActionID["rg_a_03_accept_94879"].state == "skipped", "Skipped action state must be 'skipped', not 'completed'")
-
-      -- 3. Accept 94879 & 94881 (even with duplicate reconcile calls), then abandon 94879 -> must roll back to `rg_a_03_accept_94879`!
-      local evalAccepted = RouteProgress.Reconcile(route, prog, makeMockCtx({ active = { [94879] = true, [94881] = true } }))
-      evalAccepted = RouteProgress.Reconcile(route, prog, makeMockCtx({ active = { [94879] = true, [94881] = true } }))
-      assertTrue(evalAccepted.nextAction.actionID == "rg_a_05_obj_sunnyglade_94881", "Active quests must advance to Sunnyglade objectives")
-
-      local evalAbandoned = RouteProgress.Reconcile(route, prog, makeMockCtx({ active = { [94879] = false, [94881] = true } }))
-      assertTrue(
-        evalAbandoned.nextAction.actionID == "rg_a_03_accept_94879",
-        "Abandoning quest 94879 must roll progression back to accepting 94879"
-      )
-
-      -- 4. Read-only RouteProgress.Evaluate MUST NOT record travel arrival evidence even when standing on step 1
-      local progRO = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-      ns.State.overridePlayerPosition = { status = "ok", uiMapID = 2548, x01 = 0.6062, y01 = 0.8153 }
-      local evalRO = RouteProgress.Evaluate(route, progRO, makeMockCtx())
-      assertTrue(evalRO.nextAction.actionID == "rg_a_01_farholde_fp", "Read-only Evaluate must not advance travel step")
-      assertTrue(progRO.observedCompletionEvidence["rg_a_01_farholde_fp"] == nil, "Read-only Evaluate must never write travel evidence")
-
-      -- 5. Callback-capable C_Timer.NewTicker must advance CONSECUTIVE Riverglades travel steps without self-cancelling
-      local prevCTimer = _G.C_Timer
-      local prevWpOv = ns.State.overrideNativeWaypointState
-      local prevInCombat = ns.State.overrideInCombat
-      local prevRGDB = charDB and deepCopyTable(charDB.routeProgress) or nil
-      local okTickerRG, errTickerRG = pcall(function()
-        local activeTickFn = nil
-        local cancelCount = 0
-        _G.C_Timer = {
-          NewTicker = function(_, cb)
-            activeTickFn = cb
-            return {
-              Cancel = function()
-                cancelCount = cancelCount + 1
-              end,
-            }
-          end,
-          After = function(_, cb)
-            if type(cb) == "function" then
-              cb()
-            end
-          end,
-        }
-        ns.State.overrideInCombat = false
-        ns.State.overrideNativeWaypointState = { supported = true, current = nil }
-        ns.UI.Navigation.StopTravelTicker()
-        cancelCount = 0
-        activeTickFn = nil
-
-        charDB.routeProgress = ns.State.MigrateRouteProgress({}, route)
-        ns.State.overridePlayerPosition = { status = "ok", uiMapID = 2548, x01 = 0.5000, y01 = 0.5000 }
-        local okStartRG, startEvalRG = RouteProgress.Start()
-        assertTrue(okStartRG and startEvalRG.nextAction.actionID == "rg_a_01_farholde_fp", "RG ticker start at step 1")
-        ns.UI.Navigation.SyncFromEvaluation(startEvalRG, charDB.routeProgress)
-        assertTrue(type(activeTickFn) == "function" and cancelCount == 0, "RG travel ticker must start cleanly")
-
-        -- Tick 1: arrive at rg_a_01_farholde_fp -> advances to rg_a_02_farholde_inn without cancelling ticker!
-        ns.State.overridePlayerPosition = { status = "ok", uiMapID = 2548, x01 = 0.6062, y01 = 0.8153 }
-        activeTickFn()
-        assertTrue(charDB.routeProgress.currentActionID == "rg_a_02_farholde_inn", "RG Tick 1 must advance to rg_a_02_farholde_inn")
-        assertTrue(cancelCount == 0, "RG ticker must remain alive across generation bump after first hop")
-
-        -- Tick 2 (same ticker closure!): arrive at rg_a_02_farholde_inn -> advances to rg_a_03_accept_94879!
-        ns.State.overridePlayerPosition = { status = "ok", uiMapID = 2548, x01 = 0.6464, y01 = 0.8420 }
-        activeTickFn()
-        assertTrue(charDB.routeProgress.currentActionID == "rg_a_03_accept_94879", "RG Tick 2 must advance consecutive travel step to rg_a_03_accept_94879")
-      end)
-      ns.UI.Navigation.StopTravelTicker()
-      _G.C_Timer = prevCTimer
-      ns.State.overrideNativeWaypointState = prevWpOv
-      ns.State.overrideInCombat = prevInCombat
-      ns.State.overridePlayerPosition = { status = "unavailable" }
-      if charDB then
-        charDB.routeProgress = prevRGDB
-      end
-      if not okTickerRG then
-        error(errTickerRG, 2)
-      end
-    end)
-    ns.State.overrideMapWorldSizes = savedWorldSizes
-    if not okRG8 then
-      error(errRG8, 2)
-    end
-  end)
-
-  -- Gate 9: Waypoint ownership — user-created tracking is NEVER overwritten or cleared during cleanup
-  check("RG-9. Waypoint Ownership: User-Created Native Waypoint Is Never Overwritten or Deleted", function()
-    local charDB = ns.State.GetCharDB()
-    local savedTT = _G.TomTom
-    local savedWpOv = ns.State.overrideNativeWaypointState
-    local savedCombat = ns.State.overrideInCombat
-    local savedOwner = {
-      ownerContext = ns.UI.Navigation.owner.ownerContext,
-      generation = ns.UI.Navigation.owner.generation,
-      provider = ns.UI.Navigation.owner.provider,
-      handle = ns.UI.Navigation.owner.handle,
-      pendingRelease = ns.UI.Navigation.owner.pendingRelease,
-      pendingDestination = ns.UI.Navigation.owner.pendingDestination,
-    }
-    local savedActiveCtx = ns.UI.Navigation.activeContext
-    local savedHydrated = ns.UI.Navigation.hydratedFromSaved
-    local savedDBNavOwner = charDB.navigationOwner
-
-    local ok, err = pcall(function()
-      _G.TomTom = nil
-      ns.State.overrideInCombat = false
-      ns.UI.Navigation.hydratedFromSaved = true
-      ns.UI.Navigation.owner = {
-        ownerContext = nil,
-        generation = 0,
-        provider = "none",
-        handle = nil,
-        pendingRelease = false,
-        pendingDestination = nil,
-      }
-
-      -- Subcase A: User ALREADY has a custom native pin before starting ForeverHub
-      ns.State.overrideNativeWaypointState = {
-        supported = true,
-        current = { uiMapID = 2548, x01 = 0.3333, y01 = 0.4444 },
-      }
-      local progA = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-      local evalA = RouteProgress.Reconcile(route, progA, makeMockCtx())
-      local stA = ns.UI.Navigation.SyncFromEvaluation(evalA, progA)
-      assertTrue(stA.activeProvider == "text_manual", "Must not overwrite pre-existing user waypoint")
-      assertTrue(
-        math.abs(ns.State.overrideNativeWaypointState.current.x01 - 0.3333) < 1e-6,
-        "Pre-existing user waypoint x01 must remain untouched"
-      )
-
-      -- Subcase B: No pin initially -> ForeverHub sets owned pin -> User replaces pin mid-route -> Pause cleanup MUST NOT delete user's pin!
-      ns.State.overrideNativeWaypointState = { supported = true, current = nil }
-      local progB = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-      local evalB = RouteProgress.Reconcile(route, progB, makeMockCtx())
-      local stB = ns.UI.Navigation.SyncFromEvaluation(evalB, progB)
-      assertTrue(stB.activeProvider == "native_waypoint", "ForeverHub must set native waypoint when none exists")
-      assertTrue(ns.UI.Navigation.owner.provider == "native_waypoint", "ForeverHub must record native_waypoint owner token")
-
-      -- Simulate user Ctrl-clicking map at (0.7777, 0.2222)
-      ns.State.overrideNativeWaypointState.current = { uiMapID = 2548, x01 = 0.7777, y01 = 0.2222 }
-      ns.UI.Navigation.CleanupOwnedWaypoint(progB)
-      assertTrue(
-        ns.State.overrideNativeWaypointState.current ~= nil
-          and math.abs(ns.State.overrideNativeWaypointState.current.x01 - 0.7777) < 1e-6,
-        "CleanupOwnedWaypoint must NEVER delete a user-replaced native waypoint"
-      )
-
-      -- Subcase C: When ForeverHub still owns the pin, cleanup removes it cleanly
-      ns.State.overrideNativeWaypointState = { supported = true, current = nil }
-      local progC = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-      ns.UI.Navigation.SyncFromEvaluation(RouteProgress.Reconcile(route, progC, makeMockCtx()), progC)
-      assertTrue(ns.State.overrideNativeWaypointState.current ~= nil, "Owned pin set")
-      ns.UI.Navigation.CleanupOwnedWaypoint(progC)
-      assertTrue(ns.State.overrideNativeWaypointState.current == nil, "Cleanup must clear waypoint still owned by ForeverHub")
-    end)
-    _G.TomTom = savedTT
-    ns.State.overrideNativeWaypointState = savedWpOv
-    ns.State.overrideInCombat = savedCombat
-    ns.UI.Navigation.owner = savedOwner
-    ns.UI.Navigation.activeContext = savedActiveCtx
-    ns.UI.Navigation.hydratedFromSaved = savedHydrated
-    charDB.navigationOwner = savedDBNavOwner
-    if not ok then
-      error(err, 2)
-    end
-  end)
-
-  -- Gate 10: Mount shortfall calculation, Silk Cloth reservation integration & 14/14 Core Reservation Regression Check
-  check("RG-10. Mount Shortfall Tracker (Honored 90g + Silk Check) & Core Reservation Regression Green", function()
-    local mountReport = RewardValue.EvaluateMountShortfall(
-      { status = "ok", copper = 540000 }, -- 54g
-      { standingLabel = "Honored", trainerQuoteCopper = 900000, cashReserveCopper = 50000, quoteStatus = "user_confirmed" }, -- 90g quote + 5g reserve
-      { charOwned = 120, reservedTotal = 80, freeBags = 20, freeBank = 20 },
-      500000 -- started session at 50g -> +4g net
-    )
-    assertTrue(mountReport.status == "ok", "Mount shortfall evaluation failed")
-    assertTrue(mountReport.spendableCopper == 490000, "Spendable copper must deduct 5g reserve (54g - 5g = 49g)")
-    assertTrue(mountReport.shortfallCopper == 410000, "Shortfall against 90g Honored quote must be 41g (410000c)")
-    assertTrue(mountReport.sessionDeltaCopper == 40000, "Session net delta must be +4g (40000c)")
-    assertTrue(mountReport.silkStatus.reservedTotal == 80 and mountReport.silkStatus.unreservedTotal == 40, "Silk reservation split mismatch")
-
-    local coreReport = SelfTest.RunAll()
-    assertTrue(coreReport.failed == 0 and coreReport.passed == 14, "All 14 core reservation self-tests must remain green")
-  end)
-
-  -- Gate 11: Artifact-Verified Chain Inference, Non-Inference on Estimated Edges & Hybrid Title Discovery
-  check("RG-11. Artifact-Verified Chain Inference, Non-Inference on Estimated Edges & Hybrid Title Discovery", function()
-    local prog = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-
-    -- 1a. Positive `artifact_verified` inference (FDJ.QUEST_PREREQ_CHAINS[94984] & [94981]):
-    -- Having `94984` (Twilight's End) and `94981` (Culling the Cultists) active MUST transitively mark
-    -- `94907` (A Small Favor), `94879` (Scraps of Knowledge), `94881` (Securing the Area), and
-    -- `94980` (Sunnyglade Reinforcement) completed even if server flags omit them, and retire intro steps!
-    local inferredCtx = makeMockCtx({ level = 43, active = { [94984] = true, [94981] = true }, completed = {} })
-    local evalInferred = RoutePlanner.EvaluateRoute(route, prog, inferredCtx)
-    assertTrue(evalInferred.byActionID["rg_a_03_accept_94879"].state == "completed", "94879 accept must be inferred completed from artifact_verified successor 94984")
-    assertTrue(evalInferred.byActionID["rg_a_08_turnin_94881"].state == "completed", "94881 turnin must be inferred completed from artifact_verified successor 94984")
-    assertTrue(evalInferred.byActionID["rg_a_09_accept_94907"].state == "completed", "94907 accept must be inferred completed from artifact_verified successor 94984")
-    assertTrue(evalInferred.byActionID["rg_a_11_obj_conduit_94907"].state == "completed", "94907 objective must be inferred completed from artifact_verified successor 94984")
-    assertTrue(evalInferred.byActionID["rg_a_12_turnin_94907"].state == "completed", "94907 turnin must be inferred completed from artifact_verified successor 94984")
-    assertTrue(evalInferred.byActionID["rg_a_17_opt_key_94981"].state == "completed", "94981 accept must be completed while 94981 is active")
-    local inferred94980 = RoutePlanner.IsQuestCompletedOrInferred(94980, route, inferredCtx)
-    assertTrue(
-      inferred94980.status == "ok"
-        and inferred94980.value == true
-        and inferred94980.inferredFrom == 94981
-        and inferred94980.completionSource == "artifact_verified_successor",
-      "94980 must be inferred completed from artifact_verified successor 94981"
-    )
-    assertTrue(evalInferred.byActionID["rg_a_01_farholde_fp"].state == "completed", "Intro travel FP must auto-retire once route quests are started")
-    assertTrue(evalInferred.byActionID["rg_a_13_powderfuse_hub"].state == "completed", "Powderfuse intro hub check must auto-retire once route quests are started")
-
-    -- 1b. Negative non-inference on `"estimated"` observational chain edges (Astra v0.7.1 P1 #5):
-    -- Having `94928` (A Few Furs for Friz) active with empty server flags MUST NOT infer completion of `94925` (A Fur Trade)!
-    local evalNoUnverifiedInference = RoutePlanner.EvaluateRoute(
-      route,
-      prog,
-      makeMockCtx({ level = 41, active = { [94928] = true }, completed = {} })
-    )
-    assertTrue(
-      evalNoUnverifiedInference.byActionID["rg_hb_accept_94925"].state == "available",
-      "Estimated chain edge 94925 -> 94928 MUST NOT suppress 94925 without direct completion evidence"
-    )
-
-    -- Test live hybrid title->ID discovery & immediate QUEST_TURNED_IN cache before server flag flip
-    local savedCQ = _G.C_QuestLog
-    local savedDiscovered = ForeverHubDB and deepCopyTable(ForeverHubDB.discoveredQuestIds or {}) or nil
-    local savedDiscoveredTitles = ForeverHubDB and deepCopyTable(ForeverHubDB.discoveredQuestTitlesById or {}) or nil
-    local savedTurnInID = deepCopyTable(ns.Compat.recentQuestTurnedInByID or {})
-    local savedTurnInTitle = deepCopyTable(ns.Compat.recentQuestTurnedInByTitle or {})
-    local savedAcceptID = deepCopyTable(ns.Compat.recentQuestAcceptedByID or {})
-    local savedAcceptTitle = deepCopyTable(ns.Compat.recentQuestAcceptedByTitle or {})
-    local savedLastDialog = deepCopyTable(ns.Compat.lastDialogQuest or {})
-    local savedObsLogTitles = deepCopyTable(ns.Compat.observedLogTitlesByID or {})
-    local savedCharRGInGate = charDB and deepCopyTable(charDB.routeProgress) or nil
-    local okHybrid, errHybrid = pcall(function()
-      if ForeverHubDB then
-        ForeverHubDB.discoveredQuestIds = {}
-        ForeverHubDB.discoveredQuestTitlesById = {}
-      end
-      local serverFlagged = false
-      local inLog = true
-      _G.C_QuestLog = {
-        GetNumQuestLogEntries = function()
-          return inLog and 2 or 0, inLog and 1 or 0
-        end,
-        GetInfo = function(idx)
-          if idx == 1 then
-            return { title = "Riverglades", isHeader = true, isCollapsed = false }
-          elseif idx == 2 and inLog then
-            return { title = "WANTED: Trapclaw", questID = 95999, isHeader = false, isComplete = true }
-          end
-          return nil
-        end,
-        IsOnQuest = function(qid)
-          return inLog and qid == 95999
-        end,
-        IsComplete = function(qid)
-          return inLog and qid == 95999
-        end,
-        GetQuestObjectives = function(qid)
-          if qid == 95999 then
-            return { { text = "1/1 Trapclaw's Pincer", finished = true, numFulfilled = 1, numRequired = 1 } }
-          end
-          return {}
-        end,
-        IsQuestFlaggedCompleted = function(qid)
-          return qid == 95999 and serverFlagged
-        end,
-      }
-      ns.Compat.InvalidateQuestStateCaches()
-      local onTrap = ns.Compat.IsOnQuestResult("title:wanted: trapclaw")
-      assertTrue(onTrap.status == "ok" and onTrap.value == true, "Title-keyed quest must resolve from live Quest Log")
-      assertTrue(ns.State.GetDiscoveredQuestId("wanted: trapclaw") == 95999, "Runtime questID must be persisted by normalized title")
-      assertTrue(ns.State.GetDiscoveredQuestTitle(95999) == "wanted: trapclaw", "Reverse questID->title map must be persisted")
-
-      local objTrap = ns.Compat.GetQuestObjectivesResult("title:wanted: trapclaw")
-      assertTrue(objTrap.status == "ok" and objTrap.allFinished == true, "Title-keyed objectives must resolve via discovered ID")
-
-      -- Turn in quest while `serverFlagged` is still false (simulating server flag lag on QUEST_TURNED_IN)
-      inLog = false
-      ns.Compat.RecordRecentQuestTurnedIn(95999, "WANTED: Trapclaw")
-      local compImmediate = ns.Compat.IsQuestCompletedResult("title:wanted: trapclaw")
-      assertTrue(compImmediate.status == "ok" and compImmediate.value == true, "QUEST_TURNED_IN cache must mark quest completed immediately")
-    end)
-    _G.C_QuestLog = savedCQ
-    ns.Compat.recentQuestTurnedInByID = savedTurnInID
-    ns.Compat.recentQuestTurnedInByTitle = savedTurnInTitle
-    ns.Compat.recentQuestAcceptedByID = savedAcceptID
-    ns.Compat.recentQuestAcceptedByTitle = savedAcceptTitle
-    ns.Compat.lastDialogQuest = savedLastDialog
-    ns.Compat.observedLogTitlesByID = savedObsLogTitles
-    if charDB and savedCharRGInGate ~= nil then
-      charDB.routeProgress = savedCharRGInGate
-    end
-    if ForeverHubDB then
-      ForeverHubDB.discoveredQuestIds = savedDiscovered or {}
-      ForeverHubDB.discoveredQuestTitlesById = savedDiscoveredTitles or {}
-    end
-    ns.Compat.InvalidateQuestStateCaches()
-    if not okHybrid then
-      error(errHybrid, 2)
-    end
-  end)
-
-  -- Gate 12: Full 40/40 Quest-Log Replay (All 22 Screenshot Quests @ Powderfuse Port 78.9, 53.0)
-  check("RG-12. Full 40/40 22-Quest Powderfuse Replay, Zero-Click Auto-Advance & Elite Bounty Safety", function()
-    local savedWorldSizes = ns.State.overrideMapWorldSizes
-    local okReplay, errReplay = pcall(function()
-      ns.State.overrideMapWorldSizes = { [2548] = { width = 3600, height = 2400 }, [1444] = { width = 6950, height = 4633 } }
-      local prog = ns.State.MigrateRouteProgress({ mode = "standalone", includeEliteBounties = false }, route)
-      local active22 = {
-        [95943] = true, -- Foreman's Plight
-        [96063] = true, -- Gaseous Gold
-        [95988] = true, -- Goes Down Smooth
-        [95613] = true, -- Keeping the Light On (follows 95603)
-        [95982] = true, -- Not My Circus
-        [94931] = true, -- Stolen Saws
-        [95184] = true, -- The Sharpest of Blades (follows 95156)
-        [94842] = true, -- Unsavory Plant Food
-        [94925] = true, -- A Fur Trade (8 Prized Lion Hides -> Watcher Cornelius)
-        [94928] = true, -- A Few Furs for Friz (zero-objective delivery -> Friz Frazzlespark)
-        [94924] = true, -- Hunting the Hunters
-        [95121] = true, -- A Taste of the Sea
-        [96081] = true, -- Wound Dressings (13/20 Mageweave Cloth)
-        [95219] = true, -- From Port to Port (Feralas delivery)
-        [95118] = true, -- Saltwater Savages
-        [95912] = true, -- [42+] WANTED: Blademaster Kaijo
-        [95991] = true, -- [42+] WANTED: Ghostmaw
-        [95120] = true, -- [42+] WANTED: Old Rot-Chum
-        ["title:wanted: trapclaw"] = true,
-        [95119] = true, -- Unfriendly Competition
-        [94907] = true, -- A Small Favor (follows artifact_verified 94879 + 94881)
-        [94886] = true, -- The Western Front (zero-objective find Riftan)
-        [94887] = true, -- Saving Marshal Ryan (follows 94885)
-      }
-      -- Numeric server completion flags for prior non-artifact-verified chains (94879 & 94881 intentionally
-      -- omitted so RG-12 also verifies artifact_verified successor inference from active 94907!)
-      local completedPrior = {
-        [95603] = true,
-        [95156] = true,
-        [94885] = true,
-      }
-      local objectives22 = {}
-      local playerAtPowderfuse = { status = "ok", uiMapID = 2548, x01 = 0.7890, y01 = 0.5300 }
-
-      local eval1 = RouteProgress.Reconcile(
-        route,
-        prog,
-        makeMockCtx({ level = 41, active = active22, completed = completedPrior, objectives = objectives22, questLogFull = true }),
-        playerAtPowderfuse
-      )
-
-      -- 1. Zero completed prerequisites or intro waypoints are ever suggested
-      for _, doneID in ipairs({
-        "rg_a_01_farholde_fp",
-        "rg_a_02_farholde_inn",
-        "rg_a_03_accept_94879",
-        "rg_a_08_turnin_94881",
-        "rg_fk_turnin_95603",
-        "rg_fk_turnin_95156",
-      }) do
-        assertTrue(eval1.byActionID[doneID].state == "completed", "Completed/inferred step must never be recommended: " .. doneID)
-      end
-
-      -- 2. Unaccepted quests are blocked by 40/40 log, NOT stalling active progression; local Powderfuse delivery 94928 wins!
-      assertTrue(eval1.byActionID["rg_hb_accept_94614"].state == "blocked_quest_log_full", "Unaccepted quest must be blocked_quest_log_full at 40/40")
-      assertTrue(eval1.nextAction ~= nil and eval1.nextAction.actionID == "rg_pf_turnin_94928", "At Powderfuse (78.9, 53.0), ready zero-objective A Few Furs for Friz (94928) turn-in must be chosen first")
-      active22[94928] = false
-      completedPrior[94928] = true
-      eval1 = RouteProgress.Reconcile(
-        route,
-        prog,
-        makeMockCtx({ level = 41, active = active22, completed = completedPrior, objectives = objectives22, questLogFull = true }),
-        playerAtPowderfuse
-      )
-      assertTrue(eval1.nextAction ~= nil and eval1.nextAction.actionID == "rg_pf_obj_wanted_trapclaw", "After turning in 94928 at Powderfuse, local Trapclaw objective must be chosen next")
-
-      -- 3. [42+] Elite bounty objectives are hidden by default, EXCEPT if completed they immediately surface to turn in!
-      assertTrue(eval1.byActionID["rg_el_obj_95991"].state == "ineligible", "[42+] Ghostmaw objective must default off for solo safety")
-      objectives22[95991] = true
-      local evalEliteReady = RouteProgress.Reconcile(
-        route,
-        prog,
-        makeMockCtx({ level = 41, active = active22, completed = completedPrior, objectives = objectives22, questLogFull = true }),
-        playerAtPowderfuse
-      )
-      assertTrue(evalEliteReady.byActionID["rg_el_turnin_95991"].state == "available", "Completed [42+] Elite bounty in log must still guide turn-in")
-      objectives22[95991] = false
-
-      -- 4. Zero-click auto-advance: complete Trapclaw -> auto-advances to Powderfuse turn-in -> turn in -> auto-advances to Goes Down Smooth!
-      objectives22["title:wanted: trapclaw"] = true
-      local eval2 = RouteProgress.Reconcile(
-        route,
-        prog,
-        makeMockCtx({ level = 41, active = active22, completed = completedPrior, objectives = objectives22, questLogFull = true }),
-        playerAtPowderfuse
-      )
-      assertTrue(eval2.nextAction.actionID == "rg_pf_turnin_wanted_trapclaw", "Completing Trapclaw must auto-advance immediately to local turn-in")
-
-      active22["title:wanted: trapclaw"] = false
-      completedPrior["title:wanted: trapclaw"] = true
-      local eval3 = RouteProgress.Reconcile(
-        route,
-        prog,
-        makeMockCtx({
-          level = 41,
-          active = active22,
-          completed = completedPrior,
-          objectives = objectives22,
-          questLogFull = false,
-        }),
-        playerAtPowderfuse
-      )
-      assertTrue(eval3.nextAction.actionID == "rg_pf_accept_95261", "Freeing a slot after Trapclaw at Powderfuse must immediately offer local dock pickup It Takes Guts (95261)")
-      completedPrior[95261] = true
-      completedPrior[95267] = true
-      completedPrior[95288] = true
-      completedPrior[95293] = true
-      completedPrior[95294] = true
-      local eval3b = RouteProgress.Reconcile(
-        route,
-        prog,
-        makeMockCtx({
-          level = 41,
-          active = active22,
-          completed = completedPrior,
-          objectives = objectives22,
-          questLogFull = false,
-        }),
-        playerAtPowderfuse
-      )
-      assertTrue(eval3b.nextAction.actionID == "rg_pf_obj_goes_down_smooth", "With Powderfuse pickups complete, turning in Trapclaw must auto-advance to Goes Down Smooth without clicking Skip")
-
-      -- 5. Zero-objective delivery `From Port to Port` (95219) is available & immediately prioritized if player arrives in Feralas (1444)
-      assertTrue(eval3.byActionID["rg_exit_turnin_95219"].state == "available", "Zero-objective delivery 95219 must be available while active")
-      local evalInFeralas = RouteProgress.Reconcile(
-        route,
-        prog,
-        makeMockCtx({ level = 41, active = active22, completed = completedPrior, objectives = objectives22 }),
-        { status = "ok", uiMapID = 1444, x01 = 0.3100, y01 = 0.4320 }
-      )
-      assertTrue(evalInFeralas.nextAction.actionID == "rg_exit_turnin_95219", "Entering Feralas must immediately prioritize From Port to Port turn-in")
-    end)
-    ns.State.overrideMapWorldSizes = savedWorldSizes
-    if not okReplay then
-      error(errReplay, 2)
-    end
-  end)
-
-  -- RG-13. World Map Quest Pins: Non-Vacuous Completion Removal, Sub-Objectives, Zoom Clustering & Click-to-Focus
-  check("RG-13. World Map Quest Pins: State Filtering, Sub-Objectives, Zoom Clustering & Click-to-Focus", function()
-    local WorldMapPins = ns.UI and ns.UI.WorldMapPins
-    assertTrue(type(WorldMapPins) == "table", "ns.UI.WorldMapPins must be loaded")
-    assertTrue(route.questsByID and route.questsByID[95613] ~= nil, "Compiled route must include 95613 (Keeping the Light On)")
-
-    local prog = ns.State.MigrateRouteProgress({ mode = "paused", includeEliteBounties = false })
-    local pinSettings = { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true }
-    local playerPos = { status = "ok", uiMapID = 2548, x01 = 0.4560, y01 = 0.6200 }
-
-    -- Non-vacuous check (Astra v0.7.1 P2 #4): prove 95613 appears on Map 2548 BEFORE completion!
-    local entriesPre95613 = WorldMapPins.CollectPinEntries(
-      2548,
-      route,
-      prog,
-      pinSettings,
-      makeMockCtx({ level = 41, completed = { [95603] = true } }),
-      playerPos
-    )
-    local saw95613Before = false
-    for _, e in ipairs(entriesPre95613) do
-      if e.questID == 95613 then
-        saw95613Before = true
-        break
-      end
-    end
-    assertTrue(saw95613Before, "95613 (Keeping the Light On) must emit an Available (!) pin before completion")
-
-    local unsavoryObjectivesAllOpen = {
-      [94842] = {
-        status = "ok",
-        allFinished = false,
-        summaryText = "0/4 Jumbo Crawfish Shell; 0/4 Fresh Manure; 0/8 Mudfin Murloc Head",
-        objectives = {
-          { index = 1, text = "0/4 Jumbo Crawfish Shell", finished = false },
-          { index = 2, text = "0/4 Fresh Manure", finished = false },
-          { index = 3, text = "0/8 Mudfin Murloc Head", finished = false },
-        },
-      },
-      ["title:wanted: trapclaw"] = {
-        status = "ok",
-        allFinished = true,
-        summaryText = "1/1 Trapclaw's Pincer",
-        objectives = { { index = 1, text = "1/1 Trapclaw's Pincer", finished = true } },
-      },
-    }
-
-    local ctx1 = makeMockCtx({
-      level = 41,
-      active = {
-        [94842] = true,
-        [94907] = true, -- A Small Favor active -> artifact_verified inference suppresses 94879 & 94881!
-        [95219] = true,
-        ["title:wanted: trapclaw"] = true,
-      },
-      completed = {
-        [95603] = true,
-        [95613] = true, -- Keeping the Light On explicitly completed!
-      },
-      objectives = unsavoryObjectivesAllOpen,
-    })
-
-    local entries1, raw1 = WorldMapPins.CollectPinEntries(2548, route, prog, pinSettings, ctx1, playerPos)
-    assertTrue(#entries1 > 0 and raw1.objectives >= 3 and raw1.turnins >= 1, "CollectPinEntries must emit active objectives, turn-ins, and available quests")
-
-    local unsavorySubs1 = {}
-    for _, e in ipairs(entries1) do
-      assertTrue(e.questID ~= 95613, "Completed quest 95613 (Keeping the Light On) must NEVER appear on World Map")
-      assertTrue(e.questID ~= 94879 and e.questID ~= 94881, "Artifact-verified inferred-completed prerequisites 94879/94881 must NEVER appear on World Map")
-      assertTrue(not e.isElite, "Disabled elite bounties must be hidden on World Map when includeEliteBounties=false")
-      if e.actionID == "rg_hb_obj_94842" then
-        unsavorySubs1[tostring(e.subID)] = e
-      end
-    end
-    assertTrue(
-      unsavorySubs1["jumbo_crawfish_shell"] ~= nil
-        and unsavorySubs1["fresh_manure"] ~= nil
-        and unsavorySubs1["mudfin_murloc_head"] ~= nil,
-      "Unsavory Plant Food must emit 3 distinct sub-objective pins while all 3 ingredients are incomplete"
-    )
-
-    -- Completing 8/8 Mudfin Murloc Head must immediately hide ONLY that sub-objective pin and step active target!
-    local unsavoryObjectivesAfterMurlocs = {
-      [94842] = {
-        status = "ok",
-        allFinished = false,
-        summaryText = "0/4 Jumbo Crawfish Shell; 0/4 Fresh Manure; 8/8 Mudfin Murloc Head",
-        objectives = {
-          { index = 1, text = "0/4 Jumbo Crawfish Shell", finished = false },
-          { index = 2, text = "0/4 Fresh Manure", finished = false },
-          { index = 3, text = "8/8 Mudfin Murloc Head", finished = true },
-        },
-      },
-      ["title:wanted: trapclaw"] = unsavoryObjectivesAllOpen["title:wanted: trapclaw"],
-    }
-    local ctx2 = makeMockCtx({
-      level = 41,
-      active = { [94842] = true, [94907] = true, [95219] = true, ["title:wanted: trapclaw"] = true },
-      completed = { [95603] = true, [95613] = true },
-      objectives = unsavoryObjectivesAfterMurlocs,
-    })
-
-    local entries2 = WorldMapPins.CollectPinEntries(2548, route, prog, pinSettings, ctx2, playerPos)
-    local unsavorySubs2 = {}
-    local countUnsavory2 = 0
-    for _, e in ipairs(entries2) do
-      if e.actionID == "rg_hb_obj_94842" then
-        countUnsavory2 = countUnsavory2 + 1
-        unsavorySubs2[tostring(e.subID)] = e
-      end
-    end
-    assertTrue(
-      countUnsavory2 == 2 and unsavorySubs2["mudfin_murloc_head"] == nil,
-      "Finishing 8/8 Mudfin Murloc Head must auto-hide mudfin_murloc_head pin while preserving remaining 2 ingredient pins"
-    )
-
-    local unsavoryAct = nil
-    for _, a in ipairs(route.actions) do
-      if a.actionID == "rg_hb_obj_94842" then
-        unsavoryAct = a
-        break
-      end
-    end
-    local steppedDest, _, steppedSub = RoutePlanner.ResolveActiveActionTarget(
-      unsavoryAct,
-      prog,
-      ctx2,
-      { status = "ok", uiMapID = 2548, x01 = 0.4420, y01 = 0.5600 }
-    )
-    assertTrue(
-      steppedDest and steppedSub and steppedSub.subID ~= "mudfin_murloc_head",
-      "ResolveActiveActionTarget must step Arrow away from finished mudfin_murloc_head to nearest unfinished ingredient"
-    )
-
-    -- Zoom-adaptive clustering: zoomed out (1.0x) merges nearby Powderfuse Port pins; zoomed in (4.0x) separates them!
-    local clusters1x = WorldMapPins.BuildClusters(entries2, 1002, 668, 1.0, 22)
-    local clusters4x = WorldMapPins.BuildClusters(entries2, 1002, 668, 4.0, 22)
-    assertTrue(#clusters1x < #entries2, "Zoomed-out map (1.0x) must merge closely-spaced hub pins into compact clusters")
-    assertTrue(#clusters4x > #clusters1x, "Zooming in (4.0x) must smoothly split hub clusters into individual NPC/spot pins")
-
-    local foundTurnInAnchoredCluster = false
-    for _, cl in ipairs(clusters1x) do
-      if cl.hasTurnIn and cl.hasAvailable then
-        assertTrue(cl.primary.kind == "turnin", "Mixed turn-in + available cluster must anchor badge on highest-priority turn-in")
-        foundTurnInAnchoredCluster = true
-      end
-    end
-    assertTrue(foundTurnInAnchoredCluster, "Powderfuse Port cluster must combine ready Trapclaw turn-in with available port quests at 1.0x")
-
-    -- Cross-zone delivery pin on Feralas (1444)
-    local entriesFeralas = WorldMapPins.CollectPinEntries(1444, route, prog, pinSettings, ctx2, playerPos)
-    local foundPortToPort = false
-    for _, e in ipairs(entriesFeralas) do
-      if e.actionID == "rg_exit_turnin_95219" and e.kind == "turnin" then
-        foundPortToPort = true
-      end
-    end
-    assertTrue(foundPortToPort, "Active From Port to Port (95219) must appear as a turn-in pin on Feralas (1444)")
-
-    -- Left-click focus (`FocusActionFromMapPin`) & Right-click unpin (`ClearPinnedFocus`)
-    local okFocus, evalFocus = RouteProgress.FocusActionFromMapPin("rg_hb_obj_94842", "fresh_manure", route, prog, ctx2, playerPos)
-    assertTrue(okFocus and prog.mode == "standalone", "Clicking a map pin while paused must activate standalone navigation")
-    assertTrue(
-      prog.pinnedActionID == "rg_hb_obj_94842"
-        and prog.pinnedSubLocationID == "fresh_manure"
-        and evalFocus.nextAction.actionID == "rg_hb_obj_94842",
-      "FocusActionFromMapPin must pin both actionID and subLocationID"
-    )
-    local pinnedDest = RoutePlanner.ResolveActiveActionTarget(evalFocus.nextAction, prog, ctx2, playerPos)
-    assertTrue(
-      math.abs(pinnedDest.x01 - 0.4500) < 0.0005 and math.abs(pinnedDest.y01 - 0.7900) < 0.0005,
-      "Pinned subLocationID must steer active target directly to Meadowsbrook Ranch Pasture (0.450, 0.790)"
-    )
-
-    local okClear = RouteProgress.ClearPinnedFocus(route, prog, ctx2, playerPos)
-    assertTrue(okClear and prog.pinnedActionID == nil and prog.pinnedSubLocationID == nil, "ClearPinnedFocus must clear both pinnedActionID and pinnedSubLocationID")
-  end)
-
-  -- RG-14. v0.7.1 Quest-Evidence Correctness, Leaderboard Fallback, Collapsed Headers, Turn-In Provenance, Hysteresis & RXP Export
-  check("RG-14. v0.7.1 Quest-Evidence, Classic Leaderboard Fallback, Collapsed Headers, Hysteresis & RXP Export", function()
-    local savedCQ = _G.C_QuestLog
-    local savedGetNumEntries = _G.GetNumQuestLogEntries
-    local savedGetLogTitle = _G.GetQuestLogTitle
-    local savedGetNumLB = _G.GetNumQuestLeaderBoards
-    local savedGetLB = _G.GetQuestLogLeaderBoard
-    local savedIsSecret = _G.issecretvalue
-    local savedRXP = _G.RXPGuides
-    local savedMap = _G.C_Map
-    local savedWorldSizes = ns.State.overrideMapWorldSizes
-    local savedLvl = ns.State.overridePlayerLevel
-    local savedFac = ns.State.overridePlayerFaction
-    local savedTurnInID = deepCopyTable(ns.Compat.recentQuestTurnedInByID or {})
-    local savedTurnInTitle = deepCopyTable(ns.Compat.recentQuestTurnedInByTitle or {})
-    local savedAcceptID = deepCopyTable(ns.Compat.recentQuestAcceptedByID or {})
-    local savedAcceptTitle = deepCopyTable(ns.Compat.recentQuestAcceptedByTitle or {})
-    local savedLastDialog = deepCopyTable(ns.Compat.lastDialogQuest or {})
-    local savedObsLog = deepCopyTable(ns.Compat.observedLogTitlesByID or {})
-    local savedDiscovered = _G.ForeverHubDB and deepCopyTable(_G.ForeverHubDB.discoveredQuestIds or {}) or nil
-    local savedDiscoveredTitles = _G.ForeverHubDB and deepCopyTable(_G.ForeverHubDB.discoveredQuestTitlesById or {}) or nil
-    local savedCharRG = charDB and deepCopyTable(charDB.routeProgress) or nil
-
-    local okGate14, errGate14 = pcall(function()
-      ns.State.overridePlayerLevel = 42
-      ns.State.overridePlayerFaction = "Alliance"
-      ns.State.overrideMapWorldSizes = { [2548] = { width = 3600, height = 2400 } }
-      if _G.ForeverHubDB then
-        _G.ForeverHubDB.discoveredQuestIds = {}
-        _G.ForeverHubDB.discoveredQuestTitlesById = {}
-      end
-      if charDB then
-        charDB.routeProgress = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-      end
-      local prog = ns.State.GetRouteProgress()
-
-      -- 1. P1 #1: Pre-install undiscovered title-only quest MUST return `unknown / title_history_unresolved`
-      -- and enter `blocked_unresolved_history` (excluded from auto-routing & automatic `!` map pins until confirmed)
-      _G.GetNumQuestLogEntries = function() return 0, 0 end
-      _G.GetQuestLogTitle = function() return nil end
-      _G.C_QuestLog = {
-        GetNumQuestLogEntries = function() return 0, 0 end,
-        IsQuestFlaggedCompleted = function() return false end,
-        IsOnQuest = function() return false end,
-        GetMaxNumQuestsCanAccept = function() return 40 end,
-      }
-      ns.Compat.InvalidateQuestStateCaches()
-
-      local unresRes = ns.Compat.IsQuestCompletedResult("title:wanted: trapclaw")
-      assertTrue(
-        unresRes.status == "unknown" and unresRes.value == nil and unresRes.reason == "title_history_unresolved",
-        "Undiscovered pre-install title quest must NEVER return ok,false"
-      )
-      local evUnres = ns.Compat.GetQuestEvidenceResult("title:wanted: trapclaw")
-      assertTrue(
-        type(evUnres) == "table" and evUnres.identityConfidence == "title_only_unresolved",
-        "GetQuestEvidenceResult must report title_only_unresolved identityConfidence"
-      )
-
-      local evalBlocked = RoutePlanner.EvaluateRoute(route, prog)
-      assertTrue(
-        evalBlocked.byActionID["rg_pf_accept_wanted_trapclaw"].state == "blocked_unresolved_history",
-        "Unconfirmed pre-install title pickup must be blocked_unresolved_history"
-      )
-      local pinsBlocked = ns.UI.WorldMapPins.CollectPinEntries(2548, route, prog)
-      for _, pe in ipairs(pinsBlocked) do
-        assertTrue(pe.actionID ~= "rg_pf_accept_wanted_trapclaw", "Unconfirmed title pickup must NOT show automatic ! pin")
-      end
-
-      -- Explicit user confirmation (`/fh rg confirm trapclaw`) unlocks pickup & `!` map pin
-      ns.State.ConfirmUnresolvedQuestIncomplete("title:wanted: trapclaw", prog)
-      local evalConfirmed = RoutePlanner.EvaluateRoute(route, prog)
-      assertTrue(
-        evalConfirmed.byActionID["rg_pf_accept_wanted_trapclaw"].state == "available"
-          and evalConfirmed.byActionID["rg_pf_accept_wanted_trapclaw"].reason == "user_confirmed_incomplete",
-        "Confirming unresolved title quest incomplete must unlock pickup"
-      )
-      local pinsConfirmed = ns.UI.WorldMapPins.CollectPinEntries(2548, route, prog)
-      local sawConfirmedTrapPin = false
-      for _, pe in ipairs(pinsConfirmed) do
-        if pe.actionID == "rg_pf_accept_wanted_trapclaw" then
-          sawConfirmedTrapPin = true
-          break
-        end
-      end
-      assertTrue(sawConfirmedTrapPin, "Confirmed incomplete title quest must emit ! map pin")
-
-      -- 2. P1 #2: Numeric catalog ID (94842) + live Quest Log row with `questID = 0` + modern GetQuestObjectives
-      -- returning nil/error -> falls back to Classic leaderboards via verified fresh logIndex, while preserving `restricted`!
-      local modernMode = "nil"
-      local secretSentinel = { __secret = true }
-      _G.issecretvalue = function(v) return v == secretSentinel end
-      _G.GetNumQuestLogEntries = function() return 2, 1 end
-      _G.GetQuestLogTitle = function(idx)
-        if idx == 1 then
-          return "Riverglades", 0, nil, true, false, nil, nil, 0
-        elseif idx == 2 then
-          return "Unsavory Plant Food", 38, nil, false, false, false, nil, 0 -- live questID == 0!
-        end
-        return nil
-      end
-      _G.GetNumQuestLeaderBoards = function(idx)
-        return idx == 2 and 3 or 0
-      end
-      _G.GetQuestLogLeaderBoard = function(objIdx, qIdx)
-        if qIdx ~= 2 then return nil end
-        if objIdx == 1 then return "4/4 Jumbo Crawfish Shell", "item", true end
-        if objIdx == 2 then return "1/4 Fresh Manure", "item", false end
-        if objIdx == 3 then return "8/8 Mudfin Murloc Head", "item", true end
-        return nil
-      end
-      _G.C_QuestLog = {
-        GetNumQuestLogEntries = function() return 2, 1 end,
-        IsQuestFlaggedCompleted = function(qid) return qid == 94841 end,
-        IsOnQuest = function(qid) return qid == 94842 end,
-        GetQuestObjectives = function(qid)
-          if qid == 94842 then
-            if modernMode == "error" then error("modern_objectives_error") end
-            if modernMode == "restricted" then return secretSentinel end
-          end
-          return nil
-        end,
-        GetMaxNumQuestsCanAccept = function() return 40 end,
-      }
-      ns.Compat.InvalidateQuestStateCaches()
-
-      local objFallbackNil = ns.Compat.GetQuestObjectivesResult(94842)
-      assertTrue(
-        objFallbackNil.status == "ok"
-          and objFallbackNil.provider == "classic_leaderboards"
-          and objFallbackNil.allFinished == false,
-        "Catalog numeric ID with live questID=0 and nil modern objectives must fall back to Classic leaderboards"
-      )
-      modernMode = "error"
-      local objFallbackErr = ns.Compat.GetQuestObjectivesResult(94842)
-      assertTrue(
-        objFallbackErr.status == "ok" and objFallbackErr.provider == "classic_leaderboards",
-        "Modern GetQuestObjectives error must also fall back to Classic leaderboards"
-      )
-      local unsavoryAct = nil
-      for _, a in ipairs(route.actions) do
-        if a.actionID == "rg_hb_obj_94842" then unsavoryAct = a; break end
-      end
-      local remSubs = RoutePlanner.ResolveActiveSubLocations(unsavoryAct)
-      assertTrue(
-        #remSubs == 1 and remSubs[1].subID == "fresh_manure",
-        "Classic leaderboard fallback must retire finished Crawfish & Murloc sub-pins, leaving only Fresh Manure"
-      )
-
-      modernMode = "restricted"
-      local objRestricted = ns.Compat.GetQuestObjectivesResult(94842)
-      assertTrue(
-        objRestricted.status == "restricted",
-        "Restricted modern objective result MUST NOT be bypassed by Classic fallback"
-      )
-
-      -- 3. P1 #3: Collapsed Quest Log header MUST produce `unknown / collapsed_quest_headers` (never false `ok, false`)
-      _G.GetNumQuestLogEntries = function() return 1, 3 end
-      _G.GetQuestLogTitle = function(idx)
-        if idx == 1 then
-          return "Riverglades", 0, nil, true, true, nil, nil, 0 -- isHeader=true, isCollapsed=true!
-        end
-        return nil
-      end
-      _G.C_QuestLog = {
-        GetNumQuestLogEntries = function() return 1, 3 end,
-        IsQuestFlaggedCompleted = function() return false end,
-        GetMaxNumQuestsCanAccept = function() return 40 end,
-      }
-      ns.Compat.InvalidateQuestStateCaches()
-
-      local onCollapsed = ns.Compat.IsOnQuestResult("title:wanted: trapclaw")
-      assertTrue(
-        onCollapsed.status == "unknown" and onCollapsed.reason == "collapsed_quest_headers",
-        "Collapsed Quest Log headers must return unknown/collapsed_quest_headers, never ok,false"
-      )
-      local evalCollapsed = RoutePlanner.EvaluateRoute(route, prog)
-      assertTrue(
-        evalCollapsed.byActionID["rg_pf_accept_wanted_trapclaw"].state == "blocked_unverified"
-          and evalCollapsed.byActionID["rg_pf_accept_wanted_trapclaw"].reason == "collapsed_quest_headers",
-        "Collapsed headers must block uncertain title pickup rather than falsely treating quest as inactive"
-      )
-
-      -- 4. P2 #1: QUEST_TURNED_IN without dialogue/cache reverse-resolves persisted ID & rejects conflicting dialogue
-      ns.State.RecordDiscoveredQuestId("wanted: trapclaw", 95999)
-      ns.Compat.lastDialogQuest = { questID = 94879, title = "Scraps of Knowledge", at = 999999999 }
-      _G.GetNumQuestLogEntries = function() return 0, 0 end
-      _G.GetQuestLogTitle = function() return nil end
-      ns.Compat.InvalidateQuestStateCaches()
-      ns.Compat.RecordRecentQuestTurnedIn(95999, nil)
-
-      assertTrue(
-        not ns.State.IsObservedCompletedQuestTitle("scraps of knowledge"),
-        "Conflicting lastDialogQuest title must be rejected on QUEST_TURNED_IN"
-      )
-      assertTrue(
-        ns.State.IsObservedCompletedQuestTitle("wanted: trapclaw") and ns.State.IsObservedCompletedQuestId(95999),
-        "Persisted reverse ID->title map must record both title and numeric ID completion on QUEST_TURNED_IN"
-      )
-      ns.Compat.recentQuestTurnedInByID = {}
-      ns.Compat.recentQuestTurnedInByTitle = {}
-      local persistedComp = ns.Compat.IsQuestCompletedResult("title:wanted: trapclaw")
-      assertTrue(
-        persistedComp.status == "ok" and persistedComp.value == true,
-        "Persisted turn-in completion must survive after transient TTL cache expires"
-      )
-
-      -- 5. P2 #3: Sustained sub-target hysteresis (`65 yd`) & proximity-tier hysteresis
-      local hProg = ns.State.MigrateRouteProgress({
-        mode = "standalone",
-        currentActionID = "rg_hb_obj_94842",
-        currentSubLocationID = "jumbo_crawfish_shell",
-      }, route)
-      local hCtx = makeMockCtx({
-        level = 41,
-        active = { [94842] = true },
-        objectives = {
-          [94842] = {
-            status = "ok",
-            allFinished = false,
-            objectives = {
-              { index = 1, text = "0/4 Jumbo Crawfish Shell", finished = false },
-              { index = 2, text = "0/4 Fresh Manure", finished = false },
-              { index = 3, text = "8/8 Mudfin Murloc Head", finished = true },
-            },
-          },
-        },
-      })
-      -- Midpoint slightly closer (~35.5 yds) to fresh_manure (0.450, 0.790) than jumbo_crawfish_shell (0.564, 0.458):
-      -- sustained 65 yd hysteresis MUST retain jumbo_crawfish_shell!
-      local _, _, retainedSub = RoutePlanner.ResolveActiveActionTarget(
-        unsavoryAct,
-        hProg,
-        hCtx,
-        { status = "ok", uiMapID = 2548, x01 = 0.5040, y01 = 0.6300 }
-      )
-      assertTrue(
-        retainedSub and retainedSub.subID == "jumbo_crawfish_shell",
-        "Sustained sub-location hysteresis must prevent oscillation near midpoint (<65 yd delta)"
-      )
-      -- Standing right at Meadowsbrook Ranch (0.450, 0.790, >200 yds closer): switches cleanly to fresh_manure!
-      local _, _, switchedSub = RoutePlanner.ResolveActiveActionTarget(
-        unsavoryAct,
-        hProg,
-        hCtx,
-        { status = "ok", uiMapID = 2548, x01 = 0.4500, y01 = 0.7900 }
-      )
-      assertTrue(
-        switchedSub and switchedSub.subID == "fresh_manure",
-        "Moving >65 yds closer to another unfinished sub-location must switch cleanly"
-      )
-
-      -- 6. P2 #2 & P1 #4: RXP-mode map-pin click honesty, ProjectCoordinates NaN guard & RXP `.complete` / `+` export
-      _G.RXPGuides = {
-        RegisterGuide = function() return true end,
-        currentGuide = {
-          group = ns.Bridges.RXPBridge.RIVERGLADES_GUIDE_GROUP,
-          name = ns.Bridges.RXPBridge.RIVERGLADES_GUIDE_NAME,
-        },
-      }
-      local okRxpPin, evalRxpPin = RouteProgress.FocusActionFromMapPin(
-        "rg_hb_obj_94842",
-        "fresh_manure",
-        route,
-        hProg,
-        hCtx,
-        { status = "ok", uiMapID = 2548, x01 = 0.4500, y01 = 0.7900 }
-      )
-      assertTrue(
-        okRxpPin and hProg.mode == "rxp" and evalRxpPin.mode == "rxp",
-        "Clicking a World Map pin while exported RXP guide is selected must preserve mode='rxp'"
-      )
-
-      _G.C_Map = {
-        GetMapRectOnMap = function()
-          return 0.1, 0.5, 0.0 / 0.0, 0.8 -- NaN minY!
-        end,
-      }
-      local badProjX, badProjY = ns.UI.WorldMapPins.ProjectCoordinates(2548, 1415, 0.5, 0.5)
-      assertTrue(badProjX == nil and badProjY == nil, "ProjectCoordinates must reject NaN/non-finite map rectangle bounds")
-
-      if _G.ForeverHubDB then
-        _G.ForeverHubDB.discoveredQuestIds = {}
-        _G.ForeverHubDB.discoveredQuestTitlesById = {}
-      end
-      local rxpGuideText, rxpErr = ns.Bridges.RXPBridge.BuildRivergladesGuideText(route)
-      assertTrue(type(rxpGuideText) == "string" and rxpErr == nil, "BuildRivergladesGuideText must succeed")
-      assertTrue(string.find(rxpGuideText, "STATIC LINEAR SNAPSHOT", 1, true) ~= nil, "RXP export must label static linear snapshot")
-      assertTrue(string.find(rxpGuideText, ".complete 94842,1", 1, true) ~= nil, "RXP export must emit per-subLocation .complete 94842,1")
-      assertTrue(string.find(rxpGuideText, ".complete 94842,3", 1, true) ~= nil, "RXP export must emit per-subLocation .complete 94842,3")
-      assertTrue(string.find(rxpGuideText, ".complete -95991,1", 1, true) ~= nil, "RXP export must emit negative skipIfMissing .complete for optional [42+] elites")
-      assertTrue(string.find(rxpGuideText, "\n    +Accept WANTED: Trapclaw (manual checkbox", 1, true) ~= nil, "Undiscovered title quest in RXP export must emit clickable + manual checkbox")
-      assertTrue(string.find(rxpGuideText, "[Est. Coords]", 1, true) == nil, "RXP export must have zero [Est. Coords] when 100% of active steps are artifact_verified")
-    end)
-
-    _G.C_QuestLog = savedCQ
-    _G.GetNumQuestLogEntries = savedGetNumEntries
-    _G.GetQuestLogTitle = savedGetLogTitle
-    _G.GetNumQuestLeaderBoards = savedGetNumLB
-    _G.GetQuestLogLeaderBoard = savedGetLB
-    _G.issecretvalue = savedIsSecret
-    _G.RXPGuides = savedRXP
-    _G.C_Map = savedMap
-    ns.State.overrideMapWorldSizes = savedWorldSizes
-    ns.State.overridePlayerLevel = savedLvl
-    ns.State.overridePlayerFaction = savedFac
-    ns.Compat.recentQuestTurnedInByID = savedTurnInID
-    ns.Compat.recentQuestTurnedInByTitle = savedTurnInTitle
-    ns.Compat.recentQuestAcceptedByID = savedAcceptID
-    ns.Compat.recentQuestAcceptedByTitle = savedAcceptTitle
-    ns.Compat.lastDialogQuest = savedLastDialog
-    ns.Compat.observedLogTitlesByID = savedObsLog
-    if _G.ForeverHubDB then
-      _G.ForeverHubDB.discoveredQuestIds = savedDiscovered or {}
-      _G.ForeverHubDB.discoveredQuestTitlesById = savedDiscoveredTitles or {}
-    end
-    if charDB then
-      charDB.routeProgress = savedCharRG
-    end
-    ns.Compat.InvalidateQuestStateCaches()
-    if not okGate14 then
-      error(errGate14, 2)
-    end
-  end)
-
-  -- RG-15. v0.8.4 14-Quest Zone Audit & Live Client Quest-Target Self-Healing (Defense-in-Depth)
-  check("RG-15. v0.8.4 14-Quest Zone Audit & Live Client Quest-Target Self-Healing", function()
-    local savedMapOv = ns.State.overrideMapQuestsByUiMapID
-    local savedObjTxtOv = ns.State.overrideQuestObjectiveTexts
-    local savedWorldSizes = ns.State.overrideMapWorldSizes
-    local savedDrifts = deepCopyTable(ns.Compat.liveQuestTargetDrifts or {})
-    local savedObjTxtMem = deepCopyTable(ns.Compat.questObjectiveTextByID or {})
-    local savedCharRG = charDB and deepCopyTable(charDB.routeProgress) or nil
-
-    local okGate15, errGate15 = pcall(function()
-      ns.State.overrideMapWorldSizes = { [2548] = { width = 3600, height = 2400 }, [1444] = { width = 6950, height = 4633 } }
-      ns.Compat.liveQuestTargetDrifts = {}
-      ns.Compat.questObjectiveTextByID = {}
-
-      -- 1. Verify Layer 1 Static Audit: Gaseous Gold (96063) -> Sleebo Fizzlespout (263367 @ 69.55, 50.32), NOT Friz Frazzlespark!
-      local byID = {}
-      for _, a in ipairs(route.actions) do
-        byID[a.actionID] = a
-        if a.destination then
-          assertTrue(
-            a.destination.coordConfidence == "artifact_verified"
-              or (a.destination.coordConfidence == "subzone_verified" and a.reviewStatus == "estimated"),
-            "Every active automated step in v0.8.7 must be artifact_verified or subzone_verified (estimated): " .. tostring(a.actionID)
-          )
-        end
-      end
-      local gasAccept = byID["rg_pf_accept_96063"]
-      local gasTurnin = byID["rg_pf_turnin_96063"]
-      assertTrue(
-        gasAccept and gasAccept.npcID == 263367 and gasAccept.npcName == "Sleebo Fizzlespout",
-        "96063 accept must point to Sleebo Fizzlespout (263367)"
-      )
-      assertTrue(
-        gasTurnin
-          and gasTurnin.npcID == 263367
-          and gasTurnin.npcName == "Sleebo Fizzlespout"
-          and math.abs(gasTurnin.destination.x01 - 0.6955) < 1e-4
-          and math.abs(gasTurnin.destination.y01 - 0.5032) < 1e-4,
-        "96063 turn-in must point to Sleebo Fizzlespout @ (0.6955, 0.5032)"
-      )
-
-      -- Verify key audited quests across the zone
-      local gdsObj = byID["rg_pf_obj_goes_down_smooth"]
-      assertTrue(
-        gdsObj and type(gdsObj.subLocations) == "table" and #gdsObj.subLocations == 4,
-        "Goes Down Smooth (95988) must include all 4 audited drink delivery sub-locations"
-      )
-      assertTrue(
-        byID["rg_pf_turnin_goes_down_smooth"] and byID["rg_pf_turnin_goes_down_smooth"].npcID == 255894,
-        "Goes Down Smooth (95988) turn-in must be Innkeeper Zizplink (255894)"
-      )
-      assertTrue(
-        byID["rg_exit_turnin_95219"]
-          and byID["rg_exit_turnin_95219"].npcID == 7941
-          and byID["rg_exit_turnin_95219"].destination.uiMapID == 1444,
-        "From Port to Port (95219) must deliver to Mardrack Greenwell (7941) in Feralas (1444)"
-      )
-      assertTrue(
-        byID["rg_fk_obj_95603"] and byID["rg_fk_obj_95603"].npcID == 262037,
-        "Bats in the Belfry (95603) must target Roosting Duskbat (262037)"
-      )
-      assertTrue(
-        byID["rg_fk_turnin_95156"] and byID["rg_fk_turnin_95156"].npcID == 260080
-          and byID["rg_sup_turnin_95184"] and byID["rg_sup_turnin_95184"].npcID == 260080,
-        "95156 & 95184 must point to Ember Bladewhisper (260080)"
-      )
-      assertTrue(
-        route.questsByID[94925] and route.questsByID[94925].zeroObjectives == false
-          and byID["rg_hb_turnin_94925"] and byID["rg_hb_turnin_94925"].npcID == 259352
-          and route.questsByID[94928] and route.questsByID[94928].zeroObjectives == true
-          and byID["rg_pf_turnin_94928"] and byID["rg_pf_turnin_94928"].npcID == 255897,
-        "A Fur Trade (94925) must turn in to Watcher Cornelius (259352), unlocking zero-objective A Few Furs for Friz (94928 -> 255897)"
-      )
-      assertTrue(
-        byID["rg_hb_turnin_95329"] and byID["rg_hb_turnin_95329"].npcID == 259352,
-        "Out in the Field (95329) turn-in must point to Watcher Cornelius (259352)"
-      )
-      assertTrue(
-        byID["rg_hb_accept_94614"] and byID["rg_hb_accept_94614"].npcID == 258317
-          and byID["rg_hb_accept_94618"] and byID["rg_hb_accept_94618"].npcID == 258317,
-        "94614 & 94618 must be present at Benjy Wheeler (258317)"
-      )
-      assertTrue(
-        byID["rg_pf_turnin_wanted_trapclaw"] and byID["rg_pf_turnin_wanted_trapclaw"].npcID == 259962,
-        "WANTED: Trapclaw must turn in at Fimbo Greasemitz (259962)"
-      )
-      assertTrue(
-        byID["rg_el_turnin_95912"] and byID["rg_el_turnin_95912"].npcID == 260080,
-        "WANTED: Blademaster Kaijo (95912) must turn in at Ember Bladewhisper (260080)"
-      )
-      assertTrue(
-        byID["rg_hb_obj_94925"]
-          and byID["rg_hb_obj_94925"].npcID == 259055
-          and math.abs(byID["rg_hb_obj_94925"].destination.x01 - 0.6152) < 1e-4
-          and math.abs(byID["rg_hb_obj_94925"].destination.y01 - 0.5003) < 1e-4,
-        "A Fur Trade (94925) objective must target Wildplains Huntress (259055) @ (61.52, 50.03), NEVER Plains Prowler (268831)"
-      )
-      assertTrue(
-        byID["rg_hb_obj_foremans_plight"]
-          and math.abs(byID["rg_hb_obj_foremans_plight"].destination.x01 - 0.5110) < 1e-4
-          and math.abs(byID["rg_hb_obj_foremans_plight"].destination.y01 - 0.5710) < 1e-4,
-        "Foreman's Plight (95943) objective must point to Foreman's Crate @ (51.10, 57.10)"
-      )
-      assertTrue(
-        byID["rg_pf_obj_96063"]
-          and math.abs(byID["rg_pf_obj_96063"].destination.x01 - 0.6240) < 1e-4
-          and math.abs(byID["rg_pf_obj_96063"].destination.y01 - 0.5720) < 1e-4,
-        "Gaseous Gold (96063) objective must point to Marsh Gas Vents @ (62.40, 57.20)"
-      )
-      assertTrue(
-        byID["rg_hb_obj_94843"]
-          and math.abs(byID["rg_hb_obj_94843"].destination.x01 - 0.3880) < 1e-4
-          and math.abs(byID["rg_hb_obj_94843"].destination.y01 - 0.6270) < 1e-4,
-        "From Seed to Sprout (94843) objective must point to Loamy Soil @ (38.80, 62.70)"
-      )
-      assertTrue(
-        byID["rg_el_obj_94890"]
-          and byID["rg_el_obj_94890"].npcID == 256881
-          and math.abs(byID["rg_el_obj_94890"].destination.x01 - 0.2580) < 1e-4
-          and math.abs(byID["rg_el_obj_94890"].destination.y01 - 0.4340) < 1e-4
-          and byID["rg_wf_obj_94891"] == nil
-          and byID["rg_wf_turnin_94891"]
-          and byID["rg_wf_turnin_94891"].npcID == 257591
-          and route.questsByID[94891].zeroObjectives == true,
-        "Bring Me His Head (94890) -> Overlord Kilgar (25.8, 43.4) & News to Farholde (94891) zero-obj -> Ashe Amberhall (257591)"
-      )
-      assertTrue(
-        byID["rg_hb_accept_94961"]
-          and byID["rg_hb_accept_94961"].npcID == 259158
-          and math.abs(byID["rg_hb_accept_94961"].destination.x01 - 0.4730) < 1e-4
-          and math.abs(byID["rg_hb_accept_94961"].destination.y01 - 0.5130) < 1e-4
-          and byID["rg_hb_obj_94961"]
-          and byID["rg_hb_obj_94961"].npcID == 254560,
-        "Biting the Hand (94961) must start/turn in at Fuzzle (47.3, 51.3) and farm Twilight Shadowmancers (254560)"
-      )
-      assertTrue(
-        type(route.npcDirectoryByID) == "table" and route.npcDirectoryByID[263367] ~= nil and route.npcDirectoryByID[7941] ~= nil,
-        "198-entry NPC directory must include Sleebo Fizzlespout (263367) and Mardrack Greenwell (7941)"
-      )
-
-      -- 2. Verify Layer 2 Live Client Self-Healing against simulated server hotfix drift
-      -- Simulate an outdated static turn-in action pointing 96063 to Friz Frazzlespark (77.15, 52.92)
-      local staleAction = {
-        actionID = "test_stale_turnin_96063",
-        kind = "turnin",
-        questID = 96063,
-        title = "Turn in Gaseous Gold",
-        npcID = 255897,
-        npcName = "Friz Frazzlespark",
-        destination = {
-          uiMapID = 2548,
-          areaID = 16727,
-          x01 = 0.7715,
-          y01 = 0.5292,
-          coordinateSpace = "uiMap01",
-          coordConfidence = "artifact_verified",
-        },
-      }
-      local healProg = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-      local healCtx = makeMockCtx({
-        level = 41,
-        active = { [96063] = true },
-        objectives = { [96063] = true },
-      })
-
-      -- 2a. Hostile-mob & rank-prefix text parser safety
-      assertTrue(
-        ns.Compat.MatchNpcFromQuestText("Travel to Bolder'ok Outpost to kill Bolder'ok Brute.", route) == nil,
-        "MatchNpcFromQuestText must NEVER match hostile mob after an infinitive verb ('to kill ...')"
-      )
-      local rankedMatch = ns.Compat.MatchNpcFromQuestText(
-        "Deliver the Eye of Mugg to Knight Commander Demar Brant in Farholde Keep.",
-        route
-      )
-      assertTrue(
-        rankedMatch and rankedMatch.npcID == 257558,
-        "MatchNpcFromQuestText must resolve ranked NPC names ('Knight Commander Demar Brant' -> 257558)"
-      )
-
-      -- 2b. Signal 1: Quest Log objective text ('Gather 5 Marsh Gas Vials for Sleebo Fizzlespout.') heals target!
-      ns.State.overrideMapQuestsByUiMapID = {}
-      ns.State.overrideQuestObjectiveTexts = {
-        [96063] = "Gather 5 Marsh Gas Vials for Sleebo Fizzlespout.",
-      }
-      local d1, n1, sub1, ov1 = RoutePlanner.ResolveActiveActionTarget(staleAction, healProg, healCtx, nil, route)
-      assertTrue(sub1 == nil, "Single-spot live override MUST keep 3rd return (activeSub) nil")
-      assertTrue(
-        d1
-          and n1 == "Sleebo Fizzlespout"
-          and math.abs(d1.x01 - 0.6955) < 1e-4
-          and math.abs(d1.y01 - 0.5032) < 1e-4
-          and ov1
-          and ov1.source == "quest_text_npc",
-        "Quest Log objective text must self-heal turn-in target to Sleebo Fizzlespout @ (69.55, 50.32)"
-      )
-
-      -- 2c. Signal 2: Observed QUEST_DETAIL giver heals same-giver-as-turnin quest when text/POI absent
-      ns.State.overrideQuestObjectiveTexts = nil
-      ns.Compat.questObjectiveTextByID = {}
-      ns.State.RecordObservedQuestGiver(96063, {
-        npcID = 263367,
-        npcName = "Sleebo Fizzlespout",
-        uiMapID = 2548,
-        x01 = 0.6955,
-        y01 = 0.5032,
-      }, healProg)
-      local d2, n2, sub2, ov2 = RoutePlanner.ResolveActiveActionTarget(staleAction, healProg, healCtx, nil, route)
-      assertTrue(
-        sub2 == nil
-          and n2 == "Sleebo Fizzlespout"
-          and math.abs(d2.x01 - 0.6955) < 1e-4
-          and ov2
-          and ov2.source == "observed_quest_giver",
-        "Observed quest giver must self-heal turn-in when giverNpcID == turninNpcID"
-      )
-
-      -- 2d. Signal 3: Live Map POI (`C_QuestLog.GetQuestsOnMap`) heals target & World Map Pins, while <25 yd jitter is ignored!
-      healProg.observedQuestGivers = {}
-      ns.State.overrideMapQuestsByUiMapID = {
-        [2548] = {
-          [96063] = { questID = 96063, x01 = 0.7712, y01 = 0.5290 }, -- ~1.2 yds from static: must NOT trigger override!
-        },
-      }
-      local _, _, _, ovJitter = RoutePlanner.ResolveActiveActionTarget(staleAction, healProg, healCtx, nil, route)
-      assertTrue(ovJitter == nil, "<25 yd map POI coordinate jitter must NOT trigger a false-positive override")
-
-      -- Move live map POI for 96063 to Powderfuse Pier (Argo Brinewhistle @ 0.7954, 0.5246, >360 yds from Sleebo):
-      -- Both ResolveActiveActionTarget AND WorldMapPins.CollectPinEntries on the real route must self-heal!
-      ns.State.overrideMapQuestsByUiMapID = {
-        [2548] = {
-          [96063] = { questID = 96063, x01 = 0.7954, y01 = 0.5246 },
-        },
-      }
-      local realTurnin = byID["rg_pf_turnin_96063"]
-      local d3, n3, sub3, ov3 = RoutePlanner.ResolveActiveActionTarget(realTurnin, healProg, healCtx, nil, route)
-      assertTrue(
-        sub3 == nil
-          and n3 == "Argo Brinewhistle"
-          and math.abs(d3.x01 - 0.7954) < 1e-4
-          and math.abs(d3.y01 - 0.5246) < 1e-4
-          and ov3
-          and ov3.source == "live_map_poi",
-        "Live map POI >25 yds away must self-heal route target and resolve nearest directory NPC"
-      )
-      assertTrue(
-        ns.Compat.liveQuestTargetDrifts["rg_pf_turnin_96063"] ~= nil,
-        "Active live self-healing override must be recorded in Compat.liveQuestTargetDrifts for /fh rg doctor"
-      )
-
-      local healedPins = ns.UI.WorldMapPins.CollectPinEntries(
-        2548,
-        route,
-        healProg,
-        { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
-        healCtx
-      )
-      local sawHealedMapPin = false
-      for _, pe in ipairs(healedPins) do
-        if pe.actionID == "rg_pf_turnin_96063" then
-          assertTrue(
-            math.abs(pe.x01 - 0.7954) < 1e-4 and pe.targetName == "Argo Brinewhistle",
-            "WorldMapPins must project healed coordinates and NPC name for single-spot turn-ins"
-          )
-          sawHealedMapPin = true
-        end
-      end
-      assertTrue(sawHealedMapPin, "WorldMapPins must emit healed turn-in pin for 96063")
-    end)
-
-    ns.State.overrideMapQuestsByUiMapID = savedMapOv
-    ns.State.overrideQuestObjectiveTexts = savedObjTxtOv
-    ns.State.overrideMapWorldSizes = savedWorldSizes
-    ns.Compat.liveQuestTargetDrifts = savedDrifts
-    ns.Compat.questObjectiveTextByID = savedObjTxtMem
-    if charDB then
-      charDB.routeProgress = savedCharRG
-    end
-    ns.Compat.InvalidateQuestStateCaches()
-    if not okGate15 then
-      error(errGate15, 2)
-    end
-  end)
-
-  -- RG-16. The Monster Surfaces (95267 @ 74.3, 72.4), Anti-Misdirection Selection Guardrails & Field Telemetry
-  check("RG-16. The Monster Surfaces (74.3, 72.4), Selection Guardrails & Field Telemetry", function()
-    local savedSelOv = ns.State.overrideSelectedQuest
-    local savedPosOv = ns.State.overridePlayerPosition
-    local savedActiveOv = ns.State.overrideActiveQuests
-    local savedCompOv = ns.State.overrideCompletedQuests
-    local savedCaps = (_G.ForeverHubDB and type(_G.ForeverHubDB.fieldCaptures) == "table")
-      and deepCopyTable(_G.ForeverHubDB.fieldCaptures)
-      or nil
-    local savedCharRG = charDB and deepCopyTable(charDB.routeProgress) or nil
-
-    local okGate16, errGate16 = pcall(function()
-      local byID = {}
-      for _, a in ipairs(route.actions) do
-        byID[a.actionID] = a
-      end
-
-      -- 1. Verify 95267 (The Monster Surfaces) static route coordinates & chain
-      local msAccept = byID["rg_pf_accept_95267"]
-      local msObj = byID["rg_pf_obj_95267"]
-      local msTurnin = byID["rg_pf_turnin_95267"]
-      assertTrue(msAccept and msAccept.npcID == 260231, "95267 accept must point to Argo Brinewhistle (260231)")
-      assertTrue(
-        msObj
-          and msObj.destination
-          and msObj.destination.uiMapID == 2548
-          and math.abs(msObj.destination.x01 - 0.7430) < 1e-4
-          and math.abs(msObj.destination.y01 - 0.7240) < 1e-4
-          and msObj.destination.coordConfidence == "artifact_verified",
-        "95267 objective must point to verified Fresh Wreckage at (74.3, 72.4)"
-      )
-      assertTrue(
-        msTurnin
-          and msTurnin.npcID == 260231
-          and math.abs(msTurnin.destination.x01 - 0.7954) < 1e-4
-          and math.abs(msTurnin.destination.y01 - 0.5246) < 1e-4,
-        "95267 turn-in must point to Argo Brinewhistle at (79.54, 52.46)"
-      )
-
-      -- Verify newly reconciled Riverglades quests from WDB + QuestieDB
-      assertTrue(byID["rg_hb_obj_95064"] and byID["rg_hb_obj_95064"].npcID == 256749, "Preventative Measures (95064) must target Rog'mar Trainee (256749)")
-      assertTrue(byID["rg_hb_obj_95984"] and byID["rg_hb_obj_95984"].npcID == 263348, "Song of the Strider (95984) must target Roving Tallstrider (263348)")
-      assertTrue(byID["rg_fk_obj_96082"] and byID["rg_fk_obj_96082"].npcID == 263614, "Doctor's Orderly (96082) must target Wounded Soldier (263614)")
-      assertTrue(byID["rg_pf_turnin_95957"] and byID["rg_pf_turnin_95957"].npcID == 263120, "Drink Up! (95957) must turn in to Gray Dawnbright (263120)")
-      assertTrue(byID["rg_pf_obj_96067"] and byID["rg_pf_obj_96067"].npcID == 263369, "Rock 'em and Sock 'em (96067) must target G45-B4G (263369)")
-
-      -- 2. Verify WorldMapPins Selection Sync & Anti-Misdirection Notice Banner
-      local pinProg = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-      local pinCtx = makeMockCtx({
-        level = 42,
-        questLogFull = true,
-        active = {
-          ["title:wanted: trapclaw"] = true,
-          [95267] = true,
-          [95123] = true, -- A Blast Ye Scurvy Dogs! (quarantined objective: Powder Keg spawns unpinned)
-        },
-        objectives = {
-          ["title:wanted: trapclaw"] = false,
-          [95267] = false,
-          [95123] = false,
-        },
-      })
-
-      -- 2a. Selecting 95267 (The Monster Surfaces) highlights its (74.3, 72.4) pin and emits NO unverified warning
-      ns.State.overrideSelectedQuest = { questID = 95267, title = "The Monster Surfaces", level = 42 }
-      local entriesMapped, countsMapped = ns.UI.WorldMapPins.CollectPinEntries(
-        2548,
-        route,
-        pinProg,
-        { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
-        pinCtx,
-        { status = "ok", uiMapID = 2548, x01 = 0.8030, y01 = 0.5440 }
-      )
-      assertTrue(countsMapped.selectedQuestNotice == nil, "Mapped quest 95267 must NOT emit an unverified warning banner")
-      local sawSelected95267 = false
-      for _, e in ipairs(entriesMapped) do
-        if e.actionID == "rg_pf_obj_95267" then
-          assertTrue(
-            e.isSelectedQuest == true
-              and math.abs(e.x01 - 0.7430) < 1e-4
-              and math.abs(e.y01 - 0.7240) < 1e-4,
-            "95267 map pin must be at (74.3, 72.4) and marked isSelectedQuest=true"
-          )
-          sawSelected95267 = true
-        end
-      end
-      assertTrue(sawSelected95267, "WorldMapPins must render objective pin for 95267 at (74.3, 72.4)")
-
-      -- 2b. Selecting promoted 95123 (A Blast Ye Scurvy Dogs!) now renders a subzone_verified pin with NO unverified warning,
-      -- while selecting quarantined placeholder 95331 (REUSE ME) emits the anti-misdirection warning banner!
-      ns.State.overrideSelectedQuest = { questID = 95123, title = "A Blast Ye Scurvy Dogs!", level = 44 }
-      local entries95123, counts95123 = ns.UI.WorldMapPins.CollectPinEntries(
-        2548,
-        route,
-        pinProg,
-        { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
-        pinCtx,
-        { status = "ok", uiMapID = 2548, x01 = 0.8030, y01 = 0.5440 }
-      )
-      assertTrue(counts95123.selectedQuestNotice == nil, "Promoted quest 95123 must NOT emit an unverified warning banner")
-      local saw95123Pin = false
-      for _, e in ipairs(entries95123) do
-        if e.actionID == "rg_pf_obj_95123" then
-          assertTrue(
-            e.isSelectedQuest == true and e.coordConfidence == "subzone_verified",
-            "95123 map pin must carry coordConfidence='subzone_verified' and isSelectedQuest=true"
-          )
-          saw95123Pin = true
-        end
-      end
-      assertTrue(saw95123Pin, "WorldMapPins must render objective pin for 95123 at Windstead")
-
-      ns.State.overrideSelectedQuest = { questID = 95331, title = "REUSE ME", level = 45 }
-      local _, countsQuar = ns.UI.WorldMapPins.CollectPinEntries(
-        2548,
-        route,
-        pinProg,
-        { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
-        pinCtx,
-        { status = "ok", uiMapID = 2548, x01 = 0.8030, y01 = 0.5440 }
-      )
-      assertTrue(
-        countsQuar.selectedQuestNotice ~= nil
-          and countsQuar.selectedQuestNotice.status == "quarantined_objective"
-          and string.find(countsQuar.selectedQuestNotice.bannerText, "REUSE ME", 1, true) ~= nil
-          and string.find(countsQuar.selectedQuestNotice.bannerText, "Location unverified", 1, true) ~= nil
-          and string.find(countsQuar.selectedQuestNotice.bannerText, "Arrow: WANTED: Trapclaw", 1, true) ~= nil,
-        "Selecting quarantined quest must warn player that it has no FH pin and explicitly name the quest owning the arrow"
-      )
-
-      -- 3. Verify Field-Capture Telemetry (State.RecordFieldCapture & /fh rg mark)
-      if _G.ForeverHubDB then
-        _G.ForeverHubDB.fieldCaptures = {}
-      end
-      ns.State.overridePlayerPosition = { status = "ok", uiMapID = 2548, x01 = 0.74304, y01 = 0.72398 }
-      ns.State.overrideSelectedQuest = { questID = 95267, title = "The Monster Surfaces", level = 42 }
-      local okCap, rec = ns.Events.CaptureQuestFieldTelemetry("manual_mark", nil, "Fresh Wreckage")
-      assertTrue(
-        okCap == true
-          and rec ~= nil
-          and rec.questID == 95267
-          and rec.uiMapID == 2548
-          and math.abs(rec.x01 - 0.7430) < 1e-6
-          and math.abs(rec.y01 - 0.7240) < 1e-6
-          and rec.note == "Fresh Wreckage",
-        "CaptureQuestFieldTelemetry must persist 4-decimal coordinates and note into ForeverHubDB.fieldCaptures"
-      )
-
-      -- 4. Verify Real-Time Objective & Turn-In Completion Truth Sync (QUEST_REMOVED quirk, CHAT_MSG_SYSTEM, Cross-Provider & 1Hz Watchdog)
-      local savedObjOv = ns.State.overrideQuestObjectives
-      local savedLvl16 = ns.State.overridePlayerLevel
-      local savedFac16 = ns.State.overridePlayerFaction
-      local savedFull16 = ns.State.overrideQuestLogFull
-      local savedSizes16 = ns.State.overrideMapWorldSizes
-      local savedNativeWp16 = ns.State.overrideNativeWaypointState
-      local savedTomTom16 = _G.TomTom
-      local savedCQ16 = _G.C_QuestLog
-      local savedGetNum16 = _G.GetNumQuestLogEntries
-      local savedGetTitle16 = _G.GetQuestLogTitle
-      local savedGetNumLB16 = _G.GetNumQuestLeaderBoards
-      local savedGetLB16 = _G.GetQuestLogLeaderBoard
-      local savedTurnInID16 = deepCopyTable(ns.Compat.recentQuestTurnedInByID or {})
-      local savedTurnInTitle16 = deepCopyTable(ns.Compat.recentQuestTurnedInByTitle or {})
-      local savedAcceptID16 = deepCopyTable(ns.Compat.recentQuestAcceptedByID or {})
-      local savedAcceptTitle16 = deepCopyTable(ns.Compat.recentQuestAcceptedByTitle or {})
-
-      local okSyncSub, errSyncSub = pcall(function()
-        -- 4a. Abandoned quest (`IsQuestFlaggedCompleted == false`) MUST NOT be promoted to completed on QUEST_REMOVED
-        if charDB and charDB.routeProgress then
-          charDB.routeProgress.observedCompletedQuestIds = {}
-          charDB.routeProgress.observedCompletedQuestTitles = {}
-        end
-        ns.Compat.RecordRecentQuestAccepted(95254, "WANTED: Trapclaw")
-        ns.State.overrideCompletedQuests = { [95254] = false }
-        local promotedAbandon = ns.Compat.RecordRecentQuestRemoved(95254)
-        assertTrue(promotedAbandon == false, "Abandoned quest (server flag false) must NOT be marked completed on QUEST_REMOVED")
-        assertTrue(ns.Compat.recentQuestAcceptedByTitle["wanted: trapclaw"] == nil, "QUEST_REMOVED must clear recentQuestAcceptedByTitle")
-
-        -- 4b. Forever server quirk: QUEST_REMOVED without QUEST_TURNED_IN when server flag is true promotes completion!
-        ns.State.overrideCompletedQuests = { [95254] = true }
-        local promotedTurnIn = ns.Compat.RecordRecentQuestRemoved(95254)
-        assertTrue(promotedTurnIn == true, "QUEST_REMOVED with server completion flag true must promote to completed")
-        assertTrue(
-          ns.State.IsObservedCompletedQuestId(95254) and ns.State.IsObservedCompletedQuestTitle("wanted: trapclaw"),
-          "Promoted QUEST_REMOVED must record both numeric ID and normalized title completion"
-        )
-
-        -- 4c. CHAT_MSG_SYSTEM quest completion parser accepts known route quests and rejects arbitrary system chatter
-        ns.State.overrideCompletedQuests = nil
-        local badQid, badTitle = ns.Compat.ParseSystemQuestCompletedMessage("Duel starting: 3...")
-        assertTrue(badQid == nil and badTitle == nil, "Non-quest system messages must be ignored")
-        local unmappedQid, unmappedTitle = ns.Compat.ParseSystemQuestCompletedMessage("Imaginary Unrelated Quest completed.")
-        assertTrue(unmappedQid == nil and unmappedTitle == nil, "Unknown untracked titles must not pollute completion state")
-        local trapQid, trapRaw, trapNorm = ns.Compat.ParseSystemQuestCompletedMessage("WANTED: Trapclaw completed.")
-        assertTrue(
-          trapQid == 95254 and trapRaw == "WANTED: Trapclaw" and trapNorm == "wanted: trapclaw",
-          "Known route quest completion message must resolve questID 95254 and normalized title"
-        )
-
-        -- 4d. Cross-provider objective truth: stale C_QuestLog.GetQuestObjectives (0/1) yields to completed Classic leaderboard (1/1)
-        ns.State.overrideQuestObjectives = nil
-        _G.C_QuestLog = {
-          GetQuestObjectives = function(qid)
-            if qid == 95254 then
-              return { { text = "0/1 Trapclaw's Pincer", finished = false, numFulfilled = 0, numRequired = 1 } }
-            end
-            return {}
-          end,
-        }
-        _G.GetNumQuestLogEntries = function() return 2, 1 end
-        _G.GetQuestLogTitle = function(idx)
-          if idx == 1 then return "Riverglades", 0, nil, true, false, nil, nil, 0 end
-          if idx == 2 then return "WANTED: Trapclaw", 42, nil, false, false, false, nil, 95254 end
-          return nil
-        end
-        _G.GetNumQuestLeaderBoards = function(idx) return idx == 2 and 1 or 0 end
-        _G.GetQuestLogLeaderBoard = function(objIdx, qIdx)
-          if qIdx == 2 and objIdx == 1 then
-            return "Trapclaw's Pincer: 1/1", "item", true
-          end
-          return nil
-        end
-        ns.Compat.InvalidateQuestStateCaches()
-        local crossObj = ns.Compat.GetQuestObjectivesResult(95254)
-        assertTrue(
-          crossObj.status == "ok" and crossObj.allFinished == true and crossObj.provider == "classic_leaderboards",
-          "Completed Classic leaderboard must override lagging 0/1 C_QuestLog.GetQuestObjectives"
-        )
-
-        -- 4e. 1 Hz Active-Step Truth Watchdog catches silent 0/1 -> 1/1 completion with zero WoW events fired!
-        _G.C_QuestLog = nil
-        _G.GetNumQuestLogEntries = nil
-        _G.GetQuestLogTitle = nil
-        _G.GetNumQuestLeaderBoards = nil
-        _G.GetQuestLogLeaderBoard = nil
-        if charDB then
-          charDB.routeProgress = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-        end
-        ns.State.overridePlayerLevel = 42
-        ns.State.overridePlayerFaction = "Alliance"
-        ns.State.overrideQuestLogFull = true
-        ns.State.overrideNativeWaypointState = { supported = false }
-        _G.TomTom = nil
-        ns.State.overrideMapWorldSizes = { [2548] = { width = 3600, height = 2400 } }
-        ns.State.overridePlayerPosition = { status = "ok", uiMapID = 2548, x01 = 0.8030, y01 = 0.5440 }
-        ns.State.overrideActiveQuests = { [95254] = true }
-        ns.State.overrideCompletedQuests = { [95254] = false }
-        ns.State.overrideQuestObjectives = {
-          [95254] = { { text = "0/1 Trapclaw's Pincer", finished = false, numFulfilled = 0, numRequired = 1 } },
-        }
-        ns.Events.FlushRouteReconcileNow()
-        assertTrue(
-          ns.UI.Navigation.watchedQuestActionID == "rg_pf_obj_wanted_trapclaw",
-          "Initial active step at (80.3, 54.4) must watch rg_pf_obj_wanted_trapclaw, got: " .. tostring(ns.UI.Navigation.watchedQuestActionID)
-        )
-        assertTrue(
-          ns.UI.Navigation.TickActiveStepWatchdog(1.05) == false,
-          "Steady-state watchdog tick with unchanged quest state must be a no-op"
-        )
-        -- Silently flip Trapclaw objective 0/1 -> 1/1 WITHOUT firing any event:
-        ns.State.overrideQuestObjectives = {
-          [95254] = { { text = "1/1 Trapclaw's Pincer", finished = true, numFulfilled = 1, numRequired = 1 } },
-        }
-        local didReconcile = ns.UI.Navigation.TickActiveStepWatchdog(1.05)
-        assertTrue(didReconcile == true, "1 Hz watchdog must detect silent 0/1 -> 1/1 objective completion")
-        assertTrue(
-          ns.UI.Navigation.watchedQuestActionID == "rg_pf_turnin_wanted_trapclaw",
-          "Watchdog reconcile must immediately advance active step to rg_pf_turnin_wanted_trapclaw"
-        )
-      end)
-
-      ns.State.overrideQuestObjectives = savedObjOv
-      ns.State.overridePlayerLevel = savedLvl16
-      ns.State.overridePlayerFaction = savedFac16
-      ns.State.overrideQuestLogFull = savedFull16
-      ns.State.overrideMapWorldSizes = savedSizes16
-      ns.State.overrideNativeWaypointState = savedNativeWp16
-      _G.TomTom = savedTomTom16
-      _G.C_QuestLog = savedCQ16
-      _G.GetNumQuestLogEntries = savedGetNum16
-      _G.GetQuestLogTitle = savedGetTitle16
-      _G.GetNumQuestLeaderBoards = savedGetNumLB16
-      _G.GetQuestLogLeaderBoard = savedGetLB16
-      ns.Compat.recentQuestTurnedInByID = savedTurnInID16
-      ns.Compat.recentQuestTurnedInByTitle = savedTurnInTitle16
-      ns.Compat.recentQuestAcceptedByID = savedAcceptID16
-      ns.Compat.recentQuestAcceptedByTitle = savedAcceptTitle16
-      if not okSyncSub then
-        error(errSyncSub, 2)
-      end
-    end)
-
-    ns.State.overrideSelectedQuest = savedSelOv
-    ns.State.overridePlayerPosition = savedPosOv
-    ns.State.overrideActiveQuests = savedActiveOv
-    ns.State.overrideCompletedQuests = savedCompOv
-    if _G.ForeverHubDB then
-      _G.ForeverHubDB.fieldCaptures = savedCaps or {}
-    end
-    if charDB then
-      charDB.routeProgress = savedCharRG
-    end
-    ns.Compat.InvalidateQuestStateCaches()
-    if not okGate16 then
-      error(errGate16, 2)
-    end
-  end)
-
-  -- Gate 17: v0.8.7 Snargl's Snout (94679) & Accepted Elite Quest Map Visibility with Elites: OFF
-  check("RG-17. Accepted Elite Quests Always Show World Map Pins & Focus When Clicked (Snargl's Snout 94679)", function()
-    local savedSel17 = ns.State.overrideSelectedQuest
-    local ok17, err17 = pcall(function()
-      -- Default solo profile: includeEliteBounties == false (Elites: OFF)
-      local prog17 = ns.State.MigrateRouteProgress({
-        mode = "standalone",
-        includeEliteBounties = false,
-      }, route)
-      local ctx17 = makeMockCtx({
-        level = 40,
-        active = { [94679] = true, [94678] = true },
-        objectives = { [94679] = false, [94678] = false },
-      })
-      local pos17 = { status = "ok", uiMapID = 2548, x01 = 0.3940, y01 = 0.7460 }
-
-      -- 1. Unpinned solo HUD keeps [40+] Snargl's Snout ineligible so solo players aren't auto-sent into an elite camp
-      local posBristle17 = { status = "ok", uiMapID = 2548, x01 = 0.3038, y01 = 0.6334 }
-      local evalSolo = RouteProgress.Reconcile(route, prog17, ctx17, posBristle17)
-      assertTrue(
-        evalSolo.byActionID["rg_el_obj_94679"].state == "ineligible"
-          and evalSolo.byActionID["rg_el_obj_94679"].reason == "optional_elite_bounty_disabled",
-        "Unpinned Snargl's Snout objective must remain ineligible in default solo HUD auto-routing"
-      )
-      assertTrue(
-        evalSolo.nextAction ~= nil and evalSolo.nextAction.actionID == "rg_hb_obj_94678",
-        "Solo HUD at Bristle Hills must prefer solo Gnoll Infestation (94678) over unpinned elite Snargl's Snout"
-      )
-
-      -- 2. WorldMapPins MUST still render Snargl's Snout objective pins on map 2548 with Elites: OFF!
-      ns.State.overrideSelectedQuest = { questID = 94679, title = "Snargl's Snout", level = 40 }
-      local entries17, counts17 = ns.UI.WorldMapPins.CollectPinEntries(
-        2548,
-        route,
-        prog17,
-        { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
-        ctx17,
-        pos17
-      )
-      assertTrue(counts17.selectedQuestNotice == nil, "Accepted Snargl's Snout must NEVER show an unverified/missing pin warning")
-      local snarglPinCount = 0
-      for _, e in ipairs(entries17) do
-        if e.actionID == "rg_el_obj_94679" then
-          snarglPinCount = snarglPinCount + 1
-          assertTrue(
-            e.coordConfidence == "subzone_verified" and e.isSelectedQuest == true,
-            "Snargl's Snout map pin must be subzone_verified and selected"
-          )
-        end
-      end
-      assertTrue(snarglPinCount == 2, "Snargl's Snout must render both West & East Bristle Hills camp pins, got: " .. tostring(snarglPinCount))
-
-      -- 3. Clicking Snargl's Snout on the map (pinnedActionID) immediately focuses it in HUD & Arrow even with Elites: OFF!
-      prog17.pinnedActionID = "rg_el_obj_94679"
-      local evalPinned = RouteProgress.Reconcile(route, prog17, ctx17, pos17)
-      assertTrue(
-        evalPinned.byActionID["rg_el_obj_94679"].state == "available"
-          and evalPinned.nextAction ~= nil
-          and evalPinned.nextAction.actionID == "rg_el_obj_94679",
-        "Manually pinning Snargl's Snout on the World Map must focus rg_el_obj_94679 even when Elites: OFF"
-      )
-
-      -- 4. Looting Snargl's Snout (1/1) auto-retires the pin and surfaces Cedric Dalton turn-in (39.4, 74.6)!
-      local ctx17Done = makeMockCtx({
-        level = 40,
-        active = { [94679] = true, [94678] = true },
-        objectives = { [94679] = true, [94678] = false },
-      })
-      local evalTurnIn = RouteProgress.Reconcile(route, prog17, ctx17Done, pos17)
-      assertTrue(
-        evalTurnIn.byActionID["rg_el_turnin_94679"].state == "available"
-          and evalTurnIn.nextAction ~= nil
-          and evalTurnIn.nextAction.actionID == "rg_el_turnin_94679",
-        "Completed Snargl's Snout must immediately guide turn-in to Cedric Dalton at Southern Watch"
-      )
-    end)
-    ns.State.overrideSelectedQuest = savedSel17
-    if not ok17 then
-      error(err17, 2)
-    end
-  end)
-
-  -- Gate 18: v0.8.7 Full Riverglades Atlas Side-Quest Coverage & Tier Isolation
-  check("RG-18. Full Riverglades Atlas Side-Quests Render Map Pins Without Hijacking Core Solo Route", function()
-    local prog18 = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-    -- Standing right beside Farmer Elbrim (52.7, 43.8) while holding a core Sunnyglade quest (94879)
-    local ctx18 = makeMockCtx({
-      level = 40,
-      active = { [94879] = true },
-      completed = { [94885] = true },
-      objectives = { [94879] = false },
-    })
-    local pos18 = { status = "ok", uiMapID = 2548, x01 = 0.5270, y01 = 0.4380 }
-
-    -- 1. Unaccepted isAtlasSideQuest accept (94829 What We Lost at 52.7, 43.8, 0 yd away!) stays in optional pool and NEVER hijacks core solo routing!
-    local evalUnaccepted = RouteProgress.Reconcile(route, prog18, ctx18, pos18)
-    assertTrue(
-      evalUnaccepted.byActionID["rg_atlas_accept_94829"].state == "available",
-      "What We Lost (94829) accept must be available on World Map"
-    )
-    assertTrue(
-      evalUnaccepted.nextAction ~= nil
-        and evalUnaccepted.nextAction.actionID ~= "rg_atlas_accept_94829"
-        and evalUnaccepted.nextAction.isAtlasSideQuest ~= true,
-      "Unaccepted atlas side quest at 0 yd must NOT hijack core solo routing, got: " .. tostring(evalUnaccepted.nextAction and evalUnaccepted.nextAction.actionID)
-    )
-    -- And when standing near Sunnyglade (45.2, 52.2), active 94879 objective is chosen directly over unaccepted atlas side quests
-    local evalSunnyglade18 = RouteProgress.Reconcile(
-      route,
-      ns.State.MigrateRouteProgress({ mode = "standalone" }, route),
-      ctx18,
-      { status = "ok", uiMapID = 2548, x01 = 0.4520, y01 = 0.5220 }
-    )
-    assertTrue(
-      evalSunnyglade18.nextAction ~= nil and evalSunnyglade18.nextAction.actionID == "rg_a_06_obj_sunnyglade_94879",
-      "Core Sunnyglade objective must be chosen near Sunnyglade, got: " .. tostring(evalSunnyglade18.nextAction and evalSunnyglade18.nextAction.actionID)
-    )
-
-    -- 2. WorldMapPins renders [!] Available pins for atlas side quests on Riverglades (2548) AND external maps (e.g. Dalaran 1416 for 96771)
-    local entriesRG = ns.UI.WorldMapPins.CollectPinEntries(
-      2548,
-      route,
-      prog18,
-      { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
-      ctx18,
-      pos18
-    )
-    local sawElbrimAccept = false
-    for _, e in ipairs(entriesRG) do
-      if e.actionID == "rg_atlas_accept_94829" then
-        sawElbrimAccept = true
-      end
-    end
-    assertTrue(sawElbrimAccept, "WorldMapPins(2548) must render [!] Accept What We Lost at Farmer Elbrim")
-
-    prog18.includeGroupBranches = true
-    local entriesDalaran = ns.UI.WorldMapPins.CollectPinEntries(
-      1416,
-      route,
-      prog18,
-      { enabled = true, showObjectives = true, showTurnIns = true, showAvailable = true },
-      ctx18,
-      pos18
-    )
-    local saw96771 = false
-    for _, e in ipairs(entriesDalaran) do
-      if e.actionID == "rg_kd_accept_96771" then
-        saw96771 = true
-      end
-    end
-    assertTrue(saw96771, "WorldMapPins(1416) must render [!] Accept Vengeance of the Highborne in Dalaran")
-
-    -- 3. Once the player accepts an atlas side quest in Riverglades (e.g. 94829 What We Lost), local proximity guides its objective!
-    local ctxAccepted = makeMockCtx({
-      level = 40,
-      active = { [94829] = true },
-      objectives = { [94829] = false },
-    })
-    local evalAccepted = RouteProgress.Reconcile(route, prog18, ctxAccepted, pos18)
-    assertTrue(
-      evalAccepted.nextAction ~= nil and evalAccepted.nextAction.actionID == "rg_atlas_obj_94829",
-      "Accepted atlas side quest on same map must guide player to its objective (52.2, 50.7)"
-    )
-
-    -- 4. Zero playable quests are quarantined: ONLY developer placeholder 95331 (REUSE ME) remains in quarantinedActions
-    assertTrue(
-      type(route.quarantinedActions) == "table"
-        and #route.quarantinedActions == 1
-        and route.quarantinedActions[1].questID == 95331,
-      "Only unobtainable developer placeholder 95331 (REUSE ME) may remain in quarantinedActions"
-    )
-  end)
-
-  -- Gate 19: v0.8.7 Travel-Aware Routing, Counterfactual Batching, En-Route Insertion & Zero-Mutation Reads
-  check("RG-19. Travel-Aware Service-Group Planner, Counterfactual AND-Gates & Commitment Stability", function()
-    local synthRoute = {
-      routeID = "rg_selftest_v087_travel_aware",
-      revision = 1,
-      primaryUiMapID = 2548,
-      areaIdToUiMapId = { [16591] = 2548, [357] = 1444 },
-      questsByID = {
-        [1001] = { questID = 1001, title = "Far Leaf Turnin" },
-        [1002] = { questID = 1002, title = "Nearby Camp Kill" },
-        [1003] = { questID = 1003, title = "Nearby Hub Pickup" },
-        [2001] = { questID = 2001, title = "Joint Gate A" },
-        [2002] = { questID = 2002, title = "Joint Gate B" },
-        [2003] = { questID = 2003, title = "Unlocked Camp Quest" },
-      },
-      questSuccessors = {
-        [2001] = { 2003 },
-        [2002] = { 2003 },
-      },
-      actions = {
-        {
-          actionID = "st_turnin_1001",
-          kind = "turnin",
-          questID = 1001,
-          title = "Turn in Far Leaf",
-          npcID = 9001,
-          npcName = "Far Captain",
-          reviewStatus = "verified",
-          requires = { op = "quest_objectives_complete", questID = 1001 },
-          eligibility = { faction = "Alliance" },
-          completionPredicate = { type = "quest_completed", questID = 1001 },
-          destination = { coordinateSpace = "uiMap01", coordConfidence = "artifact_verified", uiMapID = 2548, areaID = 16591, x01 = 0.5500, y01 = 0.2000 },
-        },
-        {
-          actionID = "st_obj_1002",
-          kind = "objective",
-          questID = 1002,
-          title = "Clear Nearby Camp",
-          reviewStatus = "verified",
-          requires = { op = "quest_active", questID = 1002 },
-          eligibility = { faction = "Alliance" },
-          completionPredicate = { type = "quest_objectives_complete_or_turned_in", questID = 1002 },
-          destination = { coordinateSpace = "uiMap01", coordConfidence = "artifact_verified", uiMapID = 2548, areaID = 16591, x01 = 0.1583, y01 = 0.2000 },
-        },
-        {
-          actionID = "st_accept_1003",
-          kind = "accept",
-          questID = 1003,
-          title = "Accept Nearby Pickup",
-          npcID = 9003,
-          npcName = "Scout",
-          reviewStatus = "verified",
-          requires = { op = "true" },
-          eligibility = { faction = "Alliance" },
-          completionPredicate = { type = "quest_active_or_completed", questID = 1003 },
-          destination = { coordinateSpace = "uiMap01", coordConfidence = "artifact_verified", uiMapID = 2548, areaID = 16591, x01 = 0.1583, y01 = 0.2000 },
-        },
-        {
-          actionID = "st_obj_1003",
-          kind = "objective",
-          questID = 1003,
-          title = "Scout Objective",
-          reviewStatus = "verified",
-          requires = { op = "quest_active", questID = 1003 },
-          eligibility = { faction = "Alliance" },
-          completionPredicate = { type = "quest_objectives_complete_or_turned_in", questID = 1003 },
-          destination = { coordinateSpace = "uiMap01", coordConfidence = "artifact_verified", uiMapID = 2548, areaID = 16591, x01 = 0.1700, y01 = 0.2100 },
-        },
-      },
-    }
-
-    -- 1. 210 yd objective beats 1,500 yd leaf turn-in
-    local progA = ns.State.MigrateRouteProgress({ mode = "standalone" }, synthRoute)
-    local ctxA = makeMockCtx({
-      level = 40,
-      active = { [1001] = true, [1002] = true },
-      completed = { [1003] = true },
-      objectives = { [1001] = true, [1002] = false },
-    })
-    local posStart = { status = "ok", uiMapID = 2548, x01 = 0.1000, y01 = 0.2000 }
-    local evalA = RouteProgress.Reconcile(synthRoute, progA, ctxA, posStart)
-    assertTrue(
-      evalA.nextAction ~= nil and evalA.nextAction.actionID == "st_obj_1002",
-      "210 yd objective must beat 1,620 yd leaf turn-in, got: " .. tostring(evalA.nextAction and evalA.nextAction.actionID)
-    )
-    assertTrue(
-      evalA.plan ~= nil and evalA.plan.hubReturnPlanned == false and evalA.plan.deferredReadyCount == 1,
-      "Deferred ready leaf turn-in must set hubReturnPlanned=false and deferredReadyCount=1"
-    )
-
-    -- 2. Continuity check at 219 / 220 / 221 yards (zero priority cliff)
-    local ctxLeafOnly = makeMockCtx({
-      level = 40,
-      active = { [1001] = true },
-      completed = { [1002] = true, [1003] = true },
-      objectives = { [1001] = true },
-    })
-    local function leafScoreAtYards(yd)
-      local x = 0.5500 - (yd / 3600.0)
-      local ev = RoutePlanner.EvaluateRoute(
-        synthRoute,
-        ns.State.MigrateRouteProgress({ mode = "standalone" }, synthRoute),
-        ctxLeafOnly,
-        { status = "ok", uiMapID = 2548, x01 = x, y01 = 0.2000 }
-      )
-      local sb = ev.plan.groupScores["sg_npc_9001"]
-      return sb and sb.score or 0
-    end
-    local s219, s220, s221 = leafScoreAtYards(219.0), leafScoreAtYards(220.0), leafScoreAtYards(221.0)
-    assertTrue(
-      math.abs(s220 - s219) < 4.0 and math.abs(s221 - s220) < 4.0,
-      string.format("Continuous score must have zero cliff across 219/220/221 yd (got %.2f / %.2f / %.2f)", s219, s220, s221)
-    )
-
-    -- 3. Joint AND-gate + camp-overlap counterfactual batch valuation on real Riverglades route (94879 + 94881 -> 94907 near active 94889)
-    local ctxSingle94879 = makeMockCtx({
-      level = 40,
-      active = { [94879] = true, [94881] = true, [94889] = true },
-      objectives = { [94879] = true, [94881] = false, [94889] = false },
-    })
-    local ctxJointNoWestCamp = makeMockCtx({
-      level = 40,
-      active = { [94879] = true, [94881] = true },
-      objectives = { [94879] = true, [94881] = true },
-    })
-    local ctxJointWithWestCamp = makeMockCtx({
-      level = 40,
-      active = { [94879] = true, [94881] = true, [94889] = true },
-      objectives = { [94879] = true, [94881] = true, [94889] = false },
-    })
-    local posSunny = { status = "ok", uiMapID = 2548, x01 = 0.4800, y01 = 0.5400 }
-    local evSingle = RoutePlanner.EvaluateRoute(route, ns.State.MigrateRouteProgress({ mode = "standalone" }, route), ctxSingle94879, posSunny)
-    local evNoWest = RoutePlanner.EvaluateRoute(route, ns.State.MigrateRouteProgress({ mode = "standalone" }, route), ctxJointNoWestCamp, posSunny)
-    local evJoint = RoutePlanner.EvaluateRoute(route, ns.State.MigrateRouteProgress({ mode = "standalone" }, route), ctxJointWithWestCamp, posSunny)
-    local sbSingle = evSingle.plan.groupScores["sg_farholde_citadel"]
-    local sbNoWest = evNoWest.plan.groupScores["sg_farholde_citadel"]
-    local sbJoint = evJoint.plan.groupScores["sg_farholde_citadel"]
-    assertTrue(
-      sbSingle ~= nil and sbSingle.unlockBenefit == 0,
-      "Completing 94879 alone must NOT falsely credit AND-gated 94907"
-    )
-    assertTrue(
-      sbNoWest ~= nil and sbNoWest.unlockBenefit == 0,
-      "Unlocking 94907 without an active Western Conduit camp quest must not claim double-clear credit across the zone"
-    )
-    assertTrue(
-      sbJoint ~= nil and sbJoint.unlockBenefit > 150,
-      "Joint completion of 94879 + 94881 while holding Western Conduit quest 94889 must award double-clear avoidance credit"
-    )
-
-    -- 4. Pure read-only Evaluate / Presenter snapshot never mutates progress or drift table
-    local progPure = ns.State.MigrateRouteProgress({ mode = "standalone" }, route)
-    RouteProgress.Reconcile(route, progPure, ctxJointWithWestCamp, posSunny)
-    local savedEpoch = progPure.routingEpoch
-    local savedSig = progPure.committedDecisionSig
-    RouteProgress.Evaluate(route, progPure, ctxJointWithWestCamp, { status = "ok", uiMapID = 2548, x01 = 0.6100, y01 = 0.7900 })
-    assertTrue(
-      progPure.routingEpoch == savedEpoch and progPure.committedDecisionSig == savedSig,
-      "RouteProgress.Evaluate must remain 100% pure and never mutate progress commitment state"
-    )
-  end)
-
-  ns.State.overridePlayerPosition = savedGlobalPlayerPos
-  if _G.ForeverHubDB then
-    _G.ForeverHubDB.discoveredQuestIds = savedSuiteDiscoveredIds or {}
-    _G.ForeverHubDB.discoveredQuestTitlesById = savedSuiteDiscoveredTitles or {}
-  end
-  if charDB then
-    charDB.routeProgress = savedRGProg
-    charDB.goldFarmProgress = savedGFProg
-  end
-  restoreNavigationSnapshot(navSnap, charDB)
-
-  local report = {
-    passed = passed,
-    failed = failed,
-    total = passed + failed,
-    results = results,
-  }
-  SelfTest.cachedReports.riverglades = report
-  SelfTest._running.riverglades = false
-  return report
-end
-
--- ============================================================================
 -- v0.5.0 Gold Farms & Single-Owner Navigation Acceptance Gates (GF-1 .. GF-10)
 -- Maps 1-to-1 to Astra's 10 Mandatory Offline Acceptance Gates with deliberate failure cases.
 -- ============================================================================
@@ -3292,7 +989,6 @@ function SelfTest.RunGoldFarmsSuite()
 
   local charDB = ns.State.GetCharDB()
   local savedGFProg = deepCopyTable(charDB.goldFarmProgress)
-  local savedRGProg = deepCopyTable(charDB.routeProgress)
   local savedGFTelem = deepCopyTable(charDB.goldFarmTelemetry)
   local savedMountTracker = deepCopyTable(charDB.mountTracker)
   local savedGFSess = deepCopyTable(ns.State.goldFarmSession)
@@ -3309,7 +1005,7 @@ function SelfTest.RunGoldFarmsSuite()
   local function resetNavOwnerForTest()
     ns.UI.Navigation.StopTravelTicker()
     ns.UI.Navigation.hydratedFromSaved = true
-    ns.UI.Navigation.activeContext = "riverglades"
+    ns.UI.Navigation.activeContext = "gold_farm"
     ns.UI.Navigation.owner = {
       ownerContext = nil,
       generation = 0,
@@ -3336,31 +1032,44 @@ function SelfTest.RunGoldFarmsSuite()
   }
 
   local suiteOk, suiteErr = pcall(function()
-    -- Gate 1: Ownership across RG <-> Gold in combat, failed clear, restricted read, user replacement & rapid Stop
+    -- Gate 1: Single Navigation Owner across legacy SavedVariables sanitization, combat deferral, failed clear, restricted read & rapid Stop
     check("GF-1. Gate 1: Single Navigation Owner Across Combat, Failed Clear, Restricted Read & Rapid Switches", function()
       resetNavOwnerForTest()
       _G.TomTom = nil
       _G.RXPGuides = nil
       _G.RXPCData = nil
       ns.State.overrideInCombat = false
-      ns.State.overrideNativeWaypointState = { supported = true, current = nil }
-
-      charDB.routeProgress = ns.State.MigrateRouteProgress({}, ns.State.GetCompiledRivergladesRoute())
+      ns.State.overrideNativeWaypointState = {
+        supported = true,
+        current = { uiMapID = 2548, x01 = 0.6062, y01 = 0.8153 },
+      }
       charDB.goldFarmProgress = ns.State.MigrateGoldFarmProgress({}, catalog)
 
-      -- 1) RG acquires native pin on 2548
-      local okRG, rgEval = ns.Domain.RouteProgress.Start()
-      assertTrue(okRG, "RG Start failed")
-      local stRG = ns.UI.Navigation.SyncFromEvaluation(rgEval)
-      assertTrue(stRG.activeProvider == "native_waypoint" and ns.State.overrideNativeWaypointState.current.uiMapID == 2548, "RG owns 2548 pin")
+      -- 1) Legacy Riverglades SavedVariables ownership token is sanitized into pendingRelease under gold_farm
+      charDB.navigationOwner = {
+        ownerContext = "riverglades",
+        generation = 1,
+        provider = "native_waypoint",
+        handle = { uiMapID = 2548, x01 = 0.6062, y01 = 0.8153 },
+        pendingRelease = false,
+      }
+      local migratedOwner = ns.State.EnsureNavigationOwnerInitialized(true)
+      assertTrue(
+        migratedOwner.ownerContext == "gold_farm"
+          and migratedOwner.pendingRelease == true
+          and migratedOwner.handle ~= nil,
+        "Legacy Riverglades navigationOwner must convert to pendingRelease under gold_farm"
+      )
+      ns.UI.Navigation.hydratedFromSaved = false
+      ns.UI.Navigation.HydrateOwnerFromSavedStateIfUnset()
 
-      -- 2) Enter combat -> switch RG -> Gold Farm #1 (1432): RG pauses, release deferred, token retained by RG!
+      -- 2) Enter combat -> start Gold Farm #1 (1432): release of 2548 pin is deferred, token retained!
       ns.State.overrideInCombat = true
       local okGF, gfEval = GoldFarms.Start(1, catalog, charDB.goldFarmProgress, { status = "unavailable" })
-      assertTrue(okGF and charDB.routeProgress.mode == "paused", "Switching to Gold must pause RG")
+      assertTrue(okGF, "Gold Farm #1 Start must succeed")
       local stGFDeferred = ns.UI.Navigation.SyncFromGoldFarmEvaluation(gfEval, charDB.goldFarmProgress)
-      assertTrue(stGFDeferred.deferred == true, "Gold acquisition must defer while RG release is blocked in combat")
-      assertTrue(ns.UI.Navigation.owner.ownerContext == "riverglades" and ns.UI.Navigation.owner.pendingRelease == true, "RG ownership token must be retained during combat")
+      assertTrue(stGFDeferred.deferred == true, "Gold acquisition must defer while prior release is blocked in combat")
+      assertTrue(ns.UI.Navigation.owner.pendingRelease == true and ns.UI.Navigation.owner.handle ~= nil, "Ownership token must be retained during combat")
       assertTrue(ns.State.overrideNativeWaypointState.current.uiMapID == 2548, "Live 2548 pin remains until combat ends")
 
       -- 3) Combat ends, BUT ClearNativeWaypoint fails -> token MUST still be retained (never mistaken for user pin)!
@@ -3368,7 +1077,6 @@ function SelfTest.RunGoldFarmsSuite()
       ns.State.overrideNativeWaypointState.clearMustFail = true
       local flushFail = ns.UI.Navigation.FlushDeferredIfReady()
       assertTrue(flushFail.deferred == true and ns.UI.Navigation.owner.handle ~= nil, "Failed clear must retain ownership token")
-      assertTrue(ns.UI.Navigation.owner.ownerContext == "riverglades", "Owner context remains riverglades until confirmed release")
 
       -- 4) Clear works, BUT GetNativeWaypoint read is restricted -> token MUST still be retained!
       ns.State.overrideNativeWaypointState.clearMustFail = false
@@ -3382,37 +1090,38 @@ function SelfTest.RunGoldFarmsSuite()
       assertTrue(flushOk.activeProvider == "native_waypoint" and not flushOk.deferred, "Gold must acquire native waypoint once clear is confirmed")
       assertTrue(ns.UI.Navigation.owner.ownerContext == "gold_farm" and ns.State.overrideNativeWaypointState.current.uiMapID == 1432, "Gold now owns 1432 pin")
 
-      -- 6) Enter combat -> user replaces pin with custom Stormwind pin (1453) while deferred -> rapid Gold -> RG -> Stop BEFORE combat ends!
+      -- 6) Enter combat -> user replaces pin with custom Stormwind pin (1453) while deferred -> rapid Gold #2 (2548) -> Stop BEFORE combat ends!
       ns.State.overrideInCombat = true
       local staleGen = ns.UI.Navigation.owner.generation
       ns.State.overrideNativeWaypointState.current = { uiMapID = 1453, x01 = 0.6100, y01 = 0.7200 }
-      local _, rgEvalRapid = ns.Domain.RouteProgress.Start()
-      ns.UI.Navigation.SyncFromEvaluation(rgEvalRapid)
-      local _, rgStopEval = ns.Domain.RouteProgress.Stop()
-      ns.UI.Navigation.SyncFromEvaluation(rgStopEval)
+      local _, gfEvalRapid = GoldFarms.Start("rg_brineshell_twilight", catalog, charDB.goldFarmProgress, { status = "unavailable" })
+      ns.UI.Navigation.SyncFromGoldFarmEvaluation(gfEvalRapid, charDB.goldFarmProgress)
+      local _, gfStopEval = GoldFarms.Stop(charDB.goldFarmProgress)
+      ns.UI.Navigation.SyncFromGoldFarmEvaluation(gfStopEval, charDB.goldFarmProgress)
       assertTrue(not ns.UI.Navigation.IsGenerationCurrent(staleGen), "Stale generation must be invalidated by rapid switches")
       assertTrue(ns.UI.Navigation.owner.pendingDestination == nil, "Stop must cancel pending destination")
 
-      -- Combat ends: user's 1453 pin MUST remain untouched and no stale RG/Gold pin may be written!
+      -- Combat ends: user's 1453 pin MUST remain untouched and no stale Gold pin may be written!
       ns.State.overrideInCombat = false
       ns.UI.Navigation.FlushDeferredIfReady()
-      assertTrue(ns.State.overrideNativeWaypointState.current ~= nil and ns.State.overrideNativeWaypointState.current.uiMapID == 1453, "User replacement pin must survive rapid Gold->RG->Stop")
+      assertTrue(ns.State.overrideNativeWaypointState.current ~= nil and ns.State.overrideNativeWaypointState.current.uiMapID == 1453, "User replacement pin must survive rapid switch->Stop")
       assertTrue(ns.UI.Navigation.owner.provider == "none" and ns.UI.Navigation.owner.handle == nil, "Token dropped cleanly after confirmed user replacement")
 
       -- 7) Out-of-combat failed native clear MUST retain pendingDestination (and Pause MUST cancel pendingDestination)
       resetNavOwnerForTest()
       ns.State.overrideInCombat = false
       ns.State.overrideNativeWaypointState = { supported = true, current = nil }
-      charDB.routeProgress = ns.State.MigrateRouteProgress({}, ns.State.GetCompiledRivergladesRoute())
       charDB.goldFarmProgress = ns.State.MigrateGoldFarmProgress({}, catalog)
 
-      local okRG2, rgEval2 = ns.Domain.RouteProgress.Start()
-      assertTrue(okRG2, "RG2 Start failed")
-      ns.UI.Navigation.SyncFromEvaluation(rgEval2)
-      assertTrue(ns.State.overrideNativeWaypointState.current.uiMapID == 2548, "RG2 owns 2548")
+      local okGF4, gfEval4 = GoldFarms.Start("rg_brineshell_twilight", catalog, charDB.goldFarmProgress, { status = "unavailable" })
+      assertTrue(okGF4, "GF rg_brineshell_twilight Start failed")
+      ns.UI.Navigation.SyncFromGoldFarmEvaluation(gfEval4, charDB.goldFarmProgress)
+      assertTrue(ns.State.overrideNativeWaypointState.current.uiMapID == 2548, "rg_brineshell_twilight owns 2548")
 
-      -- Out of combat, ClearNativeWaypoint fails when switching RG -> Gold Farm #1
+      -- Out of combat, Stop with ClearNativeWaypoint failing leaves pendingRelease = true; starting GF #1 queues pendingDestination!
       ns.State.overrideNativeWaypointState.clearMustFail = true
+      local _, gfStopBefore1 = GoldFarms.Stop(charDB.goldFarmProgress)
+      ns.UI.Navigation.SyncFromGoldFarmEvaluation(gfStopBefore1, charDB.goldFarmProgress)
       local okGF2, gfEval2 = GoldFarms.Start(1, catalog, charDB.goldFarmProgress, { status = "unavailable" })
       assertTrue(okGF2, "GF2 Start failed")
       local stOutOfCombatFail = ns.UI.Navigation.SyncFromGoldFarmEvaluation(gfEval2, charDB.goldFarmProgress)
@@ -3446,11 +1155,13 @@ function SelfTest.RunGoldFarmsSuite()
 
       -- Explicit Pause while release is blocked out of combat MUST cancel pendingDestination
       ns.State.overrideNativeWaypointState.clearMustFail = true
-      local _, rgEval3 = ns.Domain.RouteProgress.Start()
-      ns.UI.Navigation.SyncFromEvaluation(rgEval3)
-      assertTrue(ns.UI.Navigation.owner.pendingDestination ~= nil, "RG pendingDestination queued while Gold clear fails")
-      local _, rgPause3 = ns.Domain.RouteProgress.Pause()
-      ns.UI.Navigation.SyncFromEvaluation(rgPause3)
+      local _, gfStop3 = GoldFarms.Stop(charDB.goldFarmProgress)
+      ns.UI.Navigation.SyncFromGoldFarmEvaluation(gfStop3, charDB.goldFarmProgress)
+      local _, gfEval3 = GoldFarms.Start("rg_brineshell_twilight", catalog, charDB.goldFarmProgress, { status = "unavailable" })
+      ns.UI.Navigation.SyncFromGoldFarmEvaluation(gfEval3, charDB.goldFarmProgress)
+      assertTrue(ns.UI.Navigation.owner.pendingDestination ~= nil, "rg_brineshell_twilight pendingDestination queued while prior clear fails")
+      local _, gfPause3 = GoldFarms.Pause(charDB.goldFarmProgress)
+      ns.UI.Navigation.SyncFromGoldFarmEvaluation(gfPause3, charDB.goldFarmProgress)
       assertTrue(ns.UI.Navigation.owner.pendingDestination == nil, "Explicit Pause must cancel pendingDestination")
       ns.State.overrideNativeWaypointState.clearMustFail = false
       ns.UI.Navigation.FlushDeferredIfReady()
@@ -3957,12 +1668,6 @@ function SelfTest.RunGoldFarmsSuite()
         currentGuide = { group = "RestedXP Alliance", name = "40-41 Badlands" },
       }
       assertTrue(ns.Bridges.RXPBridge.IsGoldFarmGuideSelected("badlands_elementals_coyotes", catalog) == false, "Stale RXPCData must NEVER mark Gold Farm guide selected")
-
-      _G.RXPCData = {
-        currentGuideGroup = ns.Bridges.RXPBridge.RIVERGLADES_GUIDE_GROUP,
-        currentGuideName = ns.Bridges.RXPBridge.RIVERGLADES_GUIDE_NAME,
-      }
-      assertTrue(ns.Bridges.RXPBridge.IsRivergladesGuideSelected() == false, "Stale RXPCData must NEVER mark Riverglades guide selected")
     end)
 
     -- Gate 10: Doctor diagnostics (read-only, non-recursive, addon versions + map capability matrix) & copy hygiene
@@ -4014,7 +1719,6 @@ function SelfTest.RunGoldFarmsSuite()
 
   restoreNavigationSnapshot(navSnap, charDB)
   charDB.goldFarmProgress = savedGFProg
-  charDB.routeProgress = savedRGProg
   charDB.goldFarmTelemetry = savedGFTelem
   charDB.mountTracker = savedMountTracker
   ns.State.goldFarmSession = savedGFSess
@@ -4078,7 +1782,6 @@ function SelfTest.RunWorkspaceUISuite()
   local savedSettings = deepCopyTable(db.settings)
   local savedReservations = deepCopyTable(charDB.reservations)
   local savedNextPriority = charDB.nextPriority
-  local savedRGProg = deepCopyTable(charDB.routeProgress)
   local savedGFProg = deepCopyTable(charDB.goldFarmProgress)
   local savedUserConfirmedTitles = deepCopyTable(charDB.userConfirmedCompletedQuestTitles or {})
   local savedLastUndo = ns.State.lastSuggestionSnapshot
@@ -4228,35 +1931,35 @@ function SelfTest.RunWorkspaceUISuite()
       local orderedRestored = ns.State.GetOrderedReservations()
       assertTrue(#orderedRestored == 1 and orderedRestored[1].quantity == 5, "UNDO_LAST_ACTION must restore cleared plan")
 
-      -- Switching tabs to Riverglades & Gold MUST NOT start navigation or mutate paused route progress!
-      charDB.routeProgress.mode = "paused"
+      -- Switching tabs to Gold, Advisor & Crates MUST NOT start navigation or mutate paused farm progress!
       charDB.goldFarmProgress.mode = "paused"
       local sessActiveBefore = ns.State.goldFarmSession and ns.State.goldFarmSession.active or false
-      Workspace.SetActiveTab("riverglades")
       Workspace.SetActiveTab("gold")
+      Workspace.SetActiveTab("advisor")
       Workspace.SetActiveTab("crates")
-      assertTrue(charDB.routeProgress.mode == "paused", "Switching to Riverglades tab MUST NOT start Riverglades navigation")
       assertTrue(charDB.goldFarmProgress.mode == "paused", "Switching to Gold tab MUST NOT start Gold Farm navigation")
       assertTrue((ns.State.goldFarmSession and ns.State.goldFarmSession.active or false) == sessActiveBefore, "Switching tabs MUST NOT activate farm telemetry")
 
-      -- v0.8.3: Riverglades is default opening tab, migrated from v1 saves, session-fresh on ADDON_LOADED, and featured in Slot #1
+      -- Schema v3: Gold & Farms ('gold') is default opening tab, migrates retired 'riverglades' tab -> 'gold', preserves valid tabs across reloads, and occupies featured Slot #1
       local freshUI = ns.State.MigrateWorkspaceUIState(nil, db.settings)
-      assertTrue(freshUI.schemaVersion == 2 and freshUI.activeTab == "riverglades", "Fresh uiWorkspace must default to 'riverglades' (schema v2)")
-      local migratedV1 = ns.State.MigrateWorkspaceUIState({ schemaVersion = 1, activeTab = "crates", width = 1040 }, db.settings)
-      assertTrue(migratedV1.schemaVersion == 2 and migratedV1.activeTab == "riverglades" and migratedV1.width == 1040, "v1 uiWorkspace must migrate activeTab to 'riverglades' while preserving geometry")
+      assertTrue(freshUI.schemaVersion == 3 and freshUI.activeTab == "gold", "Fresh uiWorkspace must default to 'gold' (schema v3)")
+      local migratedV2RG = ns.State.MigrateWorkspaceUIState({ schemaVersion = 2, activeTab = "riverglades", width = 1040 }, db.settings)
+      assertTrue(migratedV2RG.schemaVersion == 3 and migratedV2RG.activeTab == "gold" and migratedV2RG.width == 1040, "Retired 'riverglades' activeTab must migrate to 'gold' while preserving geometry")
+      local migratedCrates = ns.State.MigrateWorkspaceUIState({ schemaVersion = 2, activeTab = "crates", width = 1040 }, db.settings)
+      assertTrue(migratedCrates.schemaVersion == 3 and migratedCrates.activeTab == "crates" and migratedCrates.width == 1040, "Valid 'crates' activeTab must be preserved across migration")
       db.uiWorkspace.activeTab = "crates"
       ns.State.EnsureWorkspaceUIStateInitialized(false)
-      assertTrue(db.uiWorkspace.activeTab == "crates", "In-session Workspace state must preserve current tab when not on ADDON_LOADED")
+      assertTrue(db.uiWorkspace.activeTab == "crates", "In-session Workspace state must preserve current tab")
       ns.State.EnsureWorkspaceUIStateInitialized(true)
-      assertTrue(db.uiWorkspace.activeTab == "riverglades", "Fresh ADDON_LOADED session must open on 'riverglades'")
+      assertTrue(db.uiWorkspace.activeTab == "crates", "ADDON_LOADED must preserve last valid activeTab ('crates')")
 
       if Workspace.frame and Workspace.frame.tabBar and Workspace.frame.tabBar.__tabs then
         local firstTab = Workspace.frame.tabBar.__tabs[1]
         assertTrue(
-          firstTab and firstTab.__key == "riverglades" and firstTab.__featured == true and firstTab.__iconGlyph == "travel",
-          "Riverglades must occupy featured Slot #1 with compass glyph"
+          firstTab and firstTab.__key == "gold" and firstTab.__featured == true and firstTab.__iconGlyph == "travel",
+          "Gold & Farms must occupy featured Slot #1 with compass glyph"
         )
-        assertTrue(type(firstTab.__badgeText) == "string" and firstTab.__badgeText ~= "", "Riverglades pill badge must populate live on Workspace.Refresh")
+        assertTrue(type(firstTab.__badgeText) == "string" and firstTab.__badgeText ~= "", "Gold & Farms pill badge must populate live on Workspace.Refresh")
       end
     end)
 
@@ -4371,6 +2074,8 @@ function SelfTest.RunWorkspaceUISuite()
         Theme.appliedFontScale = nil
         local rep760Scale125 = CratesUI.RenderInHost(728, 440, true)
         assertDisjointColumns(rep760Scale125, "Compact-760@1.25x")
+        st.textScale = 1.0
+        Theme.appliedFontScale = nil
       end)
 
       if ns.Data and ns.Data.cratesByItemID then
@@ -4409,69 +2114,6 @@ function SelfTest.RunWorkspaceUISuite()
         #CratesUI.cardPool == cards1 and #CratesUI.optionPool == opts1 and #CratesUI.ingredientRowPool == ings1 and #CratesUI.badgePool == badges1,
         "Repeated identical renders must reuse pooled widgets with zero pool growth"
       )
-    end)
-
-    -- UI-05: Surface B (Riverglades) Two-Column Geometry (200+12+700), Compact Mode & Unresolved Quest History Resolver
-    check("UI-05. Surface B (Riverglades): 200+12+700 Geometry, Compact Selector & Unresolved History Undo", function()
-      local RivergladesPresenter = ns.UI.RivergladesPresenter
-      local RivergladesUI = ns.UI.Riverglades
-      assertTrue(type(RivergladesPresenter) == "table" and type(RivergladesUI) == "table", "RivergladesPresenter and RivergladesUI must be loaded")
-
-      charDB.userConfirmedCompletedQuestTitles = {}
-      local st = ns.State.GetWorkspaceUIState()
-      st.textScale = 1.0
-      Theme.appliedFontScale = nil
-
-      Workspace.Show("riverglades")
-      Workspace.SetDimensions(960, 640)
-      local rg960 = RivergladesUI.RenderInHost(928, 560, false)
-      assertTrue(
-        rg960.isCompact == false
-          and rg960.hubSidebarWidth == 200
-          and rg960.columnGap == 12
-          and rg960.detailContentWidth == 700,
-        "Riverglades standard geometry must be 200 sidebar + 12 gap + 700 detail (+ 16 scrollbar = 928)"
-      )
-      for _, h in ipairs(rg960.hubs or {}) do
-        assertTrue(h.height >= 44, "Riverglades hub row height must be >= 44")
-      end
-      for _, r in ipairs(rg960.rows or {}) do
-        if r.kind == "quest" then
-          assertTrue(r.height >= 56, "Riverglades quest row height must be >= 56")
-        end
-      end
-
-      -- Compact < 900 width collapses sidebar into segmented hub bar
-      Workspace.SetDimensions(760, 520)
-      local rg760 = RivergladesUI.RenderInHost(728, 440, true)
-      assertTrue(rg760.isCompact == true and rg760.hubSidebarWidth == 0 and rg760.detailContentWidth == 712, "Compact Riverglades must collapse hub sidebar")
-
-      -- Per-quest unresolved history resolver: Confirm completed -> labeled 'User confirmed' -> Undo restores unresolved!
-      RivergladesUI.Dispatch("CONFIRM_COMPLETED", { questKey = "title:wanted: trapclaw" })
-      assertTrue(
-        ns.State.GetUnresolvedQuestUserDecision("title:wanted: trapclaw") == "user_confirmed_completed",
-        "User decision must record 'user_confirmed_completed'"
-      )
-      local compRes = ns.Compat.IsQuestCompletedResult("title:wanted: trapclaw")
-      assertTrue(
-        compRes.status == "ok" and compRes.value == true and compRes.completionSource == "user_confirmed",
-        "User-confirmed title quest must report completionSource='user_confirmed', never server_verified"
-      )
-      local snapAfterConfirm = RivergladesPresenter.CaptureSnapshot()
-      local vmAfterConfirm = RivergladesPresenter.Build(snapAfterConfirm, st)
-      local sawUserConfirmedDecision = false
-      for _, d in ipairs(vmAfterConfirm.userDecisions or {}) do
-        if d.questKey == "title:wanted: trapclaw" and d.decision == "user_confirmed_completed" then
-          sawUserConfirmedDecision = true
-          break
-        end
-      end
-      assertTrue(sawUserConfirmedDecision, "Confirmed unresolved quest must appear in userDecisions with Undo affordance")
-      RivergladesUI.RenderInHost(928, 560, false, snapAfterConfirm)
-      assertTrue(#RivergladesUI.decisionRowPool >= 1, "Riverglades view must render 'User confirmed' decision row with Undo")
-
-      RivergladesUI.Dispatch("UNDO_HISTORY_DECISION", { questKey = "title:wanted: trapclaw" })
-      assertTrue(ns.State.GetUnresolvedQuestUserDecision("title:wanted: trapclaw") == nil, "Undo must clear user assertion cleanly")
     end)
 
     -- UI-06: Surface C (Gold & Mount) 5 Honest KPIs, Suppressed Short-Sample ETA & Single Primary Button Invariant
@@ -4518,15 +2160,13 @@ function SelfTest.RunWorkspaceUISuite()
       end
     end)
 
-    -- UI-07: Surface D (Compact Tracker HUD 240x48, Schema v3 Migration, Parent-Chain Visibility & 8 State Transitions)
+    -- UI-07: Surface D (Compact Tracker HUD 240x48, Schema v3 Migration, Parent-Chain Visibility & State Transitions)
     check("UI-07. Surface D (Compact Tracker HUD): 240x48 Default, Schema v3 Migration, Parent-Chain Visibility & State Transitions", function()
       local Nav = ns.UI.Navigation
       if Nav and type(_G.CreateFrame) == "function" then
         local arrowSettings = ns.State.GetArrowSettings()
-        local prog = ns.State.GetRouteProgress()
         local gfProg = ns.State.GetGoldFarmProgress()
         local savedArrowSettings = deepCopyTable(arrowSettings)
-        local savedProg = deepCopyTable(prog)
         local savedGfProg = deepCopyTable(gfProg)
         local prevSuppress = Nav.suppressHUDCreation
 
@@ -4603,27 +2243,26 @@ function SelfTest.RunWorkspaceUISuite()
           arrowSettings.hudWidth = 240
           arrowSettings.renderer = "foreverhub"
 
-          prog.mode = "standalone"
-          prog.pausedHudRetained = false
-          Nav.SetArrowTarget(
-            "riverglades",
-            { uiMapID = 2548, x01 = 0.6062, y01 = 0.8153, zoneName = "Riverglades" },
-            "Turn in We've Been Robbed! (Booty Bay)",
-            "We've Been Robbed!",
-            15,
-            "native_waypoint"
-          )
-          Nav.SyncFromEvaluation({
-            counts = { completed = 1, total = 10, skipped = 0 },
-            nextAction = {
-              actionID = "test_turnin_robbed",
-              kind = "turnin",
-              title = "Turn in We've Been Robbed! (Booty Bay)",
-              questName = "We've Been Robbed!",
-              npcName = "Fleet Master Seahorn",
+          local mockFarm = {
+            farmID = "rg_brineshell_twilight",
+            shortLabel = "Farholde Coast",
+            title = "Riverglades: Farholde Coast Clackers & Twilight Raiders",
+            zoneName = "Riverglades",
+          }
+          gfProg.mode = "standalone"
+          gfProg.selectedFarmID = "rg_brineshell_twilight"
+          gfProg.pausedHudRetained = false
+          Nav.SyncFromGoldFarmEvaluation({
+            farm = mockFarm,
+            stepIndex = 1,
+            totalSteps = 4,
+            activeStep = {
+              stepID = "rg_hop_1_farholde_fp",
+              kind = "travel",
+              title = "Hop 1: Arrive at Farholde Keep",
               destination = { uiMapID = 2548, x01 = 0.6062, y01 = 0.8153, zoneName = "Riverglades" },
             },
-          }, prog)
+          }, gfProg)
           Nav.RefreshArrowSettings()
 
           local snapDocked = Nav.GetLiveArrowSnapshot()
@@ -4640,7 +2279,7 @@ function SelfTest.RunWorkspaceUISuite()
             -- Release Blocker #1: Parent-chain effective visibility of `moreBtn` (`...`) when `headerBar` is hidden
             assertTrue(
               Nav.frame.moreBtn ~= nil and getWidgetParent(Nav.frame.moreBtn) == Nav.frame,
-              "moreBtn (...) must be parented directly to ForeverHubRivergladesHUD, not headerBar"
+              "moreBtn (...) must be parented directly to ForeverHubTrackerHUD, not headerBar"
             )
             assertTrue(
               isEffectivelyVisible(Nav.frame.moreBtn),
@@ -4653,71 +2292,49 @@ function SelfTest.RunWorkspaceUISuite()
               "Docked arrow lane distanceText must be empty so distance is never duplicated or truncated under the arrow"
             )
             assertTrue(
-              Nav.frame.stepText:GetText() == "We've Been Robbed!",
-              "Line 1 must show clean quest name only (Option A) without duplicated action prefix"
+              Nav.frame.stepText:GetText() == "Hop 1: Arrive at Farholde Keep",
+              "Line 1 must show clean active step title"
             )
 
             -- Transition 1: Active -> Paused -> Resumed -> Stopped (Release Blocker #2)
-            ns.Domain.RouteProgress.Pause(prog)
-            assertTrue(prog.mode == "paused" and prog.pausedHudRetained == true, "Pause must set pausedHudRetained = true")
-            Nav.SyncFromEvaluation({ counts = { completed = 1, total = 10, skipped = 0 } }, prog)
+            ns.Domain.GoldFarms.Pause(gfProg)
+            assertTrue(gfProg.mode == "paused" and gfProg.pausedHudRetained == true, "Pause must set pausedHudRetained = true")
+            Nav.SyncFromGoldFarmEvaluation({ farm = mockFarm, stepIndex = 1, totalSteps = 4 }, gfProg)
             assertTrue(Nav.frame:IsShown() == true, "Paused session must remain visible in HUD so Resume is reachable")
             assertTrue(Nav.frame.subText:GetText() == "Paused", "Paused HUD Line 2 must display 'Paused'")
-            ns.Domain.RouteProgress.Start(nil, prog)
-            assertTrue(prog.mode == "standalone" and prog.pausedHudRetained == false, "Resume must clear pausedHudRetained")
-            ns.Domain.RouteProgress.Stop(prog)
-            assertTrue(prog.mode == "paused" and prog.pausedHudRetained == false, "Stop must set pausedHudRetained = false")
-            Nav.SyncFromEvaluation({ counts = { completed = 1, total = 10, skipped = 0 } }, prog)
+            ns.Domain.GoldFarms.Start("rg_brineshell_twilight", nil, gfProg, { status = "unavailable" })
+            assertTrue(gfProg.mode == "standalone" and gfProg.pausedHudRetained == false, "Resume must clear pausedHudRetained")
+            ns.Domain.GoldFarms.Stop(gfProg)
+            assertTrue(gfProg.mode == "paused" and gfProg.pausedHudRetained == false, "Stop must set pausedHudRetained = false")
+            Nav.SyncFromGoldFarmEvaluation({ farm = mockFarm, stepIndex = 1, totalSteps = 4 }, gfProg)
             assertTrue(Nav.frame:IsShown() == false, "Stopped session must hide the HUD")
 
             -- Restore active standalone session
-            ns.Domain.RouteProgress.Start(nil, prog)
+            ns.Domain.GoldFarms.Start("rg_brineshell_twilight", nil, gfProg, { status = "unavailable" })
 
-            -- Transition 2: Active -> Blocked (Quest Log Full & Unresolved History) -> Active
-            Nav.SyncFromEvaluation({
-              counts = { completed = 1, total = 10, skipped = 0 },
-              blockedNotice = {
-                state = "blocked_quest_log_full",
-                action = { title = "Accept Screecher Spirits", questName = "Screecher Spirits" },
-              },
-            }, prog)
-            assertTrue(Nav.frame:IsShown() == true, "Blocked quest log full state must show HUD")
-            assertTrue(Nav.frame.stepText:GetText() == "Screecher Spirits", "Blocked quest log full Line 1 must show pending quest")
-            assertTrue(Nav.frame.subText:GetText() == "Quest log full", "Blocked quest log full Line 2 must show 'Quest log full'")
-
-            Nav.SyncFromEvaluation({
-              counts = { completed = 1, total = 10, skipped = 0, blockedUnresolvedHistory = 2 },
-              blockedNotice = {
-                state = "blocked_unresolved_history",
-                action = { title = "Accept Ancientuck", questName = "Ancientuck" },
-              },
-            }, prog)
-            assertTrue(Nav.frame.subText:GetText() == "Review in Workspace", "Unresolved history Line 2 must show 'Review in Workspace'")
-
-            -- Transition 3: ForeverHub -> RXP -> ForeverHub (with disabled step actions in RXP mode)
+            -- Transition 2: ForeverHub -> RXP -> ForeverHub (with disabled step actions in RXP mode)
             local rxpBridge = ns.Bridges and ns.Bridges.RXPBridge
-            local savedIsRgSelected = rxpBridge and rxpBridge.IsRivergladesGuideSelected
+            local savedIsGfSelected = rxpBridge and rxpBridge.IsGoldFarmGuideSelected
             if rxpBridge then
-              rxpBridge.IsRivergladesGuideSelected = function()
+              rxpBridge.IsGoldFarmGuideSelected = function()
                 return true
               end
             end
-            prog.mode = "rxp"
-            Nav.SyncFromEvaluation({ counts = { completed = 1, total = 10, skipped = 0 } }, prog)
+            Nav.SyncFromGoldFarmEvaluation({ farm = mockFarm, stepIndex = 1, totalSteps = 4 }, gfProg)
             if rxpBridge then
-              rxpBridge.IsRivergladesGuideSelected = savedIsRgSelected
+              rxpBridge.IsGoldFarmGuideSelected = savedIsGfSelected
             end
-            assertTrue(Nav.frame.subText:GetText() == "Controlled by RXP", "RXP mode Line 2 must show 'Controlled by RXP'")
-            assertTrue(Nav.frame.nextBtn and Nav.frame.nextBtn.__disabled == true, "Skip button must be disabled in RXP mode")
+            assertTrue(gfProg.mode == "rxp" and Nav.frame.subText:GetText() == "Controlled by RXP", "RXP mode Line 2 must show 'Controlled by RXP'")
+            assertTrue(Nav.frame.nextBtn and Nav.frame.nextBtn.__disabled == true, "Next button must be disabled in RXP mode")
             assertTrue(Nav.frame.prevBtn and Nav.frame.prevBtn.__disabled == true, "Prev button must be disabled in RXP mode")
             assertTrue(Nav.frame.pauseToggleBtn and Nav.frame.pauseToggleBtn.__disabled == true, "Pause button must be disabled in RXP mode")
-            prog.mode = "standalone"
+            gfProg.mode = "standalone"
 
-            -- Transition 4: Riverglades -> Gold Farm context switch closes overflowMenu
+            -- Transition 3: Context switch / farm switch closes overflowMenu
             if Nav.frame.overflowMenu and Nav.frame.overflowMenu.Show then
               Nav.frame.overflowMenu:Show()
             end
-            gfProg.mode = "standalone"
+            Nav.RequestContextSwitch("gold_farm")
             gfProg.selectedFarmID = "feralas_nagash"
             Nav.SyncFromGoldFarmEvaluation({
               farm = { farmID = "feralas_nagash", shortLabel = "Feralas", title = "Feralas Naga", zoneName = "Feralas" },
@@ -4732,45 +2349,45 @@ function SelfTest.RunWorkspaceUISuite()
             }, gfProg)
             assertTrue(
               Nav.frame.overflowMenu == nil or Nav.frame.overflowMenu:IsShown() == false,
-              "Context switch from Riverglades to Gold Farm must close overflowMenu"
+              "Context switch must close overflowMenu"
             )
             assertTrue(Nav.frame.stepText:GetText() == "Southern Isle Cave", "Gold Farm Line 1 must show step name")
-            gfProg.mode = "paused"
-            gfProg.pausedHudRetained = false
 
-            -- Transition 5: Target A -> Target B at identical distance invalidates composite Line 2 cache key
+            -- Transition 4: Target A -> Target B at identical distance invalidates composite Line 2 cache key
             local savedCompute = ns.Compat.ComputeNavigationVector
             ns.Compat.ComputeNavigationVector = function()
               return { status = "ok", yards = 125, isCrossZone = false, rotationRadians = 0, absTurnRadians = 0 }
             end
             local okVecTests, errVecTests = pcall(function()
-              Nav.SyncFromEvaluation({
-                counts = { completed = 1, total = 10, skipped = 0 },
-                nextAction = {
-                  actionID = "target_a",
-                  kind = "accept",
-                  title = "Accept Target Alpha",
-                  questName = "Target Alpha",
+              Nav.SyncFromGoldFarmEvaluation({
+                farm = mockFarm,
+                stepIndex = 1,
+                totalSteps = 4,
+                activeStep = {
+                  stepID = "target_a",
+                  kind = "travel",
+                  title = "Target Alpha",
                   destination = { uiMapID = 2548, x01 = 0.20, y01 = 0.20, zoneName = "Riverglades" },
                 },
-              }, prog)
+              }, gfProg)
               local keyA = Nav.frame.__lastLine2CompositeKey
               assertTrue(Nav.frame.subText:GetText() == "125 yds", "Docked normal navigation Line 2 must show numeric distance")
 
-              Nav.SyncFromEvaluation({
-                counts = { completed = 1, total = 10, skipped = 0 },
-                nextAction = {
-                  actionID = "target_b",
-                  kind = "accept",
-                  title = "Accept Target Beta",
-                  questName = "Target Beta",
+              Nav.SyncFromGoldFarmEvaluation({
+                farm = mockFarm,
+                stepIndex = 2,
+                totalSteps = 4,
+                activeStep = {
+                  stepID = "target_b",
+                  kind = "travel",
+                  title = "Target Beta",
                   destination = { uiMapID = 2548, x01 = 0.80, y01 = 0.80, zoneName = "Riverglades" },
                 },
-              }, prog)
+              }, gfProg)
               local keyB = Nav.frame.__lastLine2CompositeKey
               assertTrue(keyA ~= keyB, "Composite Line 2 cache key must change when switching from Target A to Target B at equal distance")
 
-              -- Transition 6: Docked -> Undocked -> HUD Hidden
+              -- Transition 5: Docked -> Undocked -> HUD Hidden
               arrowSettings.dockedInHud = false
               Nav.RefreshArrowSettings()
               local snapUndocked = Nav.GetLiveArrowSnapshot()
@@ -4785,7 +2402,7 @@ function SelfTest.RunWorkspaceUISuite()
               arrowSettings.dockedInHud = true
               Nav.RefreshArrowSettings()
 
-              -- Transition 7: Valid vector -> Unavailable -> Recovered
+              -- Transition 6: Valid vector -> Unavailable -> Recovered
               ns.Compat.ComputeNavigationVector = function()
                 return { status = "unavailable" }
               end
@@ -4805,7 +2422,7 @@ function SelfTest.RunWorkspaceUISuite()
               error(errVecTests, 2)
             end
 
-            -- Transition 8: Tick 20 Hz docked arrow lane OnUpdate callback & verify single-shot circuit breaker
+            -- Transition 7: Tick 20 Hz docked arrow lane OnUpdate callback & verify single-shot circuit breaker
             local dockedLane = Nav.frame.dockedArrowLane
             if dockedLane and dockedLane.arrowTex then
               local dockedUpdate = (dockedLane.__scripts and dockedLane.__scripts["OnUpdate"])
@@ -4856,7 +2473,7 @@ function SelfTest.RunWorkspaceUISuite()
             if hideBtn then
               fireButtonClick(hideBtn)
               assertTrue(arrowSettings.hudHidden == true, "Hide tracker must mark hudHidden = true")
-              assertTrue(prog.mode == "standalone" and Nav.activeTarget ~= nil, "Hide tracker MUST keep active navigation running")
+              assertTrue(gfProg.mode == "standalone" and Nav.activeTarget ~= nil, "Hide tracker MUST keep active navigation running")
               local snapHidden = Nav.GetLiveArrowSnapshot()
               assertTrue(
                 not (snapHidden.dockedVisible and snapHidden.floatingVisible),
@@ -4898,12 +2515,6 @@ function SelfTest.RunWorkspaceUISuite()
         end
         for k, v in pairs(savedArrowSettings) do
           arrowSettings[k] = v
-        end
-        for k in pairs(prog) do
-          prog[k] = nil
-        end
-        for k, v in pairs(savedProg) do
-          prog[k] = v
         end
         for k in pairs(gfProg) do
           gfProg[k] = nil
@@ -4983,6 +2594,49 @@ function SelfTest.RunWorkspaceUISuite()
             assertTrue(f.rowPool[6].valueText:GetText() == "No vendor price", "Zero sellPrice reward must show 'No vendor price'")
           end
           RA.OnQuestFinished()
+
+          -- Also verify stack quantities, ties, partial pricing & stale async callback rejection on RewardAdvisor
+          local savedPrices = ns.State.overrideItemSellPrices
+          local savedLoads = ns.State.requestedItemLoads
+          local okStack, errStack = pcall(function()
+            ns.State.requestedItemLoads = {}
+            ns.State.overrideItemSellPrices = { [70001] = 1500, [70002] = 400, [70003] = "loading" }
+            local snapPartial = {
+              status = "ok",
+              questID = 94879,
+              questTitle = "Plaguelands Supplies",
+              choices = {
+                { choiceIndex = 1, itemID = 70001, name = "Heavy Mace", quantity = 1 },
+                { choiceIndex = 2, itemID = 70002, name = "Mana Potion Bundle", quantity = 5 },
+                { choiceIndex = 3, itemID = 70003, name = "Uncached Robe", quantity = 1 },
+              },
+            }
+            local eval1, gen1 = RA.OnQuestComplete(snapPartial)
+            assertTrue(eval1.status == "partial", "Uncached choice must produce partial status")
+            assertTrue(eval1.bestVendorCopper == 2000 and eval1.bestChoices[1].choiceIndex == 2, "5x 400c (2000c) must beat 1x 1500c")
+            assertTrue(ns.State.requestedItemLoads[70003] == 1, "Must request async item load for uncached item 70003")
+
+            ns.State.overrideItemSellPrices = { [80001] = 1200, [80002] = 1200 }
+            local snapTie = {
+              status = "ok",
+              questID = 94881,
+              questTitle = "Timbermaw Tribute",
+              choices = {
+                { choiceIndex = 1, itemID = 80001, name = "Cloth Bracers", quantity = 1 },
+                { choiceIndex = 2, itemID = 80002, name = "Plate Bracers", quantity = 1 },
+              },
+            }
+            local evalTie, gen2 = RA.OnQuestComplete(snapTie)
+            assertTrue(gen2 > gen1 and evalTie.status == "complete" and evalTie.isTie == true and #evalTie.bestChoices == 2, "Exact copper tie must report both choices")
+            local handledStale, staleReason = RA.OnItemInfoReceived(70003, true, gen1, snapTie)
+            assertTrue(handledStale == false and staleReason == "stale_generation_discarded", "Late callback from old generation must be discarded")
+            RA.OnQuestFinished()
+          end)
+          ns.State.overrideItemSellPrices = savedPrices
+          ns.State.requestedItemLoads = savedLoads
+          if not okStack then
+            error(errStack, 2)
+          end
         end)
         _G.C_Item = savedCItem
         RA.active = savedRAActive
@@ -5187,7 +2841,6 @@ function SelfTest.RunWorkspaceUISuite()
   db.settings = savedSettings
   charDB.reservations = savedReservations
   charDB.nextPriority = savedNextPriority
-  charDB.routeProgress = savedRGProg
   charDB.goldFarmProgress = savedGFProg
   charDB.userConfirmedCompletedQuestTitles = savedUserConfirmedTitles
   ns.State.lastSuggestionSnapshot = savedLastUndo
@@ -5218,6 +2871,2027 @@ function SelfTest.RunWorkspaceUISuite()
     SelfTest.cachedReports.workspace_ui = report
   end
   SelfTest._running.workspace_ui = false
+
+  if not suiteOk then
+    error(suiteErr, 2)
+  end
+
+  return report
+end
+
+function SelfTest.RunPhase0MarketSuite()
+  if SelfTest._running.phase0_market then
+    error("Recursive SelfTest.RunPhase0MarketSuite invocation forbidden", 2)
+  end
+  SelfTest._running.phase0_market = true
+  SelfTest.suiteRunCounts.phase0_market = (SelfTest.suiteRunCounts.phase0_market or 0) + 1
+
+  local results = {}
+  local passed = 0
+  local failed = 0
+
+  local function check(name, fn)
+    local ok, err = pcall(fn)
+    if ok then
+      passed = passed + 1
+      table.insert(results, { name = name, passed = true })
+    else
+      failed = failed + 1
+      table.insert(results, { name = name, passed = false, error = tostring(err) })
+    end
+  end
+
+  local db = _G.ForeverHubDB or {}
+  local savedSibling = _G.ForeverHub_MarketData
+  local savedExport = deepCopyTable(db.marketExport)
+  local savedIsSecret = _G.issecretvalue
+  local savedGetRealm = _G.GetRealmName
+
+  local suiteOk, suiteErr = pcall(function()
+    local MI = ns.Domain and ns.Domain.MarketIdentity
+    local MA = ns.Domain and ns.Domain.MarketAccounting
+    assertTrue(type(MI) == "table", "MarketIdentity module must load")
+    assertTrue(type(MA) == "table", "MarketAccounting module must load")
+
+    check("Phase0.1: MarketKey isolates realms and auction pools without merging unverified connected realms", function()
+      local mkAlliance = MI.BuildMarketKey({
+        product = "wowf",
+        ruleset = "wow_forever",
+        region = "US",
+        realmName = "Evergreen",
+        connectedRealmRoot = "Cluster-A",
+        connectedRealmVerified = false,
+        auctionPoolID = "alliance",
+        layerID = 4,
+      })
+      local mkHorde = MI.BuildMarketKey({
+        product = "wowf",
+        ruleset = "wow_forever",
+        region = "US",
+        realmName = "Evergreen",
+        auctionPoolID = "horde",
+      })
+      local mkNeutral = MI.BuildMarketKey({
+        product = "wowf",
+        ruleset = "wow_forever",
+        region = "US",
+        realmName = "Evergreen",
+        auctionPoolID = "neutral",
+      })
+      local mkConnected = MI.BuildMarketKey({
+        product = "wowf",
+        ruleset = "wow_forever",
+        region = "US",
+        realmName = "Evergreen",
+        connectedRealmRoot = "Cluster A",
+        connectedRealmVerified = true,
+        auctionPoolID = "alliance",
+      })
+      assertTrue(mkAlliance == "m1:wowf:wow_forever:us:r:evergreen:alliance", "Unexpected Alliance marketKey: " .. tostring(mkAlliance))
+      assertTrue(mkHorde == "m1:wowf:wow_forever:us:r:evergreen:horde", "Unexpected Horde marketKey")
+      assertTrue(mkNeutral == "m1:wowf:wow_forever:us:r:evergreen:neutral", "Unexpected Neutral marketKey")
+      assertTrue(mkAlliance ~= mkHorde and mkAlliance ~= mkNeutral, "Faction and neutral pools must remain distinct")
+      assertTrue(mkConnected == "m1:wowf:wow_forever:us:cr:cluster-a:alliance", "Verified connected realm uses cr prefix")
+    end)
+
+    check("Phase0.2: ItemKey separates fungible base, random-suffix variants, unknown_variant, recipes, and services", function()
+      local base = MI.ClassifyItemIdentity({
+        itemID = 2770,
+        verifiedBaseSet = { [2770] = true },
+      })
+      assertTrue(base and base.itemKey == "i1:base:2770" and base.tradeSafe == true, "Copper Ore must classify as verified_base_item")
+
+      -- Positive suffix with two different instance GUIDs in field 8 must collapse to same variant key
+      local varA = MI.ClassifyItemIdentity({
+        itemLink = "|cff1eff00|Hitem:9811:0:0:0:0:0:1204:99887766:25|h[Bandit Jerkin of the Bear]|h|r",
+        isVariantCapable = true,
+      })
+      local varB = MI.ClassifyItemIdentity({
+        itemLink = "|cff1eff00|Hitem:9811:0:0:0:0:0:1204:11223344:60|h[Bandit Jerkin of the Bear]|h|r",
+        isVariantCapable = true,
+      })
+      assertTrue(varA and varB and varA.itemKey == varB.itemKey, "Instance uniqueID and linkLevel must be stripped for positive suffix")
+      assertTrue(varA.itemKey == "i1:var:9811:s=1204:f=0:e=0:c=0", "Unexpected positive-suffix variant key: " .. tostring(varA.itemKey))
+
+      -- Negative suffix preserves 16-bit scaling factor
+      local varNeg = MI.ClassifyItemIdentity({
+        itemLink = "item:15212:0:0:0:0:0:-18:65560:60",
+        isVariantCapable = true,
+      })
+      assertTrue(varNeg and varNeg.itemKey == "i1:var:15212:s=-18:f=24:e=0:c=0", "Negative suffix must retain low-16-bit factor")
+
+      -- Variant-capable item observed by itemID ONLY must fail closed as `unknown_variant` (`tradeSafe = false`)
+      local unk = MI.ClassifyItemIdentity({
+        itemID = 9811,
+        isVariantCapable = true,
+      })
+      assertTrue(unk and unk.classification == "unknown_variant" and unk.itemKey == "i1:unk_var:9811", "Missing link on gear must be unknown_variant")
+      assertTrue(unk.tradeSafe == false, "unknown_variant MUST NOT be tradeSafe")
+
+      -- Recipe item vs service
+      local rec = MI.ClassifyItemIdentity({ kind = "recipe", itemID = 16221 })
+      local svc = MI.ClassifyItemIdentity({ kind = "service", professionSlug = "Enchanting", spellID = 20025 })
+      assertTrue(rec and rec.itemKey == "i1:recipe:16221", "Recipe itemKey mismatch")
+      assertTrue(svc and svc.itemKey == "i1:service:enchanting:20025", "Service itemKey mismatch")
+    end)
+
+    check("Phase0.3: Secret/restricted values are guarded BEFORE comparisons, arithmetic, or indexing", function()
+      local SECRET = setmetatable({}, {
+        __eq = function()
+          error("Forbidden __eq on secret value!")
+        end,
+        __lt = function()
+          error("Forbidden __lt on secret value!")
+        end,
+        __tostring = function()
+          error("Forbidden __tostring on secret value!")
+        end,
+      })
+      _G.issecretvalue = function(v)
+        return rawget({ [SECRET] = true }, v) == true
+      end
+      assertTrue(MI.SlugifyToken(SECRET) == nil, "SlugifyToken must reject secret value safely")
+      assertTrue(MI.ParseItemHyperlink(SECRET) == nil, "ParseItemHyperlink must reject secret value safely")
+      assertTrue(MI.ClassifyItemIdentity({ itemID = SECRET }) == nil, "ClassifyItemIdentity must reject secret itemID")
+      assertTrue(MA.ComputeCommissionCopper(SECRET, 500) == nil, "ComputeCommissionCopper must reject secret copper")
+      _G.issecretvalue = savedIsSecret
+    end)
+
+    check("Phase0.4: Overflow-safe half-up copper commission and whole-stack ask ladder execution", function()
+      assertTrue(MA.ComputeCommissionCopper(9, 500) == 0, "9c * 5% = 0.45c -> 0c")
+      assertTrue(MA.ComputeCommissionCopper(10, 500) == 1, "10c * 5% = 0.50c -> 1c half-up")
+      assertTrue(MA.ComputeCommissionCopper(10000, 500) == 500, "1g * 5% -> 5s")
+      assertTrue(MA.ComputeCommissionCopper(10000, 1500) == 1500, "1g * 15% neutral -> 15s")
+      local hugeComm = MA.ComputeCommissionCopper(500000000010, 500)
+      assertTrue(hugeComm == 25000000001, "Large copper commission must stay exact without 53-bit overflow")
+
+      local rungs = {
+        { stackSize = 20, stackBuyoutCopper = 2000, numStacks = 2 }, -- 100c/u, 2000c per full stack
+        { stackSize = 5, stackBuyoutCopper = 700, numStacks = 1 },   -- 140c/u, 700c for 5
+      }
+      local whole = MA.WalkAskLadderEntryCost(rungs, 5, false)
+      assertTrue(whole and whole.sufficientDepth == true, "Depth sufficient")
+      -- Buying the 5-stack @ 700c beats over-buying a 20-stack @ 2000c when only 5 units are needed!
+      assertTrue(whole.entryCostCopper == 700 and whole.acquiredUnits == 5, "Whole-stack optimizer should pick 700c 5-stack over 2000c 20-stack")
+
+      local partial = MA.WalkAskLadderEntryCost(rungs, 5, true)
+      assertTrue(partial and partial.entryCostCopper == 500 and partial.acquiredUnits == 5, "Commodity partial stack buys 5 units @ 100c = 500c")
+
+      local deep = MA.WalkAskLadderEntryCost(rungs, 50, false)
+      assertTrue(deep and deep.sufficientDepth == false and deep.status == "insufficient_depth", "Must flag insufficient_depth above 45 units")
+    end)
+
+    check("Phase0.5: Liquidation policy R_pi(q,H) and 1-copper sale/expired mail reconciliation", function()
+      local liq = MA.EvaluateLiquidationPolicy({
+        quantity = 10,
+        vendorable = true,
+        vendorUnitCopper = 200, -- vendor_now = 2000c
+        saleUnitPriceCopper = 500,
+        saleProbabilityBps = 8000, -- 80% sell at (5000 - 250 = 4750) -> 3800c + 20% vendor fallback (400c) = 4200c
+        cutBps = 500,
+        depositPerAttemptCopper = 120,
+        expectedFailedAttemptsBps = 2500, -- 0.25 * 120 = 30c
+        expectedCancelFeeCopper = 0,
+        liquidationOpsCopper = 20,
+      })
+      assertTrue(liq and liq.status == "ok" and liq.bestPolicy == "ah_horizon", "AH horizon should beat vendor_now")
+      assertTrue(liq.totalRealizableCopper == 4150, "Expected 3800 + 400 - 30 - 20 = 4150c, got " .. tostring(liq.totalRealizableCopper))
+
+      local sale, errSale = MA.ReconcileMailOutcome({
+        outcomeType = "SALE_INVOICE",
+        grossSaleCopper = 10000,
+        commissionCopper = 500,
+        depositRefundedCopper = 300,
+        cashReceivedCopper = 9800,
+        entryCostCopper = 7000,
+        priorFailedDepositsCopper = 300,
+        expectedCutBps = 500,
+      })
+      assertTrue(sale and errSale == nil, "Sale reconciliation must succeed")
+      assertTrue(sale.reconciledExact == true and sale.discrepancyCopper == 0, "Cash received 9800 must match 10000 - 500 + 300")
+      assertTrue(sale.principalReturnedCopper == 300, "Deposit refund is returned principal")
+      assertTrue(sale.economicProfitCopper == 2200, "Economic profit = (10000 - 500) - 7000 - 300 = 2200c (deposit refund excluded!)")
+
+      local exp = MA.ReconcileMailOutcome({
+        outcomeType = "EXPIRED_RETURN",
+        depositPostedCopper = 300,
+      })
+      assertTrue(exp and exp.depositLostCopper == 300 and exp.realizedAttemptFeeDeltaCopper == -300, "Expired listing loses deposit")
+    end)
+
+    check("Phase0.6: Four-timestamp preservation and ForeverHub_MarketData sibling status checks", function()
+      _G.GetRealmName = function()
+        return "Evergreen"
+      end
+      db.marketExport = nil
+      MA.EnsureMarketExportInitialized()
+      local obs, errObs = MA.RecordMaterialObservation({
+        marketKey = "m1:wowf:wow_forever:us:r:evergreen:alliance",
+        itemID = 2770,
+        verifiedBaseSet = { [2770] = true },
+        observedAt = nil,
+        ageDaysCoarse = 1,
+        unitPriceCopper = 185,
+      })
+      assertTrue(obs and errObs == nil, "RecordMaterialObservation must succeed")
+      assertTrue(obs.observedAt == nil and obs.ageDaysCoarse == 1, "Unknown scan epoch MUST stay nil, never substituted with current time")
+
+      _G.ForeverHub_MarketData = nil
+      local stMissing = MA.GetSiblingMarketDataStatus(1700000500, "m1:wowf:wow_forever:us:r:evergreen:alliance")
+      assertTrue(stMissing.status == "missing", "Expected missing when sibling absent")
+
+      _G.ForeverHub_MarketData = {
+        schemaVersion = 1,
+        artifactType = "market-projection-v1",
+        contentRevision = 7,
+        marketKey = "m1:wowf:wow_forever:us:r:evergreen:alliance",
+        publishedAtEpoch = 1700000100,
+        validUntilEpoch = 1700003700,
+        evidenceBasis = "OPERATOR_CONTROLLED",
+        items = {
+          ["i1:base:2770"] = {
+            unitPriceCopper = 185,
+            observedAtEpoch = 1700000050,
+            confidence = "SUMMARY_ONLY",
+          },
+        },
+      }
+      local stActive = MA.GetSiblingMarketDataStatus(1700000500, "m1:wowf:wow_forever:us:r:evergreen:alliance")
+      assertTrue(stActive.status == "active" and stActive.contentRevision == 7, "Expected active revision 7")
+      assertTrue(stActive.newestObservationAgeSec == 450 and stActive.expiresInSec == 3200, "Age and expiry math must match")
+
+      local stExpired = MA.GetSiblingMarketDataStatus(1700003700, "m1:wowf:wow_forever:us:r:evergreen:alliance")
+      assertTrue(stExpired.status == "expired", "Expected expired at validUntilEpoch")
+
+      local stWrong = MA.GetSiblingMarketDataStatus(1700000500, "m1:wowf:wow_forever:us:r:evergreen:horde")
+      assertTrue(stWrong.status == "wrong_market", "Expected wrong_market across Alliance/Horde boundary")
+    end)
+
+    check("Phase0.7: Exact DP stack selection, 53-bit cross-product safety, per-lot fee rounding, zero-vendor ratio & writ quantity gates", function()
+      -- 1. Astra reproduced indivisible stack counterexample: 2x6@10c (20c) vs 2x5@9c (18c) for targetQty=10
+      local dpRungs = {
+        { stackSize = 6, stackBuyoutCopper = 10, numStacks = 2 },
+        { stackSize = 5, stackBuyoutCopper = 9, numStacks = 2 },
+      }
+      local dpRes, dpErr = MA.WalkAskLadderEntryCost(dpRungs, 10, false, { vendorable = true, vendorUnitCopper = 1 })
+      assertTrue(dpRes and dpErr == nil, "Bounded DP stack selection must succeed")
+      assertTrue(dpRes.selectionMode == "exact_min_outlay_dp", "Expected exact_min_outlay_dp mode")
+      assertTrue(dpRes.entryCostCopper == 18 and dpRes.acquiredUnits == 10 and dpRes.excessUnits == 0, "Must select 2x5@9c = 18c instead of greedy 2x6@10c = 20c")
+      assertTrue(dpRes.excessVendorSalvageCopper == 0, "0 excess units -> 0 salvage")
+
+      -- 2. Astra reproduced 50-bit * 10,000 cross-product precision (`9,997,000,200,000,009,998` vs `...999`)
+      local cmpNearLimit = MA.CompareUnitPricesExact(999900000000001, 9999, 999800000000001, 9998)
+      assertTrue(cmpNearLimit == -1, "Exact quotient-remainder comparator must distinguish cross-products differing by 1 above 2^53")
+
+      -- 3. Per-lot vs single-batch commission rounding + half_up vs floor invoice inference
+      local comm10LotsHalfUp = MA.ComputeLotBatchCommissionCopper(10, 10, 500, "half_up")
+      local comm10LotsFloor = MA.ComputeLotBatchCommissionCopper(10, 10, 500, "floor")
+      local commSingleLot = MA.ComputeLotBatchCommissionCopper(100, 1, 500, "half_up")
+      assertTrue(comm10LotsHalfUp == 10 and comm10LotsFloor == 0 and commSingleLot == 5, "Per-lot rounding must preserve 10x1c vs 10x0c vs 1x5c")
+
+      local ruleHalfUp = MA.InferInvoiceCommissionRule(10, 1, 500)
+      local ruleFloor = MA.InferInvoiceCommissionRule(10, 0, 500)
+      assertTrue(ruleHalfUp and ruleHalfUp.status == "half_up", "10c -> 1c at 5% must infer half_up")
+      assertTrue(ruleFloor and ruleFloor.status == "floor", "10c -> 0c at 5% must infer floor")
+
+      -- 4. Zero-vendor items return nil vendorFloorRatioBps (never 0 or math.huge)
+      local ratioZero, ratioErr = MA.ComputeVendorFloorRatioBps(500, true, 0)
+      local ratioNonVend = MA.ComputeVendorFloorRatioBps(500, false, 100)
+      local ratioValid = MA.ComputeVendorFloorRatioBps(250, true, 100)
+      assertTrue(ratioZero == nil and ratioErr == "vendor_floor_unavailable", "Zero-vendor item must return nil ratio")
+      assertTrue(ratioNonVend == nil, "Non-vendorable item must return nil ratio")
+      assertTrue(ratioValid == 25000, "250c / 100c = 25000 bps (2.5x)")
+
+      -- 5. Unverified Writ quantities (`quantityVerified = false`) MUST be blocked from economic eligibility
+      for _, writ in pairs((ns.Data and ns.Data.writsByItemID) or {}) do
+        if writ.quantityVerified ~= true then
+          local elig = MA.EvaluateWritEconomicEligibility(writ)
+          assertTrue(elig and elig.eligible == false and elig.requiredQuantity == nil and elig.quantityStatus == "UNKNOWN", "Unverified writ must return UNKNOWN/ineligible")
+          break
+        end
+      end
+    end)
+
+    check("Phase0.8: Stage 1 FeeRuleRecord build-staleness & native legacy AH buyout > 0 enforcement", function()
+      local verifiedFee = {
+        ruleId = "fee:m1:wowf:wow_forever:us:r:evergreen:alliance:build-70938",
+        marketKey = "m1:wowf:wow_forever:us:r:evergreen:alliance",
+        observedBuild = "70938",
+        durationSchedule = { [2] = 1500, [8] = 6000, [24] = 18000 },
+        minDepositCopper = 100,
+        proportionalBasis = "vendor_stack_value",
+        stackSemantics = "per_stack_with_min_floor",
+        commissionBps = 500,
+        roundingMode = "floor",
+        supportingCaptureIds = { "dep:1", "mail:2" },
+        verificationStatus = "VERIFIED",
+      }
+      local sameBuild = MA.EvaluateFeeRuleForBuild(verifiedFee, "70938")
+      assertTrue(sameBuild and sameBuild.effectiveStatus == "VERIFIED" and sameBuild.microSpreadEligible == true, "Same-build verified FeeRuleRecord must be eligible")
+
+      local depQuote, depErr = MA.QuoteExpectedDepositCopper(verifiedFee, {
+        currentBuild = "70938",
+        vendorUnitCopper = 0,
+        stackSize = 20,
+        numStacks = 3,
+        durationHours = 24,
+      })
+      assertTrue(depQuote == 300 and depErr == nil, "3 stacks of zero-vendor item at 100c min floor must quote 300c")
+
+      local staleBuild = MA.EvaluateFeeRuleForBuild(verifiedFee, "71005")
+      assertTrue(staleBuild and staleBuild.effectiveStatus == "STALE_BUILD" and staleBuild.microSpreadEligible == false, "New client build without fresh captures MUST downgrade to STALE_BUILD")
+      local staleQuote, staleErr = MA.QuoteExpectedDepositCopper(verifiedFee, {
+        currentBuild = "71005",
+        vendorUnitCopper = 0,
+        stackSize = 20,
+        numStacks = 1,
+        durationHours = 24,
+      })
+      assertTrue(staleQuote == nil and staleErr == "stale_build_fee_rule", "Stale build FeeRuleRecord must refuse deposit quotes")
+
+      -- Native Legacy AH page capture MUST reject `buyout == 0` bid-only auctions!
+      local savedNumFn, savedInfoFn, savedLinkFn = _G.GetNumAuctionItems, _G.GetAuctionItemInfo, _G.GetAuctionItemLink
+      _G.GetNumAuctionItems = function(kind)
+        if kind == "list" then
+          return 4, 4
+        end
+        return 0, 0
+      end
+      _G.GetAuctionItemInfo = function(_, idx)
+        if idx == 1 then
+          -- Bid-only listing (`buyoutPrice = 0`): MUST be skipped!
+          return "Copper Ore", 0, 20, 1, false, 1, "", 500, 50, 0, 0, nil, 0, "SellerA", nil, 0, 2770
+        elseif idx == 2 then
+          -- Valid buyout listing (`20 @ 1800c`):
+          return "Copper Ore", 0, 20, 1, false, 1, "", 1500, 50, 1800, 0, nil, 0, "SellerB", nil, 0, 2770
+        elseif idx == 3 then
+          -- Second valid buyout listing (`5 @ 500c`):
+          return "Copper Ore", 0, 5, 1, false, 1, "", 400, 50, 500, 0, nil, 0, "SellerC", nil, 0, 2770
+        else
+          -- Ambiguous unverified equippable item without hyperlink: MUST be skipped!
+          return "Mystery Sword", 0, 1, 2, false, 1, "", 1000, 50, 2000, 0, nil, 0, "SellerD", nil, 0, 999999
+        end
+      end
+      _G.GetAuctionItemLink = function(_, idx)
+        if idx == 1 or idx == 2 or idx == 3 then
+          return "|cff1eff00|Hitem:2770:0:0:0:0:0:0:0:60|h[Copper Ore]|h|r"
+        end
+        return nil
+      end
+      local pageRes, pageErr = MA.InspectLegacyAuctionPageBuyouts({ verifiedBaseSet = { [2770] = true } })
+      _G.GetNumAuctionItems, _G.GetAuctionItemInfo, _G.GetAuctionItemLink = savedNumFn, savedInfoFn, savedLinkFn
+      assertTrue(pageRes and pageErr == nil, "InspectLegacyAuctionPageBuyouts must succeed")
+      assertTrue(pageRes.skippedBidOnlyCount == 1, "Bid-only buyout==0 listing must be skipped into skippedBidOnlyCount")
+      assertTrue(pageRes.skippedAmbiguousCount == 1, "Ambiguous linkless listing must be skipped into skippedAmbiguousCount")
+      assertTrue(pageRes.eligibleListingCount == 2 and #pageRes.items == 1, "Only the 2 positive-buyout trade-safe listings must qualify")
+      assertTrue(pageRes.items[1].minUnitPriceCopper == 90 and #pageRes.items[1].ladderRungs == 2, "Min unit buyout must be 1800/20 = 90c with 2 sorted rungs")
+    end)
+
+    check("Phase0.9: Astra Profession & Market Advisor P0-P2 Invariants (Wand/Oil Vendor Authority, Right-Censored Cohort Median, RecipeRegistry, DisenchantEv & 4-Way Decision Rule)", function()
+      local PA = ns.Domain and ns.Domain.ProfessionAdvisor
+      local CS = ns.Domain and ns.Domain.ConversionSpreads
+      local RR = ns.Domain and ns.Domain.RecipeRegistry
+      local DE = ns.Domain and ns.Domain.DisenchantEv
+      assertTrue(type(PA) == "table" and type(CS) == "table" and type(RR) == "table" and type(DE) == "table", "Profession/Market P0-P2 modules must load")
+
+      -- 1) Wand & Wizard Oil vendor prices resolved from EconomyData via VendorArbitrage:
+      local enchCat = PA.PartitionEnchantingCatalog(200, { includeWizardOils = true, allowStaticWhenClientUnavailable = true })
+      local byItem = {}
+      for _, row in ipairs(enchCat.physicalItems or {}) do
+        byItem[row.outputItemID] = row.vendorSellCopper
+      end
+      assertTrue(byItem[11287] == 110 and byItem[11288] == 1 and byItem[11289] == 1 and byItem[11290] == 1 and byItem[20744] == 100, "Wand/oil vendor prices must match Forever Bluepost #4/#5")
+
+      -- 2) Right-censored sold-only median (5 sales at 1,2,3,4,100h + 5 unsold claiming 3h median) MUST be rejected:
+      local badTurn = CS.ResolveTurnaroundHorizon({
+        saleThroughVerified = true,
+        cohortComplete = true,
+        observedSaleCount = 5,
+        unsoldOrCancelledCount = 5,
+        totalCohortListings = 10,
+        saleTimesHours = { 1, 2, 3, 4, 100 },
+        medianHoursToSell = 3.0,
+        observedAtEpoch = 1700000000,
+      }, { nowEpoch = 1700000100 })
+      assertTrue(badTurn.saleThroughVerified == false and badTurn.liquidationTime == "UNKNOWN", "Sold-only 3h median with 5 unsold listings must be rejected")
+
+      -- 3) DisenchantEv enforces PROTECTED_ITEM, UNVERIFIED_ELIGIBILITY, UNKNOWN_DE_TABLE, and 1.00x/1.05x/1.10x scenarios:
+      local protRes = DE.EvaluateItemDisenchant({ itemID = 1001, isReserved = true })
+      assertTrue(protRes.status == "PROTECTED_ITEM", "Reserved item must return PROTECTED_ITEM")
+      local deRes = DE.EvaluateItemDisenchant({
+        itemID = 4004,
+        quality = 2,
+        itemLevel = 53,
+        slotFamily = "ARMOR",
+        vendorSellCopper = 12000,
+        disenchantEligibilityVerified = true,
+      }, {
+        materialPricesByItemID = { [16202] = 18000, [16204] = 8000, [14343] = 25000 },
+        liquidationVerified = true,
+      })
+      assertTrue(deRes.eligible == true and deRes.status == "DE_FAVORED" and #deRes.scenarios == 3, "Verified DE evaluation must produce 3 scenarios (1.00x/1.05x/1.10x)")
+
+      -- 4) Conditional 4-way Decision Rule rejects unconditional defaults:
+      local holdRule = PA.EvaluateSecondSlotDecisionRule({})
+      assertTrue(holdRule.decisionCode == "PRESERVE_SLOT_COLLECT_EVIDENCE" and holdRule.unconditionalDefaultRejected == true, "Unmeasured state must default to PRESERVE_SLOT_COLLECT_EVIDENCE")
+    end)
+  end)
+
+  _G.ForeverHub_MarketData = savedSibling
+  db.marketExport = savedExport
+  _G.issecretvalue = savedIsSecret
+  _G.GetRealmName = savedGetRealm
+
+  local report = {
+    passed = passed,
+    failed = failed,
+    total = passed + failed,
+    results = results,
+  }
+  if suiteOk then
+    SelfTest.cachedReports.phase0_market = report
+  end
+  SelfTest._running.phase0_market = false
+
+  if not suiteOk then
+    error(suiteErr, 2)
+  end
+
+  return report
+end
+
+function SelfTest.RunSpawnRadarSuite()
+  if SelfTest._running.spawn_radar then
+    error("Recursive SelfTest.RunSpawnRadarSuite invocation forbidden", 2)
+  end
+  SelfTest._running.spawn_radar = true
+  SelfTest.suiteRunCounts.spawn_radar = (SelfTest.suiteRunCounts.spawn_radar or 0) + 1
+
+  local results = {}
+  local passed = 0
+  local failed = 0
+
+  local function check(name, fn)
+    local ok, err = pcall(fn)
+    if ok then
+      passed = passed + 1
+      table.insert(results, { name = name, passed = true })
+    else
+      failed = failed + 1
+      table.insert(results, { name = name, passed = false, error = tostring(err) })
+    end
+  end
+
+  local SR = ns.Domain and ns.Domain.SpawnRadar
+  local GF = ns.Domain and ns.Domain.GoldFarms
+  local Compat = ns.Compat
+  local db = ns.State and ns.State.GetDB and ns.State.GetDB() or _G.ForeverHubDB
+  local charDB = ns.State and ns.State.GetCharDB and ns.State.GetCharDB() or _G.ForeverHubCharDB
+  local navSnap = snapshotAndIsolateNavigation(charDB)
+  local savedSRState = SR and deepCopyTable(SR.state) or nil
+  local savedSRMacroSync = SR and deepCopyTable(SR.macroSyncState) or nil
+  local savedAcctMacroSync = (type(_G.ForeverHubDB) == "table") and deepCopyTable(_G.ForeverHubDB.macroSync) or nil
+  local savedCharMacroSync = (type(_G.ForeverHubCharDB) == "table") and deepCopyTable(_G.ForeverHubCharDB.macroSync) or nil
+  local savedGFProg = charDB and deepCopyTable(charDB.goldFarmProgress) or nil
+  local savedGFTelem = charDB and deepCopyTable(charDB.goldFarmTelemetry) or nil
+  local savedGoldView = (db and db.uiWorkspace) and deepCopyTable(db.uiWorkspace.goldView) or nil
+  local savedGFSess = ns.State and deepCopyTable(ns.State.goldFarmSession) or nil
+  local savedWorldSizes = ns.State and ns.State.overrideMapWorldSizes or nil
+  local savedPlayerPos = ns.State and ns.State.overridePlayerPosition or nil
+  local savedCombat = ns.State and ns.State.overrideInCombat or nil
+  local savedXPState = ns.State and ns.State.overridePlayerXPState or nil
+  local savedRested = ns.State and ns.State.overrideRestedXP or nil
+  local savedInCombatFn = _G.InCombatLockdown
+  local savedIsSecret = _G.issecretvalue
+  local savedGetNumMacros = _G.GetNumMacros
+  local savedGetMacroIndexByName = _G.GetMacroIndexByName
+  local savedGetMacroInfo = _G.GetMacroInfo
+  local savedCreateMacro = _G.CreateMacro
+  local savedEditMacro = _G.EditMacro
+  local savedUnitExists = _G.UnitExists
+  local savedUnitCanAttack = _G.UnitCanAttack
+  local savedUnitIsDeadOrGhost = _G.UnitIsDeadOrGhost
+  local savedUnitGUID = _G.UnitGUID
+  local savedUnitName = _G.UnitName
+  local savedUnitLevel = _G.UnitLevel
+  local savedUnitXP = _G.UnitXP
+  local savedUnitXPMax = _G.UnitXPMax
+  local savedCNamePlate = _G.C_NamePlate
+
+  -- Headless Lua macro interpreter verifying exact sequential WoW 1.60.1.70938 macro semantics!
+  local function simulateMacroExecution(body, initialTarget, worldUnits)
+    local cur = initialTarget
+    for rawLine in string.gmatch(tostring(body or ""), "[^\r\n]+") do
+      local line = string.gsub(rawLine, "^%s*(.-)%s*$", "%1")
+      if line == "/stopmacro [harm,nodead]" then
+        if cur and cur.harm == true and cur.dead ~= true then
+          break
+        end
+      elseif line == "/cleartarget" then
+        cur = nil
+      elseif line == "/cleartarget [noharm][dead]" then
+        if cur and (cur.harm ~= true or cur.dead == true) then
+          cur = nil
+        end
+      else
+        local exactName = string.match(line, "^/targetexact%s+(.+)$")
+        assertTrue(exactName ~= nil, "Unexpected or bracketed macro command: " .. tostring(line))
+        assertTrue(string.find(exactName, "[", 1, true) == nil, "/targetexact must NEVER carry bracketed conditionals")
+        for _, u in ipairs(worldUnits or {}) do
+          if u.name == exactName then
+            cur = u
+            break
+          end
+        end
+      end
+    end
+    return cur
+  end
+
+  local suiteOk, suiteErr = pcall(function()
+    assertTrue(type(SR) == "table", "SpawnRadar module must load")
+    assertTrue(type(GF) == "table", "GoldFarms module must load")
+
+    local allArcaneMapSizes = {
+      [1422] = { width = 4300, height = 2867 },
+      [1423] = { width = 3870, height = 2580 },
+      [1425] = { width = 3850, height = 2567 },
+      [1427] = { width = 2231, height = 1487 },
+      [1440] = { width = 5766, height = 3844 },
+      [1446] = { width = 6900, height = 4600 },
+      [1447] = { width = 5070, height = 3380 },
+      [1448] = { width = 5750, height = 3833 },
+      [1449] = { width = 3700, height = 2467 },
+      [1451] = { width = 3483, height = 2322 },
+      [1452] = { width = 7100, height = 4733 },
+      [2482] = { width = 4200, height = 2800 },
+    }
+    ns.State.overrideMapWorldSizes = deepCopyTable(allArcaneMapSizes)
+
+    local mockFarm = {
+      farmID = "selftest_arcane_camp",
+      title = "SelfTest Arcane Owlbeast Camp",
+      track = "arcane_lvl47_st",
+      targets = {
+        { npcID = 2929, name = "Savage Owlbeast" },
+        { npcID = 2928, name = "Primitive Owlbeast" },
+      },
+    }
+    local mockStep = {
+      stepID = "selftest_grind_step",
+      kind = "grind",
+      destination = { uiMapID = 1425, areaID = 47, x01 = 0.5000, y01 = 0.5000, coordinateSpace = "uiMap01" },
+      spawnNodes = {
+        { nodeIndex = 1, locationID = "loc:1425:2928:5000:5000", npcID = 2928, npcName = "Primitive Owlbeast", x01 = 0.5000, y01 = 0.5000, terrainAccess = "surface_candidate" },
+        { nodeIndex = 2, locationID = "loc:1425:2929:5000:5117", npcID = 2929, npcName = "Savage Owlbeast", x01 = 0.5000, y01 = 0.5117, terrainAccess = "surface_candidate" }, -- ~30.0 yds south
+        { nodeIndex = 3, locationID = "loc:1425:2929:5000:5250", npcID = 2929, npcName = "Savage Owlbeast", x01 = 0.5000, y01 = 0.5250, terrainAccess = "surface_candidate" }, -- ~64.2 yds south
+      },
+    }
+
+    check("Radar.1: Candidate catalog (19 primary + 7 experimental), deduplicated locationIDs, Tanaris cave-risk exclusion & Lv 46-60 auto-track bounds", function()
+      local catalog = ns.State.GetCompiledGoldFarms()
+      assertTrue(catalog and type(catalog.arcaneGrindFarms) == "table" and #catalog.arcaneGrindFarms == 19, "Must compile 19 primary Arcane ST candidate farms")
+      assertTrue(type(catalog.experimentalArcaneFarms) == "table" and #catalog.experimentalArcaneFarms == 7, "Must compile 7 experimental Arcane ST candidate farms")
+      local expectedFirstFiveIDs = {
+        "arcane_hinterlands_owlbeasts",
+        "arcane_azshara_hippogryphs",
+        "arcane_tanaris_dunemaul",
+        "arcane_felwood_deadwood",
+        "arcane_searing_gorge_elementals",
+      }
+      local expectedFirstFiveNodeCounts = { 52, 43, 36, 22, 28 }
+      local firstFiveNodes = 0
+      for idx, f in ipairs(catalog.arcaneGrindFarms) do
+        assertTrue(tonumber(f.candidateOrder) == idx, "candidateOrder must match index at #" .. tostring(idx))
+        if idx <= 5 then
+          assertTrue(f.farmID == expectedFirstFiveIDs[idx], "Candidate order mismatch at #" .. tostring(idx) .. ": got " .. tostring(f.farmID))
+        end
+        local farmNodes = 0
+        local farmSeenLocs = {}
+        for _, st in ipairs(f.travelSteps or {}) do
+          assertTrue(GF.ValidateStepDestination(st, catalog) == true, "Every primary Arcane step destination must validate (" .. tostring(f.farmID) .. ")")
+          if st.kind == "grind" and type(st.spawnNodes) == "table" then
+            farmNodes = farmNodes + #st.spawnNodes
+            for _, sn in ipairs(st.spawnNodes) do
+              assertTrue(type(sn.locationID) == "string" and string.sub(sn.locationID, 1, 4) == "loc:", "Every spawnNode must carry deterministic locationID")
+              assertTrue(SR.VALID_TERRAIN_ACCESS[sn.terrainAccess] == true, "Every spawnNode must carry valid shared terrainAccess enum")
+              assertTrue(farmSeenLocs[sn.locationID] == nil, "Cross-step duplicate locationID in " .. tostring(f.farmID) .. ": " .. tostring(sn.locationID))
+              farmSeenLocs[sn.locationID] = true
+            end
+          end
+        end
+        assertTrue(farmNodes > 0, "Every primary Arcane farm must have >=1 QuestieDB spawnNode: " .. tostring(f.farmID))
+        if idx <= 5 then
+          assertTrue(farmNodes == expectedFirstFiveNodeCounts[idx], "Expected " .. tostring(expectedFirstFiveNodeCounts[idx]) .. " nodes for " .. f.farmID .. ", got " .. tostring(farmNodes))
+          firstFiveNodes = firstFiveNodes + farmNodes
+        end
+      end
+      assertTrue(firstFiveNodes == 181, "Expected 181 deduplicated QuestieDB spawn coordinates across #1..#5, got " .. tostring(firstFiveNodes))
+
+      for _, ef in ipairs(catalog.experimentalArcaneFarms) do
+        assertTrue(ef.publicationTier == "experimental_candidate", "Experimental route must carry publicationTier='experimental_candidate'")
+        for _, st in ipairs(ef.travelSteps or {}) do
+          assertTrue(GF.ValidateStepDestination(st, catalog) == true, "Every experimental step destination must validate (" .. tostring(ef.farmID) .. ")")
+        end
+      end
+
+      -- Tanaris Dunemaul Compound (`unclassified_cave_risk`) MUST be excluded from default active pool until opted in!
+      local tanaris = catalog.arcaneGrindFarms[3]
+      local compoundStep = tanaris.travelSteps[5]
+      assertTrue(compoundStep and compoundStep.excludeFromAutoRadarUntilWalked == true, "Dunemaul Compound must be excluded until walked")
+      assertTrue(#SR.GetStepNodes(compoundStep, { includeUnwalkedCaveNodes = false }) == 0, "Default pool must exclude unwalked cave-risk step")
+      assertTrue(#SR.GetStepNodes(compoundStep, { includeUnwalkedCaveNodes = true }) == 15, "Explicit opt-in includes compound nodes")
+
+      -- Auto-track bounds (`46..60`):
+      local autoUI = { goldView = { selectedTrack = "auto" } }
+      assertTrue(GF.GetEffectiveTrack(autoUI, catalog, 45) == "lvl40_mount", "Lv 45 must NOT auto-select arcane_lvl47_st")
+      assertTrue(GF.GetEffectiveTrack(autoUI, catalog, 46) == "arcane_lvl47_st", "Lv 46 must auto-select arcane_lvl47_st")
+      assertTrue(GF.GetEffectiveTrack(autoUI, catalog, 50) == "arcane_lvl47_st", "Lv 50 must auto-select arcane_lvl47_st")
+      assertTrue(GF.GetEffectiveTrack(autoUI, catalog, 55) == "arcane_lvl47_st", "Lv 55 must auto-select arcane_lvl47_st")
+      assertTrue(GF.GetEffectiveTrack(autoUI, catalog, 60) == "arcane_lvl47_st", "Lv 60 must auto-select arcane_lvl47_st")
+      assertTrue(GF.GetEffectiveTrack(autoUI, catalog, 61) == "lvl40_mount", "Lv 61 must NOT auto-select arcane_lvl47_st")
+    end)
+
+    check("Radar.2: Gate 1 Macro Behavioral Semantics (live target preserved, first species kept, dead/friendly cleared)", function()
+      local catalog = ns.State.GetCompiledGoldFarms()
+      for _, f in ipairs(catalog.arcaneGrindFarms or {}) do
+        for _, st in ipairs(f.travelSteps or {}) do
+          if st.kind == "grind" then
+            local body, meta = SR.BuildTargetMacroBody(f, st)
+            assertTrue(type(body) == "string" and meta.ok == true and #body <= 255, "Every grind macro must be <= 255 bytes")
+            assertTrue(string.find(body, "^/stopmacro %[harm,nodead%]") ~= nil, "Macro must lead with /stopmacro [harm,nodead]")
+          end
+        end
+      end
+
+      local owlBody = SR.BuildTargetMacroBody(mockFarm, mockStep)
+      -- 1) Pressing macro mid-pull NEVER replaces existing live hostile target!
+      local existingPull = { id = "pull_a", name = "Primitive Owlbeast", harm = true, dead = false }
+      local resMidPull = simulateMacroExecution(owlBody, existingPull, {
+        { id = "other_savage", name = "Savage Owlbeast", harm = true, dead = false },
+      })
+      assertTrue(resMidPull == existingPull, "Macro pressed mid-pull MUST preserve existing [harm,nodead] target")
+
+      -- 2) Both Primitive (attempt 1) and Savage (attempt 2) alive in range -> Primitive MUST NOT be overwritten by Savage!
+      local livePrimitive = { id = "prim_1", name = "Primitive Owlbeast", harm = true, dead = false }
+      local liveSavage = { id = "savage_1", name = "Savage Owlbeast", harm = true, dead = false }
+      local resBoth = simulateMacroExecution(owlBody, nil, { livePrimitive, liveSavage })
+      assertTrue(resBoth == livePrimitive, "Second species attempt MUST NOT overwrite live first species")
+
+      -- 3) Primitive corpse + live Savage -> corpse cleared by /cleartarget [noharm][dead], falls through to live Savage!
+      local deadPrimitive = { id = "prim_dead", name = "Primitive Owlbeast", harm = true, dead = true }
+      local resFallthrough = simulateMacroExecution(owlBody, nil, { deadPrimitive, liveSavage })
+      assertTrue(resFallthrough == liveSavage, "Dead first species must be cleared and fall through to live second species")
+
+      -- 4) Friendly namesake cleared -> ends with nil target rather than friendly lock!
+      local friendlyUnit = { id = "friendly_1", name = "Primitive Owlbeast", harm = false, dead = false }
+      local resFriendly = simulateMacroExecution(owlBody, nil, { friendlyUnit })
+      assertTrue(resFriendly == nil, "Non-hostile match must be cleared by /cleartarget [noharm][dead]")
+    end)
+
+    check("Radar.3: Gate 2 Macro Security (fail-closed lockdown, 120-slot cap, user collision, >255B overflow & readback parity)", function()
+      local macroCalls = 0
+      _G.CreateMacro = function() macroCalls = macroCalls + 1; return 1 end
+      _G.EditMacro = function() macroCalls = macroCalls + 1; return 1 end
+
+      -- Combat lockdown true -> 0 calls
+      ns.State.overrideInCombat = nil
+      _G.InCombatLockdown = function() return true end
+      local rLock = SR.EnsureTargetMacro(mockFarm, mockStep)
+      assertTrue(rLock.ok == false and rLock.reason == "combat_lockdown" and macroCalls == 0, "InCombatLockdown()==true must block macro mutation")
+
+      -- Missing / throwing / secret InCombatLockdown -> fail-closed (0 calls!)
+      _G.InCombatLockdown = nil
+      local rNil = SR.EnsureTargetMacro(mockFarm, mockStep)
+      assertTrue(rNil.ok == false and rNil.reason == "lockdown_probe_missing" and macroCalls == 0, "Missing InCombatLockdown must fail closed")
+
+      _G.InCombatLockdown = function() error("probe_boom") end
+      local rErr = SR.EnsureTargetMacro(mockFarm, mockStep)
+      assertTrue(rErr.ok == false and rErr.reason == "lockdown_probe_unavailable" and macroCalls == 0, "Erroring InCombatLockdown must fail closed")
+
+      local secretBool = {}
+      _G.issecretvalue = function(v) return v == secretBool end
+      _G.InCombatLockdown = function() return secretBool end
+      local rSec = SR.EnsureTargetMacro(mockFarm, mockStep)
+      assertTrue(rSec.ok == false and rSec.reason == "lockdown_probe_unavailable" and macroCalls == 0, "Secret InCombatLockdown must fail closed")
+      _G.issecretvalue = savedIsSecret
+      _G.InCombatLockdown = function() return false end
+
+      -- User-owned 'FH_Target' collision -> never overwrite user's macro!
+      _G.GetMacroIndexByName = function(n) return n == "FH_Target" and 7 or 0 end
+      _G.GetMacroInfo = function(idx)
+        if idx == 7 then return "FH_Target", 134400, "/cast Ice Block" end
+        return nil
+      end
+      local rCol = SR.EnsureTargetMacro(mockFarm, mockStep)
+      assertTrue(rCol.ok == false and rCol.reason == "macro_name_collision" and macroCalls == 0, "User macro named FH_Target must NEVER be overwritten")
+
+      -- 120/120 general macro slots full -> fail closed
+      _G.GetMacroIndexByName = function() return 0 end
+      _G.GetMacroInfo = function() return nil end
+      _G.GetNumMacros = function() return 120, 18 end
+      local rFull = SR.EnsureTargetMacro(mockFarm, mockStep)
+      assertTrue(rFull.ok == false and rFull.reason == "macro_slots_full" and macroCalls == 0, "120/120 general macro slots must fail closed")
+
+      -- >255B overflow -> atomic refusal, 0 CreateMacro calls
+      _G.GetNumMacros = function() return 10, 0 end
+      local hugeFarm = {
+        farmID = "huge",
+        targets = {
+          { npcID = 1, uiMapID = 1425, name = "Extremely Long Synthetic Creature Name Alpha One" },
+          { npcID = 2, uiMapID = 1425, name = "Extremely Long Synthetic Creature Name Beta Two" },
+          { npcID = 3, uiMapID = 1425, name = "Extremely Long Synthetic Creature Name Gamma Three" },
+          { npcID = 4, uiMapID = 1425, name = "Extremely Long Synthetic Creature Name Delta Four" },
+        },
+      }
+      local hugeStep = {
+        stepID = "huge_step",
+        kind = "grind",
+        destination = { uiMapID = 1425, x01 = 0.5000, y01 = 0.5000, coordinateSpace = "uiMap01" },
+      }
+      local rOver = SR.EnsureTargetMacro(hugeFarm, hugeStep)
+      assertTrue(rOver.ok == false and rOver.reason == "macro_overflow" and macroCalls == 0, ">255B macro must fail closed without partial write")
+
+      -- Post-write readback mismatch -> detected!
+      _G.CreateMacro = function() macroCalls = macroCalls + 1; return 11 end
+      _G.GetMacroInfo = function(idx)
+        if idx == 11 then return "FH_Target", 134400, "corrupted_body" end
+        return nil
+      end
+      local rMismatch = SR.EnsureTargetMacro(mockFarm, mockStep)
+      assertTrue(rMismatch.ok == false and rMismatch.reason == "macro_readback_mismatch", "Post-write readback mismatch must be caught")
+    end)
+
+    check("Radar.4: Gate 3 Kill Identity, No Bulk Suppression, GUID Dedup, Ambiguity Rejection & Ranged Pull Separation", function()
+      SR.ResetCooldowns()
+      local posNear1 = { status = "ok", uiMapID = 1425, x01 = 0.5000, y01 = 0.5015 } -- ~3.85 yds from #1, ~26.2 yds from #2
+      local s1 = SR.EvaluateNearestNode(mockFarm, mockStep, posNear1, 0.25, 200.0)
+      assertTrue(s1.nodeIndex == 1 and s1.unobservedCount == 3, "Initially locked on node #1")
+
+      -- Unrelated add kill (Timber Wolf) -> 0 suppressions!
+      local rWolf = SR.RecordVerifiedKillObservation(
+        mockFarm,
+        mockStep,
+        { npcID = 999999, npcName = "Timber Wolf", guid = "Creature-0-0-0-0-999999-0001" },
+        posNear1,
+        201.0
+      )
+      assertTrue(rWolf.suppressed == 0 and rWolf.reason == "identity_not_camp_target", "Unrelated creature kill must suppress 0 nodes")
+
+      -- Verified camp kill + duplicate event for same GUID (Kill A -> Loot/XP A) -> suppresses ONLY 1 node once!
+      local owlGuidA = "Creature-0-0-0-0-2928-000A"
+      local rKillA1 = SR.RecordVerifiedKillObservation(
+        mockFarm,
+        mockStep,
+        { npcID = 2928, npcName = "Primitive Owlbeast", guid = owlGuidA },
+        posNear1,
+        202.0
+      )
+      local rKillA2 = SR.RecordVerifiedKillObservation(
+        mockFarm,
+        mockStep,
+        { npcID = 2928, npcName = "Primitive Owlbeast", guid = owlGuidA },
+        posNear1,
+        202.5
+      )
+      assertTrue(rKillA1.suppressed == 1 and rKillA1.locationID == "loc:1425:2928:5000:5000", "Kill A must suppress node #1")
+      assertTrue(rKillA2.suppressed == 0 and rKillA2.reason == "duplicate_kill_guid", "Duplicate event for same GUID must NOT suppress a second node")
+
+      -- Ranged pull on B (node #3, Savage) while arrow points to node #2 -> killing B when standing near #2 NEVER suppresses #2 if ambiguous, and standing near #3 while arrow locked #1 suppresses #3 (NOT locked #1)!
+      SR.ResetCooldowns()
+      SR.EvaluateNearestNode(mockFarm, mockStep, posNear1, 0.25, 210.0)
+      assertTrue(SR.state.lockedLocationID == "loc:1425:2928:5000:5000", "Arrow locked on node #1 (Primitive)")
+      -- Player pulls & kills Savage (#2 at 30 yds from #1, 34 yds from #3 -> wait: move player to y=0.5220 so #3 is 7.7 yds away and #2 is 26.4 yds away, while lockedLocationID is STILL #1!)
+      local posNear3 = { status = "ok", uiMapID = 1425, x01 = 0.5000, y01 = 0.5220 }
+      local rKillB = SR.RecordVerifiedKillObservation(
+        mockFarm,
+        mockStep,
+        { npcID = 2929, npcName = "Savage Owlbeast", guid = "Creature-0-0-0-0-2929-000B" },
+        posNear3,
+        211.0
+      )
+      assertTrue(rKillB.suppressed == 1 and rKillB.locationID == "loc:1425:2929:5000:5250", "Kill on B must associate with B, NEVER with stale arrow lock A")
+      local obsA = SR.GetNodeObservationState(mockStep, mockStep.spawnNodes[1], 211.0)
+      assertTrue(obsA == "unobserved", "Arrow lock A (#1) must remain unobserved when B (#3) was killed")
+
+      -- Two same-species nodes < 8 yds apart -> ambiguous kill suppresses 0 nodes!
+      local tightStep = {
+        stepID = "tight_step",
+        kind = "grind",
+        destination = { uiMapID = 1425, x01 = 0.5000, y01 = 0.5000, coordinateSpace = "uiMap01" },
+        spawnNodes = {
+          { nodeIndex = 1, locationID = "loc:tight:1", npcID = 2929, npcName = "Savage Owlbeast", x01 = 0.5000, y01 = 0.5000 },
+          { nodeIndex = 2, locationID = "loc:tight:2", npcID = 2929, npcName = "Savage Owlbeast", x01 = 0.5000, y01 = 0.5020 }, -- ~5.1 yds apart!
+        },
+      }
+      local rAmb = SR.RecordVerifiedKillObservation(
+        mockFarm,
+        tightStep,
+        { npcID = 2929, npcName = "Savage Owlbeast", guid = "Creature-0-0-0-0-2929-0099" },
+        { status = "ok", uiMapID = 1425, x01 = 0.5000, y01 = 0.5005 },
+        220.0
+      )
+      assertTrue(rAmb.suppressed == 0 and rAmb.reason == "ambiguous_candidate_locations", "Ambiguous <8yd pair must suppress 0 nodes (never bulk radial)")
+    end)
+
+    check("Radar.5: Gate 4 Headless — Negative-Evidence Non-Suppression, Manual Skip & Secret-Value Fail-Closed Probes", function()
+      SR.ResetCooldowns()
+      local posAt1 = { status = "ok", uiMapID = 1425, x01 = 0.5000, y01 = 0.5005 }
+      -- Dwell at node #1 for 20 seconds with zero target / nameplates off -> MUST NOT auto-suppress!
+      for t = 300, 320, 2 do
+        local sum = SR.EvaluateNearestNode(mockFarm, mockStep, posAt1, 2.0, t)
+        assertTrue(sum.nodeIndex == 1 and sum.suppressedCount == 0, "Missing nameplate/target MUST NEVER become evidence of death")
+      end
+      -- Explicit manual skip (/fh gold skip) suppresses current node for 120s (`manually_skipped`)
+      local sk = SR.SkipCurrentLocation(mockFarm, mockStep, 321.0)
+      assertTrue(sk.ok == true and sk.locationID == "loc:1425:2928:5000:5000", "Explicit SkipCurrentLocation must succeed")
+      local afterSkip = SR.EvaluateNearestNode(mockFarm, mockStep, posAt1, 0.25, 321.0)
+      assertTrue(afterSkip.nodeIndex == 2 and afterSkip.suppressedCount == 1, "Manual skip advances radar to node #2")
+
+      -- Secret / error-injected unit & nameplate probes MUST fail closed (never fail open to true, never crash!)
+      local secretToken = {}
+      _G.issecretvalue = function(v) return v == secretToken end
+      _G.UnitExists = function() return false end
+      _G.C_NamePlate = {
+        GetNamePlates = function()
+          return { { namePlateUnitToken = secretToken } }
+        end,
+      }
+      local obsSecretPlate = Compat.ObserveMatchingHostileTargetOrNameplate({ [2928] = true }, { ["primitive owlbeast"] = true })
+      assertTrue(obsSecretPlate.matched == false and obsSecretPlate.status == "observation_unavailable", "Secret nameplate token must fail closed")
+
+      -- Erroring UnitCanAttack / UnitIsDeadOrGhost with matching GUID/name (Astra's exact fail-open reproduction!) -> MUST return matched == false!
+      _G.issecretvalue = savedIsSecret
+      _G.UnitExists = function(u) return u == "target" end
+      _G.UnitCanAttack = function() error("restricted_hostility") end
+      _G.UnitIsDeadOrGhost = function() return false end
+      _G.UnitGUID = function() return "Creature-0-0-0-0-2928-0001" end
+      _G.UnitName = function() return "Primitive Owlbeast" end
+      local obsErrAttack = Compat.ObserveMatchingHostileTargetOrNameplate({ [2928] = true }, { ["primitive owlbeast"] = true })
+      assertTrue(obsErrAttack.matched == false and obsErrAttack.status == "observation_unavailable", "Failed hostility check MUST NOT fall through to positive GUID/name match")
+
+      _G.UnitCanAttack = function() return true end
+      _G.UnitIsDeadOrGhost = function() error("restricted_death") end
+      local obsErrDead = Compat.ObserveMatchingHostileTargetOrNameplate({ [2928] = true }, { ["primitive owlbeast"] = true })
+      assertTrue(obsErrDead.matched == false and obsErrDead.status == "observation_unavailable", "Failed death check MUST NOT fall through to positive GUID/name match")
+    end)
+
+    check("Radar.6: Gate 5 & Gate 6 — Shared locationID Across Steps, World-Epoch Reset & Fail-Closed distance_unavailable", function()
+      SR.ResetCooldowns()
+      local stepB = {
+        stepID = "selftest_grind_step_b",
+        kind = "grind",
+        destination = { uiMapID = 1425, areaID = 47, x01 = 0.5000, y01 = 0.5000, coordinateSpace = "uiMap01" },
+        spawnNodes = {
+          { nodeIndex = 1, locationID = "loc:1425:2928:5000:5000", npcID = 2928, npcName = "Primitive Owlbeast", x01 = 0.5000, y01 = 0.5000 },
+          { nodeIndex = 2, locationID = "loc:1425:2929:5000:5300", npcID = 2929, npcName = "Savage Owlbeast", x01 = 0.5000, y01 = 0.5300 },
+        },
+      }
+      SR.RecordVerifiedKillObservation(
+        mockFarm,
+        mockStep,
+        { npcID = 2928, npcName = "Primitive Owlbeast", guid = "Creature-0-0-0-0-2928-7777" },
+        { status = "ok", uiMapID = 1425, x01 = 0.5000, y01 = 0.5002 },
+        400.0
+      )
+      local stInB, remInB = SR.GetNodeObservationState(stepB, stepB.spawnNodes[1], 410.0)
+      assertTrue(stInB == "estimated_recent_kill" and math.abs(remInB - 170.0) < 0.01, "Shared locationID must synchronize suppression across steps")
+
+      SR.BumpWorldSessionEpoch("zone_transition")
+      local stAfterEpoch = SR.GetNodeObservationState(stepB, stepB.spawnNodes[1], 411.0)
+      assertTrue(stAfterEpoch == "unobserved", "BumpWorldSessionEpoch must invalidate stale world observations")
+
+      -- Gate 6: Missing map calibration -> fail closed (`distance_unavailable`), NEVER fabricate 3200x2133 yards!
+      ns.State.overrideMapWorldSizes = { [1425] = "unavailable" }
+      local distUnavail = SR.EvaluateNearestNode(mockFarm, mockStep, { status = "ok", uiMapID = 1425, x01 = 0.5000, y01 = 0.5002 }, 0.25, 420.0)
+      assertTrue(distUnavail.status == "distance_unavailable" and distUnavail.distanceYards == nil, "Missing calibration must report distance_unavailable with nil yards")
+      local killNoCal = SR.RecordVerifiedKillObservation(
+        mockFarm,
+        mockStep,
+        { npcID = 2928, npcName = "Primitive Owlbeast", guid = "Creature-0-0-0-0-2928-8888" },
+        { status = "ok", uiMapID = 1425, x01 = 0.5000, y01 = 0.5002 },
+        421.0
+      )
+      assertTrue(killNoCal.suppressed == 0 and killNoCal.reason == "distance_unavailable", "Yard suppression must be disabled when distance calibration is unavailable")
+
+      ns.State.overrideMapWorldSizes = deepCopyTable(allArcaneMapSizes)
+    end)
+
+    check("Radar.7: Gate 7 Coalesced XP Rollover (280 vs 130,000), Multi-Level Unresolved & Quest Turn-In Separation", function()
+      local catalog = ns.State.GetCompiledGoldFarms()
+      local owlFarm = catalog.arcaneGrindFarms[1]
+
+      -- 1) Astra's exact rollover bug reproduction: Lv 47 (129900/130000) -> mixed Lv 48 (129900/134000) -> Lv 48 (180/134000) == 280 XP!
+      ns.State.overridePlayerXPState = { status = "ok", level = 47, currentXP = 129900, maxXP = 130000, remainingXP = 100 }
+      ns.State.overrideRestedXP = 0
+      ns.State.ResetGoldFarmSession("arcane_hinterlands_owlbeasts", true, 1000)
+      ns.State.RecordGoldFarmVerifiedCampKill({ npcID = 2928, expectedXP = 280, nowMono = 1010, nowWall = 1010 })
+      ns.State.overridePlayerXPState = { status = "ok", level = 48, currentXP = 129900, maxXP = 134000, remainingXP = 4100 }
+      ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_LEVEL_UP", newLevel = 48, nowMono = 1010, nowWall = 1010 })
+      ns.State.overridePlayerXPState = { status = "ok", level = 48, currentXP = 180, maxXP = 134000, remainingXP = 133820 }
+      local finA = ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_XP_UPDATE", nowMono = 1010, nowWall = 1010 })
+      assertTrue(finA.delta == 280, "Mixed rollover transition MUST record 280 XP (not 130,000), got " .. tostring(finA.delta))
+      local snapA = ns.State.GetGoldFarmSessionSnapshot(1200)
+      assertTrue(snapA.totalSessionXP == 280 and snapA.attributableGrindXP == 280 and snapA.xpRolloverUnresolved == false, "Clean rollover must attribute 280 grind XP")
+
+      -- 2) Reverse arrival order: PLAYER_XP_UPDATE (Lv 47 @ 180) BEFORE PLAYER_LEVEL_UP (Lv 48 @ 180) == 280 XP!
+      ns.State.overridePlayerXPState = { status = "ok", level = 47, currentXP = 129900, maxXP = 130000, remainingXP = 100 }
+      ns.State.ResetGoldFarmSession("arcane_hinterlands_owlbeasts", true, 2000)
+      ns.State.RecordGoldFarmVerifiedCampKill({ npcID = 2928, expectedXP = 280, nowMono = 2005, nowWall = 2005 })
+      ns.State.overridePlayerXPState = { status = "ok", level = 47, currentXP = 180, maxXP = 130000, remainingXP = 129820 }
+      ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_XP_UPDATE", nowMono = 2005, nowWall = 2005 })
+      ns.State.overridePlayerXPState = { status = "ok", level = 48, currentXP = 180, maxXP = 134000, remainingXP = 133820 }
+      local finB = ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_LEVEL_UP", newLevel = 48, nowMono = 2005, nowWall = 2005 })
+      assertTrue(finB.delta == 280, "XP-before-level rollover MUST also record 280 XP, got " .. tostring(finB.delta))
+
+      -- 3) Multi-level jump (Lv 47 -> Lv 49) marks xpRolloverUnresolved = true and suppresses rate/ETA!
+      ns.State.overridePlayerXPState = { status = "ok", level = 47, currentXP = 129900, maxXP = 130000, remainingXP = 100 }
+      ns.State.ResetGoldFarmSession("arcane_hinterlands_owlbeasts", true, 3000)
+      ns.State.overridePlayerXPState = { status = "ok", level = 49, currentXP = 500, maxXP = 138000, remainingXP = 137500 }
+      ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_LEVEL_UP", newLevel = 49, nowMono = 3200, nowWall = 3200 })
+      local snapMulti = ns.State.GetGoldFarmSessionSnapshot(3200)
+      local repMulti = GF.EvaluateSessionXP(owlFarm, snapMulti, { status = "ok", level = 49, currentXP = 500, maxXP = 138000, remainingXP = 137500 })
+      assertTrue(snapMulti.xpRolloverUnresolved == true and repMulti.measuredXpPerHour == nil and repMulti.etaNextLevelMinutes == nil, "Multi-level jump must fail closed as unresolved")
+
+      -- 4) Astra's exact contaminated probe: 6,000 quest XP, 0 kills, 180s -> 0 grind XP/hr and suppressed ETA (NEVER 120,000 XP/hr)!
+      ns.State.overridePlayerXPState = { status = "ok", level = 47, currentXP = 50000, maxXP = 130000, remainingXP = 80000 }
+      ns.State.ResetGoldFarmSession("arcane_hinterlands_owlbeasts", true, 4000)
+      ns.State.overridePlayerXPState = { status = "ok", level = 47, currentXP = 56000, maxXP = 130000, remainingXP = 74000 }
+      ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_XP_UPDATE", nowMono = 4060, nowWall = 4060 })
+      ns.State.RecordGoldFarmQuestTurnInXP(101, 6000, 4060, 4060) -- arrives AFTER PLAYER_XP_UPDATE!
+      local snapQuest = ns.State.GetGoldFarmSessionSnapshot(4180) -- 180s!
+      local repQuest = GF.EvaluateSessionXP(owlFarm, snapQuest, { status = "ok", level = 47, currentXP = 56000, maxXP = 130000, remainingXP = 74000 })
+      assertTrue(snapQuest.totalSessionXP == 6000 and snapQuest.questRewardXP == 6000 and snapQuest.attributableGrindXP == 0, "Retroactive QUEST_TURNED_IN must move 6000 XP out of unattributed into questRewardXP with 0 grind XP")
+      assertTrue(repQuest.measuredGrindXpPerHour == 0 and repQuest.etaNextLevelMinutes == nil and repQuest.liveStatus == "non_grind_xp_only", "Contaminated 0-kill session MUST report 0 grind XP/hr and nil ETA")
+    end)
+
+    check("Radar.8: Gate 8 XP Boundaries (179s vs 180s), Rested Regime Suppression & Gold Contamination Independence", function()
+      local catalog = ns.State.GetCompiledGoldFarms()
+      local owlFarm = catalog.arcaneGrindFarms[1]
+      local xpState = { status = "ok", level = 47, currentXP = 60000, maxXP = 130000, remainingXP = 70000 }
+
+      local rep179 = GF.EvaluateSessionXP(owlFarm, {
+        active = true,
+        elapsedSeconds = 179,
+        totalSessionXP = 4200,
+        attributableGrindXP = 4200,
+        killsObserved = 15,
+      }, xpState)
+      assertTrue(rep179.liveStatus == "warming_up" and rep179.measuredXpPerHour == nil and rep179.etaNextLevelMinutes == nil, "179s sample MUST block rate & ETA")
+
+      local rep180 = GF.EvaluateSessionXP(owlFarm, {
+        active = true,
+        elapsedSeconds = 180,
+        totalSessionXP = 2100,
+        attributableGrindXP = 2100,
+        killsObserved = 8,
+        contaminated = true, -- Gold mail contamination ONLY (`xpContaminated == false`)!
+        xpContaminated = false,
+      }, xpState)
+      assertTrue(rep180.liveStatus == "measured_positive" and rep180.measuredGrindXpPerHour == 42000 and rep180.etaNextLevelMinutes == 100, "180s clean grind XP must compute 42,000 XP/hr & 100m ETA even when gold purse had mail contamination")
+
+      local repRestedFlip = GF.EvaluateSessionXP(owlFarm, {
+        active = true,
+        elapsedSeconds = 360,
+        totalSessionXP = 4200,
+        attributableGrindXP = 4200,
+        killsObserved = 15,
+        restedIncluded = true,
+        restedRegimeChanged = true,
+      }, xpState)
+      assertTrue(repRestedFlip.measuredGrindXpPerHour == 42000 and repRestedFlip.etaNextLevelMinutes == nil and repRestedFlip.etaSuppressionReason == "rested_regime_changed", "Rested bonus exhaustion mid-session must suppress ETA")
+    end)
+
+    check("Radar.9: KI-ARCANE-002 Scope-Aware FH_Target Ownership, No-Auto-Create, Combat Coalescing & Exact UTF-8 Byte Counts", function()
+      local catalog = ns.State.GetCompiledGoldFarms()
+
+      -- 1) Exact UTF-8 macro byte lengths (Astra P0-7):
+      local function syntheticSingleStep(names)
+        local f = { farmID = "byte_probe", targets = {} }
+        local s = {
+          stepID = "byte_step",
+          kind = "grind",
+          destination = { uiMapID = 1425, x01 = 0.5000, y01 = 0.5000, coordinateSpace = "uiMap01" },
+          spawnNodes = {},
+        }
+        for i, nm in ipairs(names) do
+          table.insert(f.targets, { npcID = i, name = nm })
+          table.insert(s.spawnNodes, {
+            nodeIndex = i,
+            locationID = string.format("loc:1425:%d:5000:%04d", i, 5000 + i),
+            npcID = i,
+            npcName = nm,
+            x01 = 0.5000,
+            y01 = 0.5000 + (i * 0.0010),
+            terrainAccess = "surface_candidate",
+          })
+        end
+        return SR.BuildTargetMacroBody(f, s)
+      end
+
+      local bStag, mStag = syntheticSingleStep({ "Thunderhead Stagwing", "Thunderhead Skystormer" })
+      assertTrue(mStag.ok and #bStag == 173, "Stagwing+Skystormer must be 173 bytes, got " .. tostring(bStag and #bStag))
+      local bSnap, mSnap = syntheticSingleStep({ "Saltwater Snapjaw" })
+      assertTrue(mSnap.ok and #bSnap == 96, "Saltwater Snapjaw must be 96 bytes, got " .. tostring(bSnap and #bSnap))
+      local bLegClassic, mLegClassic = syntheticSingleStep({ "Legashi Satyr", "Legashi Rogue", "Legashi Hellcaller" })
+      assertTrue(mLegClassic.ok and #bLegClassic == 227, "Classic Legashi trio must be 227 bytes, got " .. tostring(bLegClassic and #bLegClassic))
+      local bLegCustom, mLegCustom = syntheticSingleStep({ "Legashi Satyr", "Legashi Felsworn", "Legashi Hellcaller" })
+      assertTrue(mLegCustom.ok and #bLegCustom == 230, "Custom Legashi trio must be 230 bytes, got " .. tostring(bLegCustom and #bLegCustom))
+      local bBloodElf, mBloodElf = syntheticSingleStep({ "Blood Elf Surveyor", "Blood Elf Reclaimer", "Blood Elf Defender" })
+      assertTrue(mBloodElf.ok and #bBloodElf == 238, "Azshara Blood Elf trio must be 238 bytes, got " .. tostring(bBloodElf and #bBloodElf))
+      local bOwlA, mOwlA = syntheticSingleStep({ "Raging Owlbeast", "Crazed Owlbeast" })
+      assertTrue(mOwlA.ok and #bOwlA == 161, "Raging+Crazed Owlbeast must be 161 bytes, got " .. tostring(bOwlA and #bOwlA))
+      local bOwlB, mOwlB = syntheticSingleStep({ "Moontouched Owlbeast", "Berserk Owlbeast" })
+      assertTrue(mOwlB.ok and #bOwlB == 167, "Moontouched+Berserk Owlbeast must be 167 bytes, got " .. tostring(bOwlB and #bOwlB))
+
+      local b255, m255 = syntheticSingleStep({ string.rep("A", 176) })
+      local b256, m256 = syntheticSingleStep({ string.rep("A", 177) })
+      assertTrue(m255.ok == true and #b255 == 255, "Exact 255-byte macro must pass")
+      assertTrue(b256 == nil and m256.ok == false and m256.reason == "macro_overflow" and m256.byteLength == 256, "256-byte macro must fail closed")
+
+      -- 2) Scope-aware macro slot harness (`1..120` global, `121..138` character):
+      _G.ForeverHubDB = _G.ForeverHubDB or {}
+      _G.ForeverHubCharDB = _G.ForeverHubCharDB or {}
+      _G.ForeverHubDB.macroSync = {}
+      _G.ForeverHubCharDB.macroSync = {}
+      SR.macroSyncState.pendingCombatGeneration = nil
+      SR.macroSyncState.inMutationGuard = false
+
+      local slots = {}
+      local createCalls = 0
+      local editCalls = 0
+      local reentrantInspectTriggeredWrite = false
+
+      _G.GetNumMacros = function()
+        local gCount, cCount = 0, 0
+        for idx = 1, 120 do if slots[idx] then gCount = idx end end
+        for idx = 121, 138 do if slots[idx] then cCount = idx - 120 end end
+        return gCount, cCount
+      end
+      _G.GetMacroInfo = function(idx)
+        local s = slots[idx]
+        if s then return s.name, s.icon or 134400, s.body end
+        return nil
+      end
+      _G.GetMacroIndexByName = function(nm)
+        for idx = 1, 120 do if slots[idx] and slots[idx].name == nm then return idx end end
+        for idx = 121, 138 do if slots[idx] and slots[idx].name == nm then return idx end end
+        return 0
+      end
+      _G.CreateMacro = function(nm, icon, body, perChar)
+        createCalls = createCalls + 1
+        local base = perChar and 121 or 1
+        local cap = perChar and 138 or 120
+        for idx = base, cap do
+          if not slots[idx] then
+            slots[idx] = { name = nm, icon = icon, body = body }
+            return idx
+          end
+        end
+        return 0
+      end
+      _G.EditMacro = function(idx, nm, icon, body)
+        editCalls = editCalls + 1
+        slots[idx] = { name = nm, icon = icon, body = body }
+        -- Simulate synchronous UPDATE_MACROS inside EditMacro to prove reentrancy guard!
+        local reRes = SR.SyncExistingOwnedTargetMacro("SYNCHRONOUS_UPDATE_MACROS")
+        if reRes and reRes.reason ~= "reentrant_guarded" then
+          reentrantInspectTriggeredWrite = true
+        end
+        return idx
+      end
+      ns.State.overrideInCombat = nil
+      _G.InCombatLockdown = function() return false end
+
+      -- A) Starting a grind route with NO existing macro NEVER calls CreateMacro (`Missing — click to create`)!
+      local okStart1 = GF.Start("arcane_hinterlands_owlbeasts", catalog, nil, { status = "ok", uiMapID = 1425, x01 = 0.5140, y01 = 0.4560 }, "arcane_lvl47_st")
+      assertTrue(okStart1 == true and createCalls == 0 and editCalls == 0, "Route start must NEVER auto-create FH_Target")
+      assertTrue(SR.GetMacroSyncStatus().status == "Missing — click to create", "Missing macro must report 'Missing — click to create'")
+
+      -- B) Legacy boolean `ownedMacros.FH_Target = true` + canonical `/stopmacro` prefix WITHOUT `macroSync` record MUST NOT authorize overwrite!
+      slots[1] = {
+        name = "FH_Target",
+        body = "/stopmacro [harm,nodead]\n/cleartarget\n/targetexact Custom User Target\n/cleartarget [noharm][dead]",
+      }
+      local gProg = ns.State.GetGoldFarmProgress()
+      gProg.ownedMacros = { FH_Target = true }
+      local rLegacy = SR.SyncExistingOwnedTargetMacro("legacy_probe")
+      assertTrue(rLegacy.ok == false and rLegacy.reason == "macro_name_collision" and editCalls == 0 and createCalls == 0, "Legacy boolean + prefix alone must NEVER authorize overwrite")
+
+      -- C) Explicit character-scope creation (`slot 121`), auto-sync on route transition, user edit revocation & explicit adopt:
+      slots = {}
+      local rCharCreate = SR.CreateOrAdoptTargetMacro(catalog.arcaneGrindFarms[1], catalog.arcaneGrindFarms[1].travelSteps[3], { scope = "character" })
+      assertTrue(rCharCreate.ok == true and rCharCreate.scope == "character" and rCharCreate.macroIndex == 121 and createCalls == 1, "Character-scoped CreateOrAdoptTargetMacro must create in slot 121")
+      assertTrue(_G.ForeverHubCharDB.macroSync.FH_Target and _G.ForeverHubCharDB.macroSync.FH_Target.lastWrittenBody == slots[121].body, "Character scope DB must record exact body")
+
+      -- Transition to #6 (`arcane_hinterlands_snapjaws`, 96B Saltwater Snapjaw) -> auto-updates owned character macro!
+      GF.Start("arcane_hinterlands_snapjaws", catalog, nil, { status = "ok", uiMapID = 1425, x01 = 0.7710, y01 = 0.6120 }, "arcane_lvl47_st")
+      assertTrue(createCalls == 1 and editCalls == 1 and #slots[121].body == 96, "Owned macro must auto-sync to 96B Saltwater Snapjaw on route switch")
+      assertTrue(reentrantInspectTriggeredWrite == false, "Synchronous UPDATE_MACROS inside EditMacro must hit reentrant_guarded")
+
+      -- User edits macro body -> status becomes `User modified` and subsequent route transitions make 0 writes!
+      slots[121].body = slots[121].body .. "\n/run print(1)"
+      local stMod = SR.GetMacroSyncStatus()
+      assertTrue(stMod.status == "User modified", "Edited body must report 'User modified'")
+      GF.Start("arcane_azshara_thunderheads", catalog, nil, { status = "ok", uiMapID = 1447, x01 = 0.5600, y01 = 0.3000 }, "arcane_lvl47_st")
+      assertTrue(editCalls == 1, "User-modified macro must NEVER be overwritten on route transition")
+
+      -- Explicit `forceAdopt = true` re-adopts slot 121 and writes 99B Thunderhead Stagwing body!
+      local rAdopt = SR.CreateOrAdoptTargetMacro(catalog.arcaneGrindFarms[7], catalog.arcaneGrindFarms[7].travelSteps[3], { forceAdopt = true })
+      assertTrue(rAdopt.ok == true and rAdopt.action == "adopted" and editCalls == 2 and #slots[121].body == 99, "Explicit adopt must restore ownership and write 99B Thunderhead Stagwing body")
+
+      -- D) Duplicate global + character `FH_Target` conflict fails closed with 0 writes!
+      slots[2] = { name = "FH_Target", body = slots[121].body }
+      local rDup = SR.SyncExistingOwnedTargetMacro("dup_scope")
+      assertTrue(rDup.ok == false and rDup.reason == "duplicate_macro_scope_conflict" and rDup.status == "Unavailable" and editCalls == 2, "Duplicate global+char FH_Target must fail closed")
+      slots[2] = nil
+
+      -- E) Combat single-intent coalescing: `A (#7) -> B (#1) -> C (#6)` in combat flushes ONLY `C (#6)` once!
+      _G.InCombatLockdown = function() return true end
+      GF.Start("arcane_hinterlands_owlbeasts", catalog, nil, { status = "ok", uiMapID = 1425, x01 = 0.5140, y01 = 0.4560 }, "arcane_lvl47_st")
+      GF.Start("arcane_hinterlands_snapjaws", catalog, nil, { status = "ok", uiMapID = 1425, x01 = 0.7710, y01 = 0.6120 }, "arcane_lvl47_st")
+      assertTrue(editCalls == 2 and SR.GetMacroSyncStatus().status == "Pending combat", "Combat route transitions must defer without writing")
+      _G.InCombatLockdown = function() return false end
+      local rFlush = SR.FlushPendingMacroSync()
+      assertTrue(rFlush and rFlush.ok == true and editCalls == 3 and #slots[121].body == 96, "Combat flush must write ONLY final target C (96B) in 1 EditMacro call")
+
+      -- Combat `C (#6) -> B (#1) -> Stop` in combat flushes 0 writes after combat!
+      _G.InCombatLockdown = function() return true end
+      GF.Start("arcane_hinterlands_owlbeasts", catalog, nil, { status = "ok", uiMapID = 1425, x01 = 0.5140, y01 = 0.4560 }, "arcane_lvl47_st")
+      GF.Stop(false, catalog)
+      _G.InCombatLockdown = function() return false end
+      local rStopFlush = SR.FlushPendingMacroSync()
+      assertTrue(rStopFlush == nil and editCalls == 3 and createCalls == 1, "Stopping route during combat must cancel pending generation with 0 writes")
+
+      -- UI Presenter/View refresh must perform 0 macro writes!
+      if ns.UI and ns.UI.GoldFarmsPresenter then
+        local snapUI = ns.UI.GoldFarmsPresenter.CaptureSnapshot()
+        ns.UI.GoldFarmsPresenter.Build(snapUI)
+      end
+      assertTrue(editCalls == 3 and createCalls == 1, "UI snapshot/build must perform 0 macro mutations")
+    end)
+
+    check("Radar.10: KI-ARCANE-002 Fail-Closed terrainAccess, Subcamp Macro Parity & Timbermaw Prerequisite Gate", function()
+      local catalog = ns.State.GetCompiledGoldFarms()
+
+      -- 1) Unknown / malformed / `excluded_hazard` terrainAccess MUST fail closed even when `includeUnwalkedCaveNodes = true`!
+      local optInProg = { includeUnwalkedCaveNodes = true }
+      local defProg = { includeUnwalkedCaveNodes = false }
+      local normalStep = { stepID = "s_norm", kind = "grind", excludeFromAutoRadarUntilWalked = false }
+      assertTrue(SR.IsNodeTerrainAdmitted(normalStep, { terrainAccess = "walked_verified" }, defProg) == true, "walked_verified admitted")
+      assertTrue(SR.IsNodeTerrainAdmitted(normalStep, { terrainAccess = "surface_candidate" }, defProg) == true, "surface_candidate admitted")
+      assertTrue(SR.IsNodeTerrainAdmitted(normalStep, { terrainAccess = "unclassified_cave_risk" }, defProg) == false, "unclassified_cave_risk excluded by default")
+      assertTrue(SR.IsNodeTerrainAdmitted(normalStep, { terrainAccess = "unclassified_cave_risk" }, optInProg) == true, "unclassified_cave_risk admitted on explicit opt-in")
+      assertTrue(SR.IsNodeTerrainAdmitted(normalStep, { terrainAccess = "excluded_hazard" }, optInProg) == false, "excluded_hazard MUST remain excluded even with opt-in")
+      for _, badVal in ipairs({ "cave_unverified", "outdoor_verified", "", 123, false }) do
+        assertTrue(SR.IsNodeTerrainAdmitted(normalStep, { terrainAccess = badVal }, optInProg) == false, "Unknown terrainAccess must fail closed: " .. tostring(badVal))
+      end
+
+      -- 2) Subcamp macro parity: excluded_hazard species & farm-level species absent from active subcamp MUST NOT enter macro!
+      local parityFarm = {
+        farmID = "parity_farm",
+        targets = {
+          { npcID = 10, name = "Admitted Alpha" },
+          { npcID = 20, name = "Excluded Hazard Beta" },
+          { npcID = 30, name = "Other Subcamp Gamma" },
+        },
+      }
+      local parityStep = {
+        stepID = "parity_step",
+        kind = "grind",
+        destination = { uiMapID = 1425, x01 = 0.5, y01 = 0.5, coordinateSpace = "uiMap01" },
+        spawnNodes = {
+          { nodeIndex = 1, locationID = "loc:p:1", npcID = 10, npcName = "Admitted Alpha", x01 = 0.5, y01 = 0.5, terrainAccess = "surface_candidate" },
+          { nodeIndex = 2, locationID = "loc:p:2", npcID = 20, npcName = "Excluded Hazard Beta", x01 = 0.5, y01 = 0.51, terrainAccess = "excluded_hazard" },
+        },
+      }
+      local pBody, pMeta = SR.BuildTargetMacroBody(parityFarm, parityStep, optInProg)
+      assertTrue(pMeta.ok == true and pMeta.speciesCount == 1, "Subcamp macro must emit ONLY admitted node species")
+      assertTrue(string.find(pBody, "Admitted Alpha", 1, true) ~= nil and string.find(pBody, "Beta", 1, true) == nil and string.find(pBody, "Gamma", 1, true) == nil, "Excluded/off-subcamp species must be omitted")
+
+      -- 3) Timbermaw Hold (`conditionally_blocked_crossing`) holds arrival on Felwood side until Winterspring map 1452 reached!
+      local wsOwl = GF.LookupFarmByID("arcane_winterspring_owlbeasts", catalog)
+      assertTrue(wsOwl ~= nil, "Must find arcane_winterspring_owlbeasts (#16)")
+      local timberStep = wsOwl.travelSteps[2]
+      assertTrue(timberStep and timberStep.prerequisiteGate and timberStep.prerequisiteGate.gateKind == "conditionally_blocked_crossing", "Hop 2 must carry conditionally_blocked_crossing gate")
+      local arrivedAtMouth, reasonMouth = GF.CheckHopArrival(timberStep, { status = "ok", uiMapID = 1448, x01 = 0.6510, y01 = 0.0840 }, catalog, wsOwl)
+      assertTrue(arrivedAtMouth == false and reasonMouth == "prerequisite_gate_requires_crossing_or_manual", "Standing at Felwood tunnel mouth must NOT auto-complete gated crossing")
+      local arrivedInWS, reasonWS = GF.CheckHopArrival(timberStep, { status = "ok", uiMapID = 1452, x01 = 0.2800, y01 = 0.3450 }, catalog, wsOwl)
+      assertTrue(arrivedInWS == true and reasonWS == "prerequisite_crossing_destination_reached", "Reaching Winterspring map 1452 completes gated crossing")
+    end)
+
+    check("Radar.11: KI-ARCANE-002 Raw 59->60 Cap XP Adapter (UnitXPMax==0 & >0, Both Orders, Quest Attribution & Purse KPI Pivot)", function()
+      local catalog = ns.State.GetCompiledGoldFarms()
+      local silFarm = GF.LookupFarmByID("arcane_silithus_twilight", catalog)
+      assertTrue(silFarm ~= nil, "Must find #19 arcane_silithus_twilight")
+
+      -- Exercise RAW client probe path (`overridePlayerXPState = nil`) so Compat.GetPlayerXPState is tested end-to-end!
+      ns.State.overridePlayerXPState = nil
+      ns.State.overrideRestedXP = 0
+      local rawLvl, rawXP, rawMax = 59, 209600, 209800
+      _G.UnitLevel = function() return rawLvl end
+      _G.UnitXP = function() return rawXP end
+      _G.UnitXPMax = function() return rawMax end
+
+      -- Case A: `UnitXPMax == 0` at Level 60, level-first (`PLAYER_LEVEL_UP(60)` -> `PLAYER_XP_UPDATE`), verified grind kill:
+      local probe59 = Compat.GetPlayerXPState()
+      assertTrue(probe59.status == "ok" and probe59.level == 59 and probe59.remainingXP == 200, "Raw Lv 59 probe must read 209600/209800")
+      ns.State.ResetGoldFarmSession("arcane_silithus_twilight", true, 5000)
+      ns.State.RecordGoldFarmVerifiedCampKill({ npcID = 11880, expectedXP = 320, nowMono = 5240, nowWall = 5240 })
+      rawLvl, rawXP, rawMax = 60, 0, 0
+      local probe60Zero = Compat.GetPlayerXPState()
+      assertTrue(probe60Zero.status == "capped" and probe60Zero.isCapped == true and probe60Zero.maxXP == 0, "Raw Lv 60 0/0 probe MUST return status='capped' without clamping maxXP to 1")
+
+      local capRes1 = ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_LEVEL_UP", newLevel = 60, nowMono = 5240, nowWall = 5240 })
+      local capRes2 = ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_XP_UPDATE", nowMono = 5240, nowWall = 5240 })
+      assertTrue(capRes1.delta == 200 and (capRes2.delta or 0) == 0, "Terminal 59->60 ding must credit 200 XP exactly once")
+
+      -- Continue farming at cap until t=5600 (600s total, 240s pre-cap): pre-cap rate freezes at 240s (`200 * 3600 / 240 = 3000 XP/hr`)!
+      ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_XP_UPDATE", nowMono = 5600, nowWall = 5600 })
+      local snapCapA = ns.State.GetGoldFarmSessionSnapshot(5600)
+      local repCapA = GF.EvaluateSessionXP(silFarm, snapCapA, Compat.GetPlayerXPState())
+      assertTrue(snapCapA.levelCapReached == true and snapCapA.xpElapsedAtCap == 240 and snapCapA.totalSessionXP == 200 and snapCapA.attributableGrindXP == 200, "Cap snapshot must freeze pre-cap XP & elapsed time")
+      assertTrue(repCapA.measuredGrindXpPerHour == 3000 and repCapA.etaNextLevelMinutes == nil and repCapA.etaSuppressionReason == "level_cap_reached", "Cap XP report must freeze pre-cap rate and suppress ETA")
+
+      -- Case B: `UnitXPMax > 0` at Level 60 (`0 / 217400`), XP-first transitional (`59, 0/0` -> `60, 0/217400`) via Quest Turn-In:
+      rawLvl, rawXP, rawMax = 59, 209300, 209800 -- remaining = 500
+      ns.State.ResetGoldFarmSession("arcane_silithus_twilight", true, 6000)
+      rawLvl, rawXP, rawMax = 59, 0, 0 -- transitional XP-first frame before UnitLevel flips to 60!
+      local transRes = ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_XP_UPDATE", nowMono = 6200, nowWall = 6200 })
+      assertTrue((transRes.delta or 0) == 0, "Transitional (59, 0/0) frame must hold without premature reset or negative delta")
+      rawLvl, rawXP, rawMax = 60, 0, 217400 -- non-zero maxXP at cap!
+      ns.State.RecordGoldFarmQuestTurnInXP(5501, 4500, 6200, 6200)
+      local capQuestRes = ns.State.ReconcileGoldFarmXPSnapshot({ trigger = "PLAYER_LEVEL_UP", newLevel = 60, nowMono = 6200, nowWall = 6200 })
+      local snapCapB = ns.State.GetGoldFarmSessionSnapshot(6300)
+      assertTrue(capQuestRes.delta == 500 and snapCapB.totalSessionXP == 500 and snapCapB.questRewardXP == 500 and snapCapB.attributableGrindXP == 0, "Quest turn-in ding into 60 (0/217400) must attribute 500 to questRewardXP and 0 to grind")
+
+      -- Case C: Level 60 Presenter KPI Pivot (`Net Purse / Active Hr`, `Current purse`, `Level & XP` @ Cap, `Next level ETA` retired):
+      if ns.UI and ns.UI.GoldFarmsPresenter then
+        local presSnap = ns.UI.GoldFarmsPresenter.CaptureSnapshot()
+        local vm60 = ns.UI.GoldFarmsPresenter.Build(presSnap, { goldView = { selectedTrack = "arcane_lvl47_st", subFilter = "my_level" } })
+        assertTrue(vm60.isLevelCapped == true, "Presenter VM must detect Level 60 cap")
+        assertTrue(vm60.kpis and vm60.kpis[1] and vm60.kpis[1].label == "Net Purse / Active Hr", "KPI #1 must pivot to Net Purse / Active Hr at Level 60")
+        assertTrue(vm60.kpis[2] and vm60.kpis[2].label == "Current purse", "KPI #2 must show Current purse at Level 60")
+        assertTrue(vm60.kpis[3] and vm60.kpis[3].label == "Level & XP" and vm60.kpis[3].value == "Lv 60 (Cap)", "KPI #3 must show Lv 60 (Cap)")
+        assertTrue(vm60.kpis[4] and vm60.kpis[4].label == "Next level ETA" and vm60.kpis[4].value == "Cap reached", "KPI #4 must retire Next level ETA as Cap reached")
+      end
+
+      _G.UnitLevel = savedUnitLevel
+      _G.UnitXP = savedUnitXP
+      _G.UnitXPMax = savedUnitXPMax
+    end)
+
+    check("Radar.12: KI-ARCANE-002 Lv 46-60 Ideal Subcamp Coverage, +3 Mixed Badge, Non-Disruptive Sub-Filter & Map Index", function()
+      local catalog = ns.State.GetCompiledGoldFarms()
+
+      -- 1) Every integer player level 46..60 MUST have >= 1 outdoor `Ideal` subcamp in `my_level`!
+      for lvl = 46, 60 do
+        local fRes = GF.FilterArcaneFarms(catalog, "my_level", lvl, { includeUnwalkedCaveNodes = false })
+        assertTrue(type(fRes.farms) == "table" and #fRes.farms >= 1, "Level " .. tostring(lvl) .. " must have >=1 eligible subcamp")
+        local topEv = fRes.evalByFarmID[fRes.farms[1].farmID]
+        assertTrue(topEv and topEv.code == "ideal", "Level " .. tostring(lvl) .. " top subcamp must be Ideal, got " .. tostring(topEv and topEv.code))
+      end
+
+      -- Verify `all_shortlist` (19) and `experimental` (7) counts:
+      local allRes = GF.FilterArcaneFarms(catalog, "all_shortlist", 52)
+      local expRes = GF.FilterArcaneFarms(catalog, "experimental", 52)
+      assertTrue(#allRes.farms == 19, "all_shortlist must return all 19 primary farms")
+      assertTrue(#expRes.farms == 7, "experimental must return all 7 experimental farms")
+
+      -- 2) Mixed +3 resist warning (`High Resist (+3 Mixed)`) on #19 Casters subcamp (`58-60`) at Level 57:
+      local sil19 = GF.LookupFarmByID("arcane_silithus_twilight", catalog)
+      local castersStep = sil19.travelSteps[4]
+      local ev57 = GF.EvaluateStepEligibility(sil19, castersStep, 57, { includeUnwalkedCaveNodes = false })
+      assertTrue(ev57.code == "high_resist" and ev57.badgeLabel == "High Resist (+3 Mixed)", "Lv 57 against 58-60 subcamp must warn High Resist (+3 Mixed)")
+
+      -- 3) Visibility-only sub-filter switching NEVER stops/pauses active route or resets session meters, and surfaces `hiddenActiveRouteSummary`!
+      GF.Start("arcane_hinterlands_owlbeasts", catalog, nil, { status = "ok", uiMapID = 1425, x01 = 0.5140, y01 = 0.4560 }, "arcane_lvl47_st")
+      local gProg = ns.State.GetGoldFarmProgress()
+      assertTrue(gProg.mode == "standalone" and gProg.selectedFarmID == "arcane_hinterlands_owlbeasts", "Active Hinterlands route running")
+      if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarmsPresenter then
+        ns.UI.GoldFarms.Dispatch("SET_SUBFILTER", { subFilter = "57_60" })
+        assertTrue(gProg.mode == "standalone" and gProg.selectedFarmID == "arcane_hinterlands_owlbeasts", "SET_SUBFILTER must NEVER pause or change active route")
+        local snap = ns.UI.GoldFarmsPresenter.CaptureSnapshot()
+        local vmHidden = ns.UI.GoldFarmsPresenter.Build(snap, { goldView = { selectedTrack = "arcane_lvl47_st", subFilter = "57_60" } })
+        assertTrue(vmHidden.hiddenActiveRouteSummary ~= nil and vmHidden.hiddenActiveRouteSummary.farmID == "arcane_hinterlands_owlbeasts", "Hidden active route must surface persistent banner summary")
+        ns.UI.GoldFarms.Dispatch("SET_SUBFILTER", { subFilter = "my_level" })
+      end
+      GF.Stop(false, catalog)
+
+      -- 4) Pre-indexed WorldMapPins lookup (`O(|map_step_nodes|)`):
+      if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.EnsureGoldFarmMapIndex then
+        local idxA = ns.UI.WorldMapPins.EnsureGoldFarmMapIndex(catalog)
+        local idxB = ns.UI.WorldMapPins.EnsureGoldFarmMapIndex(catalog)
+        assertTrue(idxA ~= nil and idxA == idxB, "EnsureGoldFarmMapIndex must cache per catalog hash")
+        assertTrue(idxA.byMapID[1425] and #idxA.byMapID[1425] >= 2, "Hinterlands map 1425 must index owlbeast & turtle farms")
+        assertTrue(idxA.byMapID[1452] and #idxA.byMapID[1452] >= 2, "Winterspring map 1452 must index owlbeast & ghost farms")
+        assertTrue(idxA.byMapID[2482] and #idxA.byMapID[2482] >= 1, "Hyjal map 2482 must index experimental farm")
+      end
+    end)
+  end)
+
+  _G.InCombatLockdown = savedInCombatFn
+  _G.issecretvalue = savedIsSecret
+  _G.GetNumMacros = savedGetNumMacros
+  _G.GetMacroIndexByName = savedGetMacroIndexByName
+  _G.GetMacroInfo = savedGetMacroInfo
+  _G.CreateMacro = savedCreateMacro
+  _G.EditMacro = savedEditMacro
+  _G.UnitExists = savedUnitExists
+  _G.UnitCanAttack = savedUnitCanAttack
+  _G.UnitIsDeadOrGhost = savedUnitIsDeadOrGhost
+  _G.UnitGUID = savedUnitGUID
+  _G.UnitName = savedUnitName
+  _G.UnitLevel = savedUnitLevel
+  _G.UnitXP = savedUnitXP
+  _G.UnitXPMax = savedUnitXPMax
+  _G.C_NamePlate = savedCNamePlate
+
+  if SR and savedSRState then
+    SR.state = savedSRState
+  end
+  if SR and savedSRMacroSync then
+    SR.macroSyncState = savedSRMacroSync
+  end
+  if type(_G.ForeverHubDB) == "table" then
+    _G.ForeverHubDB.macroSync = savedAcctMacroSync
+  end
+  if type(_G.ForeverHubCharDB) == "table" then
+    _G.ForeverHubCharDB.macroSync = savedCharMacroSync
+  end
+  if db and db.uiWorkspace and savedGoldView then
+    db.uiWorkspace.goldView = savedGoldView
+  end
+  if charDB then
+    charDB.goldFarmProgress = savedGFProg
+    charDB.goldFarmTelemetry = savedGFTelem
+  end
+  if ns.State then
+    ns.State.goldFarmSession = savedGFSess
+    ns.State.overrideMapWorldSizes = savedWorldSizes
+    ns.State.overridePlayerPosition = savedPlayerPos
+    ns.State.overrideInCombat = savedCombat
+    ns.State.overridePlayerXPState = savedXPState
+    ns.State.overrideRestedXP = savedRested
+  end
+  restoreNavigationSnapshot(navSnap, charDB)
+
+  local report = {
+    passed = passed,
+    failed = failed,
+    total = passed + failed,
+    results = results,
+  }
+  if suiteOk then
+    SelfTest.cachedReports.spawn_radar = report
+  end
+  SelfTest._running.spawn_radar = false
+
+  if not suiteOk then
+    error(suiteErr, 2)
+  end
+
+  return report
+end
+
+-- ============================================================================
+-- Sunken Temple Coach RC1 Acceptance Self-Tests (Astra Gates ST-01 .. ST-10)
+-- ============================================================================
+
+function SelfTest.RunSunkenTempleCoachSuite()
+  if SelfTest._running.sunken_temple_rc1 then
+    return SelfTest.cachedReports.sunken_temple_rc1 or { passed = 0, failed = 0, total = 0, results = {} }
+  end
+  SelfTest._running.sunken_temple_rc1 = true
+  SelfTest.suiteRunCounts.sunken_temple_rc1 = (SelfTest.suiteRunCounts.sunken_temple_rc1 or 0) + 1
+
+  local results = {}
+  local passed = 0
+  local failed = 0
+  local function check(name, fn)
+    local ok, err = pcall(fn)
+    if ok then
+      passed = passed + 1
+      table.insert(results, { name = name, passed = true })
+    else
+      failed = failed + 1
+      table.insert(results, { name = name, passed = false, error = tostring(err) })
+    end
+  end
+
+  local db = ns.State and ns.State.GetDB and ns.State.GetDB() or _G.ForeverHubDB
+  local charDB = ns.State and ns.State.GetCharDB and ns.State.GetCharDB() or _G.ForeverHubCharDB
+  local navSnap = snapshotAndIsolateNavigation(charDB)
+
+  local coach = ns.Domain and ns.Domain.SunkenTempleCoach
+  local stData = ns.SunkenTempleData
+  local il = ns.Domain and ns.Domain.InstanceLedger
+  local nav = ns.UI and ns.UI.Navigation
+  local cardUI = ns.UI and ns.UI.SunkenTempleCard
+
+  local savedCoachState = coach and deepCopyTable(coach.state) or nil
+  local savedProbeStore = coach and deepCopyTable(coach.probeStore) or nil
+  local savedCoachEventFrame = coach and coach.eventFrame or nil
+  local savedCardHidden = cardUI and cardUI.frame and cardUI.frame.IsShown and cardUI.frame:IsShown() or false
+  local savedInstanceLedger = db and deepCopyTable(db.instanceLedger) or nil
+  local savedGFProg = charDB and deepCopyTable(charDB.goldFarmProgress) or nil
+
+  local savedIsSecret = _G.issecretvalue
+  local savedInCombat = _G.InCombatLockdown
+  local savedIsInInstance = _G.IsInInstance
+  local savedGetInstanceInfo = _G.GetInstanceInfo
+  local savedGetLocale = _G.GetLocale
+  local savedCreateFrame = _G.CreateFrame
+  local savedCreateMacro = _G.CreateMacro
+  local savedEditMacro = _G.EditMacro
+  local savedTargetUnit = _G.TargetUnit
+  local savedSetRaidTarget = _G.SetRaidTarget
+  local savedUnitExists = _G.UnitExists
+  local savedUnitGUID = _G.UnitGUID
+  local savedUnitName = _G.UnitName
+  local savedUnitHealth = _G.UnitHealth
+  local savedUnitHealthMax = _G.UnitHealthMax
+  local savedUnitBuff = _G.UnitBuff
+  local savedCUnitAuras = _G.C_UnitAuras
+  local savedCNamePlate = _G.C_NamePlate
+  local savedGetSubZoneText = _G.GetSubZoneText
+  local savedGetMinimapZoneText = _G.GetMinimapZoneText
+
+  local savedOverrideCombat = ns.State and ns.State.overrideInCombat or nil
+  local savedOverrideDead = ns.State and ns.State.overridePlayerIsDeadOrGhost or nil
+  local savedOverrideNativeWp = ns.State and ns.State.overrideNativeWaypointState or nil
+  local savedOverrideMono = ns.State and ns.State.overrideMonotonicTime or nil
+  local savedOverrideLocale = ns.State and ns.State.overrideClientLocale or nil
+  local savedOverridePos = ns.State and ns.State.overridePlayerPosition or nil
+  local savedOverrideWorldSizes = ns.State and ns.State.overrideMapWorldSizes or nil
+
+  local function resetCoachClean()
+    coach.state = {
+      sessionState = "INACTIVE",
+      phaseIndex = 0,
+      verifiedSunkenTemple = false,
+      instanceClassification = "uninitialized",
+      localizedNameHintMatched = false,
+      hasObservedOutsideBeforeEntry = false,
+      wasInsideVerifiedST = false,
+      lastOutsideWasCorpse = false,
+      requiresRearm = false,
+      recoveryReason = nil,
+      observedActiveRunID = nil,
+      enteredCurrentCopyCount = 0,
+      nextAttemptSeq = 1,
+      currentAttempt = nil,
+      lastAutopsy = nil,
+      hudCardHidden = false,
+    }
+    coach.probeStore = {
+      registrations = {},
+      observedEventSamples = {},
+      runs = {},
+      lastSnapshot = nil,
+    }
+  end
+
+  local suiteOk, suiteErr = pcall(function()
+    assertTrue(coach ~= nil and stData ~= nil, "SunkenTempleCoach and SunkenTempleData must be loaded")
+
+    check("ST-01: Identity — Distinct Return #8 (109) vs Return #9 (5), Type & Ambiguity Gate", function()
+      resetCoachClean()
+      _G.issecretvalue = function() return false end
+      ns.State.overridePlayerIsDeadOrGhost = false
+
+      _G.IsInInstance = function() return false, "none" end
+      _G.GetInstanceInfo = function() return "Swamp of Sorrows", "none", 0, "", 0, 0, false, 0, 0 end
+      local sOut = coach.ObserveEnvironmentTransition()
+      assertTrue(sOut == "INACTIVE" and coach.state.hasObservedOutsideBeforeEntry == true, "Outside sets INACTIVE and records outside baseline")
+
+      _G.IsInInstance = function() return true, "party" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "party", 1, "Normal", 5, 0, false, 5, 109 end
+      local sSwapped, clsSwapped = coach.ObserveEnvironmentTransition()
+      assertTrue(sSwapped == "INACTIVE" and clsSwapped == "other_instance", "Swapped r8=5/r9=109 must be rejected as other_instance")
+
+      _G.GetInstanceInfo = function() return "Zul'Farrak", "party", 1, "Normal", 5, 0, false, 209, 5 end
+      local sZF = coach.ObserveEnvironmentTransition()
+      assertTrue(sZF == "INACTIVE", "Zul'Farrak (209) must keep ST coach INACTIVE")
+
+      _G.IsInInstance = function() return true, "raid" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "raid", 1, "Raid", 20, 0, false, 109, 20 end
+      local sRaid, clsRaid = coach.ObserveEnvironmentTransition()
+      assertTrue(sRaid == "INACTIVE" and clsRaid == "instance_type_mismatch", "Raid instanceType must fail ST party gate")
+
+      _G.IsInInstance = function() return true, "party" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "party", 1, "Normal", 5, 0, false, nil, 5 end
+      local sAmbig, clsAmbig = coach.ObserveEnvironmentTransition()
+      assertTrue(sAmbig == "INACTIVE" and clsAmbig == "ambiguous_unresolved_identity", "Localized name without numeric r8=109 must stay INACTIVE")
+      assertTrue(coach.state.localizedNameHintMatched == true, "Localized name hint recorded for diagnostics only")
+
+      _G.IsInInstance = function() return false, "none" end
+      _G.GetInstanceInfo = function() return "Swamp of Sorrows", "none", 0, "", 0, 0, false, 0, 0 end
+      coach.ObserveEnvironmentTransition()
+      _G.IsInInstance = function() return true, "party" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "party", 1, "Normal", 5, 0, false, 109, 5 end
+      local sST, clsST = coach.ObserveEnvironmentTransition({ ledgerActiveRunID = "run_st01_1", resumedExistingRun = false })
+      assertTrue(sST == "READY" and clsST == "verified_fresh_entry", "Verified ST (r8=109, r9=5) must open READY")
+    end)
+
+    check("ST-02: Directional Honesty — Hidden Chevrons Indoors & 180-Deg Camera-Invariant Landmark Card", function()
+      resetCoachClean()
+      local secretCoord = setmetatable({}, {})
+      _G.issecretvalue = function(v) return _G.rawequal(v, secretCoord) end
+      ns.State.overrideClientLocale = "enUS"
+
+      ns.State.overridePlayerFacing = secretCoord
+      ns.State.overridePlayerWorldPosition = nil
+      ns.State.overridePlayerPosition = { status = "restricted", reason = "secret_xy" }
+      ns.State.overrideMapWorldSizes = { [1435] = { 2293, 1529 } }
+
+      local arrowSettings = ns.State.GetArrowSettings()
+      arrowSettings.enabled = true
+      arrowSettings.dockedInHud = true
+      nav.SetArrowTarget("gold_farm", { uiMapID = 1435, x01 = 0.70, y01 = 0.55, zoneName = "Swamp of Sorrows" }, "ST Portal", "Portal", 20, "native_waypoint")
+      local snapDocked = nav.GetLiveArrowSnapshot()
+      assertTrue(snapDocked.active == false, "Docked directional arrow must NOT be active with secret coords/facing")
+      if nav.frame and nav.frame.dockedArrowLane and nav.frame.dockedArrowLane.arrowTex and nav.frame.dockedArrowLane.arrowTex.IsShown then
+        assertTrue(nav.frame.dockedArrowLane.arrowTex:IsShown() == false, "Docked chevron must be hidden")
+      end
+
+      arrowSettings.dockedInHud = false
+      nav.RefreshArrowSettings()
+      local snapFloat = nav.GetLiveArrowSnapshot()
+      assertTrue(snapFloat.active == false, "Floating directional arrow must NOT be active with secret coords/facing")
+      if nav.arrowFrame and nav.arrowFrame.arrowTex and nav.arrowFrame.arrowTex.IsShown then
+        assertTrue(nav.arrowFrame.arrowTex:IsShown() == false, "Floating chevron must be hidden")
+      end
+
+      local verifiedStepFixture = {
+        index = 1,
+        phaseID = "APPROACH_SANCTUARY",
+        shortTitle = "Approach Sanctuary",
+        title = "1. Approach Sanctuary",
+        glyph = "travel",
+        actionableKind = "traversal",
+        verificationState = "live_confirmed",
+        locale = "enUS",
+        provenance = {
+          sourceUrl = "https://example.invalid/st-verified",
+          timestamps = "01:15-01:42",
+          recordedBuildOrDate = "1.60.1.70938",
+          liveConfirmedOnPlayerCharacter = true,
+        },
+        geometry = {
+          approachLandmark = "Broken Spiral Stairwell Arch",
+          referencePose = "Face the central dragon arch from the upper landing",
+          actionableInstruction = "take the left archway opening",
+          visibleSuccessCue = "Hall of Masks circular balcony in view",
+          abortRoute = "Run back down entry ramp to instance portal",
+        },
+      }
+
+      coach.state.verifiedSunkenTemple = true
+      coach.state.sessionState = "ACTIVE"
+      coach.state.phaseIndex = 1
+      ns.State.overridePlayerFacing = 0.0
+      local vmFace0 = cardUI.Refresh(verifiedStepFixture)
+      ns.State.overridePlayerFacing = math.pi
+      local vmFace180 = cardUI.Refresh(verifiedStepFixture)
+
+      assertTrue(vmFace0.dataReadinessOk == true, "Verified fixture passes readiness")
+      assertTrue(vmFace0.landmarkLine == vmFace180.landmarkLine and vmFace0.instructionLine == vmFace180.instructionLine, "180-deg turn must not alter landmark/reference-pose text")
+      assertTrue(string.find(vmFace180.instructionLine, "Face the central dragon arch", 1, true) ~= nil, "Reference pose must be explicit")
+    end)
+
+    check("ST-03: Ownership — Combat Portal Suppression, Failed Clear Guard, User Pin Survival & Corpse/Stale Exit", function()
+      resetCoachClean()
+      _G.issecretvalue = function() return false end
+      ns.State.overridePlayerIsDeadOrGhost = false
+      ns.State.overrideMapWorldSizes = { [1435] = { 2293, 1529 } }
+      ns.State.overridePlayerPosition = { status = "ok", uiMapID = 1435, x01 = 0.50, y01 = 0.50 }
+      ns.State.overrideNativeWaypointState = {
+        supported = true,
+        current = nil,
+        clearMustFail = false,
+      }
+
+      ns.State.overrideInCombat = false
+      _G.IsInInstance = function() return false, "none" end
+      _G.GetInstanceInfo = function() return "Swamp of Sorrows", "none", 0, "", 0, 0, false, 0, 0 end
+      local catalog = ns.State.GetCompiledGoldFarms()
+      ns.Domain.GoldFarms.Start("swamp_jaguars_snappers", catalog, nil, ns.State.overridePlayerPosition)
+      local gProg = ns.State.GetGoldFarmProgress()
+      nav.SyncFromGoldFarmEvaluation(nil, gProg)
+      assertTrue(nav.owner.provider == "native_waypoint" and nav.owner.ownerContext == "gold_farm", "Outdoor native waypoint acquired")
+
+      ns.State.overrideInCombat = true
+      _G.IsInInstance = function() return true, "party" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "party", 1, "Normal", 5, 0, false, 109, 5 end
+      coach.ObserveEnvironmentTransition({ ledgerActiveRunID = "run_st03_1" })
+      assertTrue(nav.activeTarget == nil, "Outdoor arrow target must be suppressed on portal entry")
+      assertTrue(nav.owner.pendingRelease == true and nav.owner.provider == "native_waypoint" and nav.owner.handle ~= nil, "Deferred ownership token retained in combat")
+      assertTrue(nav.owner.ownerContext ~= "st_coach", "Coach must NEVER take waypoint ownership")
+
+      ns.State.overrideInCombat = false
+      ns.State.overrideNativeWaypointState.clearMustFail = true
+      _G.IsInInstance = function() return false, "none" end
+      _G.GetInstanceInfo = function() return "Swamp of Sorrows", "none", 0, "", 0, 0, false, 0, 0 end
+      local okExitFail, reasonExitFail = nav.OnInstancePortalExit(nav.owner.generation, false)
+      assertTrue(okExitFail == false and nav.owner.pendingRelease == true, "Clear failure must block reacquisition (" .. tostring(reasonExitFail) .. ")")
+
+      ns.State.overrideNativeWaypointState.clearMustFail = false
+      ns.State.overrideNativeWaypointState.current = { uiMapID = 1435, x01 = 0.2121, y01 = 0.3434 }
+      local okRelUser, relReasonUser = nav.TryReleaseOwnedResource()
+      assertTrue(okRelUser == true and relReasonUser == "confirmed_user_replacement", "User replacement must drop FH token cleanly")
+      assertTrue(ns.State.overrideNativeWaypointState.current ~= nil and ns.State.overrideNativeWaypointState.current.x01 == 0.2121, "User's waypoint must survive untouched")
+
+      local staleGen = (nav.owner.generation or 1) - 1
+      local okStale, reasonStale = nav.OnInstancePortalExit(staleGen, false)
+      assertTrue(okStale == false and reasonStale == "stale_generation_discarded", "Stale generation must be discarded")
+
+      local curGen = nav.owner.generation
+      local okCorpse, reasonCorpse = nav.OnInstancePortalExit(curGen, true)
+      assertTrue(okCorpse == false and reasonCorpse == "corpse_transition_suppressed", "Corpse exit must not reacquire outdoor route")
+      ns.Domain.GoldFarms.Stop(false, catalog)
+    end)
+
+    check("ST-04: Secret Handling — Hostile Poison Proxies, Missing/Throwing Detector & Rejected Registration", function()
+      resetCoachClean()
+      local function makePoisonProxy()
+        local p = {}
+        local mt = {
+          __index = function() error("HOSTILE_INDEX") end,
+          __newindex = function() error("HOSTILE_NEWINDEX") end,
+          __tostring = function() error("HOSTILE_TOSTRING") end,
+          __add = function() error("HOSTILE_ADD") end,
+          __sub = function() error("HOSTILE_SUB") end,
+          __lt = function() error("HOSTILE_LT") end,
+          __le = function() error("HOSTILE_LE") end,
+          __eq = function() error("HOSTILE_EQ") end,
+        }
+        return setmetatable(p, mt)
+      end
+
+      local poisonSecret = makePoisonProxy()
+      local poisonUnflagged = makePoisonProxy()
+
+      _G.issecretvalue = nil
+      local rMissingDet = ns.Compat.ClassifySecretSafeValue(poisonSecret, { secretCapable = true })
+      assertTrue(rMissingDet.status == "unknown" and rMissingDet.value == nil, "Missing detector on secret-capable path must return unknown")
+
+      _G.issecretvalue = function() error("DETECTOR_EXPLODED") end
+      local rThrowDet = ns.Compat.ClassifySecretSafeValue(poisonSecret, { secretCapable = true })
+      assertTrue(rThrowDet.status == "errored" and rThrowDet.value == nil, "Throwing detector must return errored")
+
+      _G.issecretvalue = function(v) return _G.rawequal(v, poisonSecret) end
+      local rSec = ns.Compat.ClassifySecretSafeValue(poisonSecret, { secretCapable = true, expectedType = "string" })
+      assertTrue(rSec.status == "restricted" and rSec.value == nil, "Secret poison proxy must classify as restricted")
+
+      local rBadType = ns.Compat.ClassifySecretSafeValue(poisonUnflagged, { secretCapable = true, expectedType = "number" })
+      assertTrue(rBadType.status == "errored" and rBadType.value == nil, "Hostile type mismatch must return errored")
+
+      local rFalse = ns.Compat.ClassifySecretSafeValue(false, { secretCapable = true, expectedType = "boolean" })
+      local rZero = ns.Compat.ClassifySecretSafeValue(0, { secretCapable = true, expectedType = "number" })
+      assertTrue(rFalse.status == "readable" and rFalse.value == false, "Legitimate false must be preserved")
+      assertTrue(rZero.status == "readable" and rZero.value == 0, "Legitimate 0 must be preserved")
+
+      local rejectedMockFrame = {
+        RegisterUnitEvent = function() error("RESTRICTED_UNIT_EVENT") end,
+        RegisterEvent = function(_, ev)
+          if ev == "CHAT_MSG_MONSTER_YELL" then error("RESTRICTED_YELL") end
+          return true
+        end,
+      }
+      coach.AttachEventRegistrations(rejectedMockFrame)
+      _G.C_UnitAuras = {
+        GetPlayerAuraBySpellID = function() return poisonSecret end,
+        GetBuffDataByIndex = function() return { name = poisonSecret, spellId = 11426, expirationTime = poisonSecret } end,
+      }
+      _G.UnitHealth = function() return poisonSecret end
+      _G.UnitHealthMax = function() return 3200 end
+      _G.C_NamePlate = {
+        GetNamePlates = function() return { { namePlateUnitToken = poisonSecret } } end,
+      }
+      local snap = coach.RunOptInProbe("trash")
+      assertTrue(snap.signals.unitSpellcastSucceeded.status == "registration_rejected", "Rejected unit event registration must be reported")
+      assertTrue(snap.signals.monsterYell.status == "registration_rejected", "Rejected yell registration must be reported")
+      assertTrue(snap.signals.cUnitAuras.bySpellIDStatus == "restricted", "Secret aura return must be restricted")
+      assertTrue(snap.signals.cUnitAuras.byIndexFields.name == "restricted" and snap.signals.cUnitAuras.byIndexFields.spellId == "readable", "Nested aura fields classified per-field")
+      assertTrue(snap.signals.unitHealth.healthStatus == "restricted" and snap.signals.unitHealth.maxHealthStatus == "readable", "Health and maxHealth guarded independently")
+      assertTrue(snap.signals.namePlates.firstTokenStatus == "restricted", "Secret nameplate nested token classified restricted")
+      _G.CreateFrame = savedCreateFrame
+      coach.eventFrame = nil
+    end)
+
+    check("ST-05: Phase Control — Events Never Auto-Advance; Manual Controls Work Deterministically In Combat", function()
+      resetCoachClean()
+      _G.issecretvalue = function() return false end
+      ns.State.overridePlayerIsDeadOrGhost = false
+      ns.State.overrideMonotonicTime = 100.0
+
+      _G.IsInInstance = function() return false, "none" end
+      _G.GetInstanceInfo = function() return "Swamp of Sorrows", "none", 0, "", 0, 0, false, 0, 0 end
+      coach.ObserveEnvironmentTransition()
+      _G.IsInInstance = function() return true, "party" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "party", 1, "Normal", 5, 0, false, 109, 5 end
+      coach.ObserveEnvironmentTransition({ ledgerActiveRunID = "run_st05_1" })
+
+      ns.State.overrideInCombat = true
+      _G.InCombatLockdown = function() return true end
+
+      local okStart = coach.StartAttempt(100.0)
+      assertTrue(okStart == true and coach.state.phaseIndex == 1, "StartAttempt works in combat at Phase 1")
+
+      coach.OnCombatStart(101.0)
+      coach.OnCombatStart(101.0)
+      coach.OnMonsterChatEvent("YELL", "The coil of evil...", "Shade of Eranikus", 102.0)
+      coach.OnUnitSpellcastSucceeded("player", "Cast-1", 10, 103.0)
+      coach.OnUnitSpellcastSucceeded("player", "Cast-2", 11958, 105.0)
+      coach.OnUnitSpellcastSucceeded("player", "Cast-1", 10, 104.0)
+      coach.OnCombatEnd(106.0)
+      assertTrue(coach.state.phaseIndex == 1 and coach.state.sessionState == "ACTIVE", "Live events must NEVER auto-advance phase")
+
+      local okN1, p2 = coach.NextPhase(110.0)
+      local okN2, p3 = coach.NextPhase(115.0)
+      local okPrev, pBack2 = coach.PrevPhase(118.0)
+      assertTrue(okN1 and p2 == 2 and okN2 and p3 == 3 and okPrev and pBack2 == 2, "Manual Next/Prev deterministic in combat")
+      assertTrue(coach.state.currentAttempt.manualPrevCorrections == 1, "Prev records manual correction")
+
+      local okFin, aut = coach.FinishAttempt(130.0)
+      assertTrue(okFin and aut.outcome == "PLAYER_REPORTED_COMPLETE" and coach.state.sessionState == "READY", "FinishAttempt closes cleanly in combat")
+    end)
+
+    check("ST-06: Outcome Integrity — Open Combat End, Sighting Non-Failure, Idempotent PLAYER_DEAD & Evidence Tiers", function()
+      resetCoachClean()
+      _G.issecretvalue = function() return false end
+      ns.State.overridePlayerIsDeadOrGhost = false
+      _G.IsInInstance = function() return false, "none" end
+      _G.GetInstanceInfo = function() return "Swamp of Sorrows", "none", 0, "", 0, 0, false, 0, 0 end
+      coach.ObserveEnvironmentTransition()
+      _G.IsInInstance = function() return true, "party" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "party", 1, "Normal", 5, 0, false, 109, 5 end
+      coach.ObserveEnvironmentTransition({ ledgerActiveRunID = "run_st06_1" })
+
+      coach.StartAttempt(200.0)
+      coach.NextPhase(205.0)
+      coach.NextPhase(210.0)
+      coach.NextPhase(215.0)
+
+      _G.UnitExists = function(u) return u == "target" end
+      _G.UnitGUID = function(u) return u == "target" and "Creature-0-0-0-0-5719-00000001" or nil end
+      _G.UnitName = function(u) return u == "target" and "Morphaz" or nil end
+      coach.OnCombatStart(216.0)
+      coach.OnTargetChangedSample(218.0)
+      coach.OnUnitSpellcastSucceeded("player", "Cast-B1", 10, 220.0)
+      coach.OnUnitSpellcastSucceeded("player", "Cast-B2", 10, 233.0)
+      coach.OnCombatEnd(235.0)
+
+      assertTrue(coach.state.sessionState == "ACTIVE" and coach.state.currentAttempt.closed == false, "Combat end with 0 kills, visible dragon, and 0 yells MUST keep attempt open")
+
+      coach.NextPhase(240.0)
+      local okDead1, aut1 = coach.OnPlayerDead(245.0)
+      local okDead2 = coach.OnPlayerDead(246.0)
+      assertTrue(okDead1 == true and okDead2 == false, "PLAYER_DEAD must close the attempt EXACTLY ONCE")
+      assertTrue(coach.state.currentAttempt.closeCount == 1 and aut1.outcome == "DIED", "Single close with DIED outcome")
+
+      assertTrue(#aut1.claims >= 5, "Autopsy must include confirmed, heuristic, and unobservable claims")
+      local sawBlizGap = false
+      for _, c in ipairs(aut1.claims) do
+        assertTrue(type(c.tier) == "string" and type(c.evidence) == "string" and c.evidence ~= "" and type(c.coverage) == "string" and c.coverage ~= "", "Every claim must specify tier, evidence, and coverage")
+        assertTrue(c.code ~= "failed_reset" and c.code ~= "failed_rp", "Must never fabricate failed_reset or failed_rp")
+        if c.code == "blizzard_cast_gap" then
+          sawBlizGap = true
+          assertTrue(c.tier == "LIKELY_HEURISTIC" and type(c.missingLink) == "string" and c.missingLink ~= "", "Heuristic must name missing link")
+        end
+      end
+      assertTrue(sawBlizGap == true, "13s Blizzard gap must surface as LIKELY_HEURISTIC")
+    end)
+
+    check("ST-07: Reload & Re-entry — Mid-Pull Reload, Death, Ghost Exit, Same-Copy Re-entry & Floor Coalescing", function()
+      resetCoachClean()
+      _G.issecretvalue = function() return false end
+      ns.State.overridePlayerIsDeadOrGhost = false
+      if db then db.instanceLedger = nil end
+      il.EnsureInitialized()
+
+      _G.IsInInstance = function() return true, "party" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "party", 1, "Normal", 5, 0, false, 109, 5 end
+      local tr1 = il.ObserveTransition({ nowEpoch = 1000 })
+      local sReload = coach.ObserveEnvironmentTransition({ ledgerActiveRunID = tr1.activeRunID, resumedExistingRun = tr1.resumedExistingRun })
+      assertTrue(sReload == "RECOVERY", "Mid-instance /reload must enter RECOVERY")
+      local okStartBlocked = coach.StartAttempt(300.0)
+      assertTrue(okStartBlocked == false, "RECOVERY must block StartAttempt until explicit RearmCoach")
+
+      local okRearm = coach.RearmCoach()
+      assertTrue(okRearm == true and coach.state.sessionState == "READY", "Explicit RearmCoach transitions RECOVERY -> READY")
+      coach.StartAttempt(305.0)
+      coach.NextPhase(310.0)
+
+      local admBefore = il.GetSummarySnapshot().observedSessionAdmissions
+      local trFloor = il.ObserveTransition({ nowEpoch = 1015 })
+      local sFloor = coach.ObserveEnvironmentTransition({ ledgerActiveRunID = trFloor.activeRunID, resumedExistingRun = trFloor.resumedExistingRun })
+      local admAfter = il.GetSummarySnapshot().observedSessionAdmissions
+      assertTrue(admAfter == admBefore and sFloor == "ACTIVE" and coach.state.phaseIndex == 2, "Floor bursts must coalesce without bumping admissions or phase")
+
+      coach.OnPlayerDead(320.0)
+      assertTrue(coach.state.sessionState == "RECOVERY", "Death enters RECOVERY")
+      ns.State.overridePlayerIsDeadOrGhost = true
+      _G.IsInInstance = function() return false, "none" end
+      _G.GetInstanceInfo = function() return "Swamp of Sorrows", "none", 0, "", 0, 0, false, 0, 0 end
+      il.ObserveTransition({ nowEpoch = 1025, isGhostOrCorpseRun = true })
+      coach.ObserveEnvironmentTransition({ isCorpseOrGhost = true })
+      assertTrue(coach.state.sessionState == "INACTIVE", "Outside as ghost is INACTIVE")
+
+      ns.State.overridePlayerIsDeadOrGhost = false
+      _G.IsInInstance = function() return true, "party" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "party", 1, "Normal", 5, 0, false, 109, 5 end
+      local trReenter = il.ObserveTransition({ nowEpoch = 1040 })
+      local sReenter = coach.ObserveEnvironmentTransition({ ledgerActiveRunID = trReenter.activeRunID, resumedExistingRun = trReenter.resumedExistingRun })
+      assertTrue(trReenter.resumedExistingRun == true and sReenter == "RECOVERY", "Same-copy re-entry must land in RECOVERY")
+      assertTrue(coach.StartAttempt(345.0) == false, "Same-copy re-entry requires RearmCoach")
+
+      coach.RearmCoach()
+      coach.StartAttempt(350.0)
+      coach.NextPhase(352.0)
+      _G.IsInInstance = function() return false, "none" end
+      _G.GetInstanceInfo = function() return "Swamp of Sorrows", "none", 0, "", 0, 0, false, 0, 0 end
+      il.ObserveTransition({ nowEpoch = 1060 })
+      coach.ObserveEnvironmentTransition()
+      il.ObserveResetSignal("system_confirm")
+      _G.IsInInstance = function() return true, "party" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "party", 1, "Normal", 5, 0, false, 109, 5 end
+      local trFresh = il.ObserveTransition({ nowEpoch = 1070 })
+      local sFresh = coach.ObserveEnvironmentTransition({ ledgerActiveRunID = trFresh.activeRunID, resumedExistingRun = trFresh.resumedExistingRun })
+      assertTrue(sFresh == "READY" and coach.state.phaseIndex == 0, "Fresh post-reset copy must open READY at phase 0")
+    end)
+
+    check("ST-08: Macro Isolation — Zero Targeting, Raid-Marking, or Macro Writes Across Coach & Probe", function()
+      resetCoachClean()
+      _G.issecretvalue = function() return false end
+      local forbiddenCalls = 0
+      _G.CreateMacro = function() forbiddenCalls = forbiddenCalls + 1 end
+      _G.EditMacro = function() forbiddenCalls = forbiddenCalls + 1 end
+      _G.TargetUnit = function() forbiddenCalls = forbiddenCalls + 1 end
+      _G.SetRaidTarget = function() forbiddenCalls = forbiddenCalls + 1 end
+
+      coach.eventFrame = nil
+      coach.EnsureEventFrame()
+      coach.RunOptInProbe("outside")
+      coach.OnCombatStart(400.0)
+      coach.OnCombatEnd(405.0)
+      assertTrue(forbiddenCalls == 0, "Coach startup, probe, and combat transitions must produce ZERO macro/target/mark writes")
+    end)
+
+    check("ST-09: Bounds & Regressions — 64-Event Ring Overflow Preserves Header & Zero SavedVariables Bytes", function()
+      resetCoachClean()
+      _G.issecretvalue = function() return false end
+      ns.State.overridePlayerIsDeadOrGhost = false
+
+      local function countKeysDeep(t)
+        if type(t) ~= "table" then return 1 end
+        local n = 0
+        for k, v in pairs(t) do
+          n = n + 1 + countKeysDeep(k) + countKeysDeep(v)
+        end
+        return n
+      end
+
+      local dbBefore = countKeysDeep(_G.ForeverHubDB)
+      local charDbBefore = countKeysDeep(_G.ForeverHubCharDB)
+
+      _G.IsInInstance = function() return false, "none" end
+      _G.GetInstanceInfo = function() return "Swamp of Sorrows", "none", 0, "", 0, 0, false, 0, 0 end
+      coach.ObserveEnvironmentTransition()
+      _G.IsInInstance = function() return true, "party" end
+      _G.GetInstanceInfo = function() return "The Temple of Atal'Hakkar", "party", 1, "Normal", 5, 0, false, 109, 5 end
+      coach.ObserveEnvironmentTransition({ ledgerActiveRunID = "run_st09_1" })
+
+      coach.StartAttempt(500.0)
+      coach.NextPhase(502.0)
+      for i = 1, 90 do
+        coach.OnUnitSpellcastSucceeded("player", "Cast-" .. tostring(i), 10, 502.0 + i)
+      end
+      local okAb, aut = coach.AbortAttempt("overflow_test", 600.0)
+      assertTrue(okAb == true and aut.overflowed == true, "90+ events must flag overflowed == true")
+      assertTrue(#aut.retainedRingEntries == 64 and aut.totalObservedEvents > 64, "Ring buffer must stay capped at 64 entries")
+      assertTrue(aut.outcome == "ABORTED" and aut.terminalPhaseIndex == 2, "Terminal outcome & phase header preserved despite ring overflow")
+      assertTrue(coach.state.currentAttempt.phaseConfirmations[1] ~= nil and coach.state.currentAttempt.phaseConfirmations[2] ~= nil, "Independent phase confirmations preserved")
+
+      coach.RunOptInProbe("post")
+      local dbAfter = countKeysDeep(_G.ForeverHubDB)
+      local charDbAfter = countKeysDeep(_G.ForeverHubCharDB)
+      assertTrue(dbAfter == dbBefore and charDbAfter == charDbBefore, "ST Coach & Probe must add ZERO SavedVariables entries/bytes")
+    end)
+
+    check("ST-10: Data Readiness — Unverified, Missing-Locale, Incomplete-Jump & Probe States Gate Actionable Cues", function()
+      resetCoachClean()
+      _G.issecretvalue = function() return false end
+
+      for idx = 1, 6 do
+        local p = coach.GetPhaseDefinition(idx)
+        local okReady, reason = stData.ValidateStepDataReadiness(p, "enUS")
+        assertTrue(okReady == false and reason == "unverified_route_entry", "RC1 phase " .. tostring(idx) .. " must gate actionable cues")
+      end
+
+      local snap = coach.RunOptInProbe("ooc")
+      assertTrue(snap.provesRouteReadiness == false, "Probe snapshot must explicitly report provesRouteReadiness == false")
+      local okProbeStep, reasonProbeStep = stData.ValidateStepDataReadiness({
+        phaseID = "BOSS_DRAGON_RESET",
+        actionableKind = "reset",
+        verificationState = "probe_observed",
+      }, "enUS")
+      assertTrue(okProbeStep == false and reasonProbeStep == "probe_does_not_prove_route_readiness", "probe_observed state must fail ST-10")
+
+      local baseJump = {
+        phaseID = "KILL_LEDGE",
+        actionableKind = "jump",
+        verificationState = "live_confirmed",
+        locale = "enUS",
+        provenance = {
+          sourceUrl = "https://youtube.com/watch?v=example",
+          timestamps = "04:10-05:00",
+          recordedBuildOrDate = "1.60.1.70938",
+          liveConfirmedOnPlayerCharacter = true,
+        },
+        geometry = {
+          approachLandmark = "Upper Tunnel Corner",
+          referencePose = "Face north wall torch from tunnel lip",
+          actionableInstruction = "jump onto the corner ledge",
+          visibleSuccessCue = "Standing above melee pathing line",
+          abortRoute = "Ice Block then drop to lower hall",
+        },
+      }
+      local okNoTakeoff, rNoTakeoff = stData.ValidateStepDataReadiness(baseJump, "enUS")
+      assertTrue(okNoTakeoff == false and rNoTakeoff == "missing_jump_takeoff_or_landing", "Jump step without takeoff/landing must fail ST-10")
+
+      baseJump.geometry.jumpTakeoff = "Outer stone seam"
+      baseJump.geometry.jumpLanding = "Elevated corner molding"
+      local okWrongLoc, rWrongLoc = stData.ValidateStepDataReadiness(baseJump, "deDE")
+      assertTrue(okWrongLoc == false and rWrongLoc == "missing_localized_geometry", "Mismatched locale without localizedGeometry must fail ST-10")
+
+      baseJump.provenance.liveConfirmedOnPlayerCharacter = false
+      local okUnwalked, rUnwalked = stData.ValidateStepDataReadiness(baseJump, "enUS")
+      assertTrue(okUnwalked == false and rUnwalked == "missing_live_character_confirmation", "Video-only step without live character confirmation must fail ST-10")
+
+      baseJump.provenance.liveConfirmedOnPlayerCharacter = true
+      local okFull = stData.ValidateStepDataReadiness(baseJump, "enUS")
+      assertTrue(okFull == true, "Fully provenanced, locale-matched, live-confirmed jump step passes ST-10")
+    end)
+  end)
+
+  _G.issecretvalue = savedIsSecret
+  _G.InCombatLockdown = savedInCombat
+  _G.IsInInstance = savedIsInInstance
+  _G.GetInstanceInfo = savedGetInstanceInfo
+  _G.GetLocale = savedGetLocale
+  _G.CreateFrame = savedCreateFrame
+  _G.CreateMacro = savedCreateMacro
+  _G.EditMacro = savedEditMacro
+  _G.TargetUnit = savedTargetUnit
+  _G.SetRaidTarget = savedSetRaidTarget
+  _G.UnitExists = savedUnitExists
+  _G.UnitGUID = savedUnitGUID
+  _G.UnitName = savedUnitName
+  _G.UnitHealth = savedUnitHealth
+  _G.UnitHealthMax = savedUnitHealthMax
+  _G.UnitBuff = savedUnitBuff
+  _G.C_UnitAuras = savedCUnitAuras
+  _G.C_NamePlate = savedCNamePlate
+  _G.GetSubZoneText = savedGetSubZoneText
+  _G.GetMinimapZoneText = savedGetMinimapZoneText
+
+  if coach then
+    coach.state = savedCoachState
+    coach.probeStore = savedProbeStore
+    coach.eventFrame = savedCoachEventFrame
+  end
+  if cardUI and cardUI.frame then
+    ns.UI.Widgets.SafeShow(cardUI.frame, savedCardHidden)
+  end
+  if db then
+    db.instanceLedger = savedInstanceLedger
+  end
+  if charDB then
+    charDB.goldFarmProgress = savedGFProg
+  end
+  if ns.State then
+    ns.State.overrideInCombat = savedOverrideCombat
+    ns.State.overridePlayerIsDeadOrGhost = savedOverrideDead
+    ns.State.overrideNativeWaypointState = savedOverrideNativeWp
+    ns.State.overrideMonotonicTime = savedOverrideMono
+    ns.State.overrideClientLocale = savedOverrideLocale
+    ns.State.overridePlayerPosition = savedOverridePos
+    ns.State.overrideMapWorldSizes = savedOverrideWorldSizes
+  end
+  restoreNavigationSnapshot(navSnap, charDB)
+
+  local report = {
+    passed = passed,
+    failed = failed,
+    total = passed + failed,
+    results = results,
+  }
+  if suiteOk then
+    SelfTest.cachedReports.sunken_temple_rc1 = report
+  end
+  SelfTest._running.sunken_temple_rc1 = false
 
   if not suiteOk then
     error(suiteErr, 2)

@@ -52,6 +52,52 @@ local function getPriceInfo(itemID, explicitPriceMap)
   return { unitPrice = nil, ageDays = nil, freshness = "missing", isStale = false, isUnknownAge = false }
 end
 
+local function getClientMaterialMetadata(itemID, matEntry, targetRecord)
+  local explicitMap = type(targetRecord) == "table" and type(targetRecord.materialMetadataByItemID) == "table"
+    and targetRecord.materialMetadataByItemID
+    or nil
+  local exp = (explicitMap and explicitMap[itemID]) or (type(matEntry) == "table" and matEntry.clientMetadata) or nil
+  if type(exp) == "table" then
+    local sp = exp.unitSellPrice
+    local vendorKnown = (exp.metadataComplete == true)
+      and type(sp) == "number"
+      and sp == sp
+      and sp >= 0
+      and math.floor(sp) == sp
+    local bt = tonumber(exp.bindType)
+    return {
+      metadataComplete = (exp.metadataComplete == true),
+      vendorKnown = vendorKnown,
+      unitVendorCopper = vendorKnown and math.floor(sp) or nil,
+      bindType = bt,
+      isSoulbound = (bt == 1 or exp.isSoulbound == true or exp.bindingStatus == "BOP" or exp.bindingStatus == "QUEST"),
+    }
+  end
+
+  if type(_G.GetItemInfo) == "function" and itemID and itemID > 0 then
+    local okI, _, _, _, _, _, _, _, _, _, _, sellPrice, _, _, bindType = pcall(_G.GetItemInfo, itemID)
+    if okI and type(sellPrice) == "number" and sellPrice == sellPrice and sellPrice >= 0 and math.floor(sellPrice) == sellPrice then
+      local bt = tonumber(bindType)
+      return {
+        metadataComplete = true,
+        vendorKnown = true,
+        unitVendorCopper = math.floor(sellPrice),
+        bindType = bt,
+        isSoulbound = (bt == 1),
+      }
+    end
+  end
+
+  -- Cold cache / unknown metadata: NEVER default vendor value to `0c` (`P0-4`)!
+  return {
+    metadataComplete = false,
+    vendorKnown = false,
+    unitVendorCopper = nil,
+    bindType = nil,
+    isSoulbound = false,
+  }
+end
+
 function Costs.EvaluateTargetOptions(
   kind,
   targetRecord,
@@ -65,9 +111,21 @@ function Costs.EvaluateTargetOptions(
   if type(targetRecord) ~= "table" then
     return nil
   end
-  kind = kind or (targetRecord.writItemID and "writ" or "crate")
-  local targetItemID = tonumber(targetRecord.itemID or targetRecord.writItemID)
-  local goalKey = string.format("%s:%d", kind, targetItemID or 0)
+  kind = kind or (targetRecord.writItemID and "writ" or (targetRecord.kind or "crate"))
+  local targetItemID = tonumber(targetRecord.itemID or targetRecord.writItemID or targetRecord.outputItemID)
+  local goalKey
+  if kind == "craft" then
+    if targetRecord.scanComplete == false or targetRecord.learnedRecipeVerified == false then
+      return nil
+    end
+    goalKey = targetRecord.goalKey
+      or (ns.State and ns.State.BuildCraftGoalKey and ns.State.BuildCraftGoalKey(targetRecord.ownerKey, targetRecord.skillLineID, targetRecord.spellID))
+    if not goalKey then
+      return nil
+    end
+  else
+    goalKey = string.format("%s:%d", kind, targetItemID or 0)
+  end
 
   if explicitCandidateQuantity ~= nil then
     local qNum = tonumber(explicitCandidateQuantity)
@@ -171,6 +229,16 @@ function Costs.EvaluateTargetOptions(
         },
       },
     })
+  elseif kind == "craft" then
+    local craftMats = targetRecord.reagents or targetRecord.materials or {}
+    if type(craftMats) ~= "table" or #craftMats == 0 then
+      return nil
+    end
+    table.insert(rawOptions, {
+      optionIndex = 1,
+      label = tostring(targetRecord.name or targetRecord.recipeName or "Craft"),
+      materials = craftMats,
+    })
   else
     rawOptions = targetRecord.alternatives or {}
   end
@@ -209,6 +277,17 @@ function Costs.EvaluateTargetOptions(
     local conflictGoalsByKey = {}
     local conflictGoalList = {}
     local conflictGoalKeys = {}
+
+    -- Stage 7A.2 (`P0-4`) Strictly Separated Opportunity-Cost Accumulators:
+    local ownedVendorComplete = true
+    local ownedVendorAltSum = 0
+    local ownedCharLiquidVendorSum = 0
+    local completedBasketVendorComplete = true
+    local completedBasketVendorSum = 0
+    local hasSoulboundMaterial = false
+    local allocatedBagUnitsTotal = 0
+    local allocatedBankUnitsTotal = 0
+    local allocatedAltUnitsTotal = 0
 
     for _, mat in ipairs(alt.materials or {}) do
       local mID = tonumber(mat.itemID)
@@ -249,6 +328,32 @@ function Costs.EvaluateTargetOptions(
 
       local retrieveBankUnits = math.min(bagDeficitUnits, freeBank)
       local retrieveAltUnits = includeAltStock and math.min(math.max(0, bagDeficitUnits - freeBank), freeAlt) or 0
+
+      -- Allocated unreserved owned stock for this option (`P0-4` — never counts unowned items as immediate cash!):
+      local allocBagUnits = math.min(reqQty, freeBags)
+      local allocBankUnits = (acquisitionMode == "bags_only") and 0 or retrieveBankUnits
+      local allocAltUnits = (acquisitionMode == "bags_only") and 0 or retrieveAltUnits
+      local allocOwnedUnits = allocBagUnits + allocBankUnits + allocAltUnits
+      allocatedBagUnitsTotal = allocatedBagUnitsTotal + allocBagUnits
+      allocatedBankUnitsTotal = allocatedBankUnitsTotal + allocBankUnits
+      allocatedAltUnitsTotal = allocatedAltUnitsTotal + allocAltUnits
+
+      local matMeta = getClientMaterialMetadata(mID, mat, targetRecord)
+      if matMeta.isSoulbound then
+        hasSoulboundMaterial = true
+      end
+      if matMeta.vendorKnown and matMeta.unitVendorCopper ~= nil then
+        completedBasketVendorSum = completedBasketVendorSum + (reqQty * matMeta.unitVendorCopper)
+        if allocOwnedUnits > 0 then
+          ownedVendorAltSum = ownedVendorAltSum + (allocOwnedUnits * matMeta.unitVendorCopper)
+          ownedCharLiquidVendorSum = ownedCharLiquidVendorSum + ((allocBagUnits + allocBankUnits) * matMeta.unitVendorCopper)
+        end
+      else
+        completedBasketVendorComplete = false
+        if allocOwnedUnits > 0 then
+          ownedVendorComplete = false
+        end
+      end
 
       totalBagDeficitUnits = totalBagDeficitUnits + bagDeficitUnits
       totalBankDeficitUnits = totalBankDeficitUnits + bankDeficitUnits
@@ -407,6 +512,92 @@ function Costs.EvaluateTargetOptions(
     local transDefEst = transferDeficitComplete and transferDeficitSum or nil
     local activeDefEst = (acquisitionMode == "bags_only") and bagDefEst or transDefEst
 
+    -- Finalize `P0-4` Opportunity-Cost Ledger for this option:
+    local knownTransferCostsCopper = 0
+    local transferCostsComplete = true
+    if targetRecord.knownTransferCostsCopper ~= nil then
+      local kt = tonumber(targetRecord.knownTransferCostsCopper)
+      if type(kt) == "number" and kt == kt and kt >= 0 and math.floor(kt) == kt then
+        knownTransferCostsCopper = math.floor(kt)
+      else
+        knownTransferCostsCopper = nil
+        transferCostsComplete = false
+      end
+    elseif allocatedAltUnitsTotal > 0 then
+      -- Non-liquid alt stock requires mail/transfer whose postage is not assumed unless explicitly verified:
+      knownTransferCostsCopper = nil
+      transferCostsComplete = false
+    end
+
+    local ownedVendorAlternativeCopper = ownedVendorComplete and ownedVendorAltSum or nil
+    local ownedCharLiquidVendorCopper = ownedVendorComplete and ownedCharLiquidVendorSum or nil
+    local completedBasketVendorCopper = completedBasketVendorComplete and completedBasketVendorSum or nil
+
+    -- Cash-equivalent commitment = missing-material buy cost + vendor alternative of allocated owned mats + known transfer costs
+    -- (NEVER adds `completedBasketVendorCopper` to `activeDefEst`, preventing double-counting!)
+    local cashEquivalentCommitmentCopper = nil
+    if isActiveDeficitKnown and ownedVendorComplete and transferCostsComplete and activeDefEst ~= nil and ownedVendorAlternativeCopper ~= nil and knownTransferCostsCopper ~= nil then
+      cashEquivalentCommitmentCopper = activeDefEst + ownedVendorAlternativeCopper + knownTransferCostsCopper
+    end
+
+    -- Conditional AH asking-price scenario: NEVER called a floor, and omitted whenever any material is soulbound (`P0-4`):
+    local ahAskingPriceScenarioCopper = nil
+    local ahScenarioStatus = "UNPRICED"
+    if hasSoulboundMaterial then
+      ahAskingPriceScenarioCopper = nil
+      ahScenarioStatus = "EXCLUDED_SOULBOUND_MATERIAL"
+    elseif replacementComplete then
+      ahAskingPriceScenarioCopper = repEst
+      ahScenarioStatus = "CONDITIONAL_ASK_SCENARIO"
+    end
+
+    -- `Reserves.lua`-driven purse & riding impact warning (catches `level >= 40` characters who still lack riding!):
+    local outOfPocketSpendCopper = nil
+    if isActiveDeficitKnown and activeDefEst ~= nil then
+      outOfPocketSpendCopper = activeDefEst + (knownTransferCostsCopper or 0)
+    end
+    local purseImpactWarning = nil
+    if outOfPocketSpendCopper ~= nil and outOfPocketSpendCopper > 0 and ns.Domain.Reserves and type(ns.Domain.Reserves.CanAffordOutlay) == "function" then
+      local canAfford, reserveReason, reserveSnap = ns.Domain.Reserves.CanAffordOutlay(outOfPocketSpendCopper, targetRecord.reserveOpts)
+      if not canAfford and type(reserveSnap) == "table" and reserveSnap.status == "ok" then
+        purseImpactWarning = {
+          warns = true,
+          outOfPocketSpendCopper = outOfPocketSpendCopper,
+          investableCopper = reserveSnap.investableCopper,
+          liquidCopper = reserveSnap.liquidCopper,
+          totalReserveTargetCopper = reserveSnap.totalReserveTargetCopper,
+          hasBasicMount = reserveSnap.hasBasicMount,
+          level = reserveSnap.level,
+          reason = reserveReason,
+          message = (not reserveSnap.hasBasicMount and (tonumber(reserveSnap.mountReserveTargetCopper) or 0) > 0)
+            and "Out-of-pocket material buy dips into your protected riding/mount fund."
+            or "Out-of-pocket material buy dips into your protected training/operating reserve.",
+        }
+      end
+    end
+
+    local opportunityCostLedger = {
+      buyMissingMaterialsCopper = activeDefEst,
+      buyMissingComplete = isActiveDeficitKnown,
+      ownedVendorAlternativeCopper = ownedVendorAlternativeCopper,
+      ownedCharLiquidVendorCopper = ownedCharLiquidVendorCopper,
+      ownedVendorComplete = ownedVendorComplete,
+      allocatedBagUnits = allocatedBagUnitsTotal,
+      allocatedBankUnits = allocatedBankUnitsTotal,
+      allocatedAltUnits = allocatedAltUnitsTotal,
+      requiresBankRetrieval = (allocatedBankUnitsTotal > 0),
+      requiresAltRetrieval = (allocatedAltUnitsTotal > 0),
+      knownTransferCostsCopper = knownTransferCostsCopper,
+      transferCostsComplete = transferCostsComplete,
+      cashEquivalentCommitmentCopper = cashEquivalentCommitmentCopper,
+      completedBasketVendorCopper = completedBasketVendorCopper,
+      completedBasketVendorComplete = completedBasketVendorComplete,
+      ahAskingPriceScenarioCopper = ahAskingPriceScenarioCopper,
+      ahScenarioStatus = ahScenarioStatus,
+      ahScenarioIsGuaranteedFloor = false,
+      purseImpactWarning = purseImpactWarning,
+    }
+
     table.insert(evaluatedOptions, {
       goalKey = goalKey,
       goalID = goalID,
@@ -450,6 +641,7 @@ function Costs.EvaluateTargetOptions(
       displacedGoalKeys = displacement.displacedGoalKeys,
       displacedGoals = displacement.displacedGoals,
       displacementWarning = displacement.displacementWarning,
+      opportunityCostLedger = opportunityCostLedger,
       materials = matDetails,
     })
   end

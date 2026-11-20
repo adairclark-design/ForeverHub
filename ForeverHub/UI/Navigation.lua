@@ -19,7 +19,7 @@ Navigation.travelTickerGeneration = 0
 Navigation.travelTickerBoundGeneration = nil
 Navigation.travelTickerBoundContext = nil
 Navigation.suppressHUDCreation = false
-Navigation.activeContext = "riverglades"
+Navigation.activeContext = "gold_farm"
 Navigation.hydratedFromSaved = false
 Navigation.pendingDeferredSync = false
 Navigation.watchedQuestRef = nil
@@ -28,9 +28,9 @@ Navigation.watchedQuestFingerprint = nil
 Navigation.questWatchdogAccum = 0
 Navigation.questWatchdogActive = false
 
--- Single shared runtime navigation owner across Riverglades and Gold Farms (Astra P0-1).
+-- Single shared runtime navigation owner for Gold Farms & Spawn Radar (Astra P0-1).
 Navigation.owner = {
-  ownerContext = nil,      -- "riverglades" | "gold_farm" | nil
+  ownerContext = nil,      -- "gold_farm" | nil
   generation = 0,          -- monotonic integer incremented on Start/Pause/Stop/context switch
   provider = "none",       -- "none" | "tomtom" | "native_waypoint"
   handle = nil,            -- { uid = ... } or { uiMapID = ..., x01 = ..., y01 = ... }
@@ -73,7 +73,6 @@ local function syncProgressMirrorsAndPersist()
   if ns.State and ns.State.SavePersistedNavigationOwner then
     ns.State.SavePersistedNavigationOwner(owner)
   end
-  local rgProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
   local gfProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
   local nativeToken = nil
   if owner.provider == "native_waypoint" and type(owner.handle) == "table" then
@@ -83,9 +82,6 @@ local function syncProgressMirrorsAndPersist()
       x01 = owner.handle.x01,
       y01 = owner.handle.y01,
     }
-  end
-  if rgProg then
-    rgProg.ownedWaypoint = (owner.ownerContext == "riverglades") and nativeToken or nil
   end
   if gfProg then
     gfProg.ownedWaypoint = (owner.ownerContext == "gold_farm") and nativeToken or nil
@@ -130,18 +126,6 @@ function Navigation.HydrateOwnerFromSavedStateIfUnset()
         return
       end
     end
-  end
-  -- Backwards-compatible fallback if a test or old session seeded `progress.ownedWaypoint` directly
-  local rgProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-  if rgProg and type(rgProg.ownedWaypoint) == "table" and rgProg.ownedWaypoint.provider == "native" then
-    Navigation.owner.ownerContext = "riverglades"
-    Navigation.owner.provider = "native_waypoint"
-    Navigation.owner.handle = {
-      uiMapID = rgProg.ownedWaypoint.uiMapID,
-      x01 = rgProg.ownedWaypoint.x01,
-      y01 = rgProg.ownedWaypoint.y01,
-    }
-    return
   end
   local gfProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
   if gfProg and type(gfProg.ownedWaypoint) == "table" and gfProg.ownedWaypoint.provider == "native" then
@@ -249,19 +233,7 @@ function Navigation.EnsureTravelTicker(shouldRun, context)
         end
         return
       end
-
-      local prog = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-      if not prog or prog.mode ~= "standalone" then
-        Navigation.StopTravelTicker()
-        return
-      end
-      local prevActionID = prog.currentActionID
-      local eval = ns.Domain.RouteProgress.Reconcile()
-      if eval and eval.currentActionID ~= prevActionID then
-        Navigation.SyncFromEvaluation(eval)
-      elseif not (eval and eval.nextAction and eval.nextAction.kind == "travel") then
-        Navigation.StopTravelTicker()
-      end
+      Navigation.StopTravelTicker()
     end)
     if ok and ticker then
       Navigation.travelTicker = ticker
@@ -723,15 +695,9 @@ Navigation.COMPACT_HUD_STATE_TABLE = {
 
 Navigation.lastRetainedTitleByContext = Navigation.lastRetainedTitleByContext or {}
 
-local function extractCleanQuestOrStepName(act, context)
+local function extractCleanQuestOrStepName(act, _context)
   if type(act) ~= "table" then
     return nil
-  end
-  if context == "riverglades" and (act.questID or act.questKey) and ns.Compat and ns.Compat.LookupRouteQuestMeta then
-    local qMeta = ns.Compat.LookupRouteQuestMeta(act.questKey or act.questID)
-    if qMeta and type(qMeta.name) == "string" and qMeta.name ~= "" then
-      return qMeta.name
-    end
   end
   local raw = tostring(act.questName or act.shortTitle or act.title or act.actionID or act.stepID or "")
   if raw == "" then
@@ -882,6 +848,15 @@ function Navigation.ResolveCompactHUDLine2(vm, target, vec, bodyTextWidth)
       floatingOwnsDistance
   end
 
+  if target and target.spawnRadarActive == true and target.radarDistanceUnavailable == true then
+    return isNarrow and "No yardage" or "Distance unavailable",
+      "status.warning",
+      "spawn_radar_dist_unavail",
+      -1,
+      false,
+      floatingOwnsDistance
+  end
+
   if not vec
     or vec.status == "unavailable"
     or vec.status == "missing_transform"
@@ -928,6 +903,22 @@ function Navigation.ResolveCompactHUDLine2(vm, target, vec, bodyTextWidth)
     return aLine, "status.ready", "arrived", intYards, isApprox, false
   end
 
+  if target and target.spawnRadarActive == true then
+    if floatingOwnsDistance then
+      local radarUndocked = (type(target.radarUndockedLine) == "string" and target.radarUndockedLine ~= "")
+        and target.radarUndockedLine
+        or "Spawn Radar active"
+      return radarUndocked, "status.ready", "spawn_radar_undocked", intYards, isApprox, true
+    end
+    if target.radarAllCoolingDown == true and (tonumber(target.radarReadyInSec) or 0) > 0 then
+      local coolLine = isVeryNarrow and distStr or string.format("%s · ~%ds revisit", distStr, tonumber(target.radarReadyInSec))
+      return coolLine, "status.warning", "spawn_radar_cooling", intYards, isApprox, false
+    end
+    local upTag = target.radarCountsTag
+    local rLine = (not isNarrow and type(upTag) == "string" and upTag ~= "") and (distStr .. " · " .. upTag .. " active pool") or distStr
+    return rLine, "status.ready", "spawn_radar_pool", intYards, isApprox, false
+  end
+
   -- Normal directional travel
   if floatingOwnsDistance then
     -- Floating arrow is the sole distance display when undocked; show progress or concise step detail on Line 2
@@ -952,11 +943,12 @@ function Navigation.WriteCompactHUDLine2(f, vm, target, vec, force)
 
   local targetKey = target
     and string.format(
-      "%s:%s:%.4f:%.4f",
+      "%s:%s:%.4f:%.4f:%s",
       tostring(target.context or ""),
       tostring(target.uiMapID or 0),
       tonumber(target.x01) or 0,
-      tonumber(target.y01) or 0
+      tonumber(target.y01) or 0,
+      tostring(target.radarCountsTag or "")
     )
     or "no_target"
 
@@ -1144,6 +1136,20 @@ local function renderCompactHUDTooltip(ownerFrame)
 
   if vm.extraNote and vm.extraNote ~= "" then
     _G.GameTooltip:AddLine(tostring(vm.extraNote), 0.72, 0.78, 0.86, true)
+  end
+
+  if vm.sameNameHazardNote and vm.sameNameHazardNote ~= "" then
+    _G.GameTooltip:AddLine("Hazard: " .. tostring(vm.sameNameHazardNote), 0.96, 0.62, 0.24, true)
+  end
+
+  if vm.context == "gold_farm" and ns.Domain and ns.Domain.SpawnRadar and type(ns.Domain.SpawnRadar.GetMacroSyncStatus) == "function" then
+    local mSt = ns.Domain.SpawnRadar.GetMacroSyncStatus()
+    if type(mSt) == "table" and mSt.status then
+      _G.GameTooltip:AddLine("FH_Target Macro: " .. tostring(mSt.status), 0.68, 0.86, 0.96, true)
+      if mSt.disclosure and mSt.status ~= "Inactive" then
+        _G.GameTooltip:AddLine(tostring(mSt.disclosure), 0.58, 0.66, 0.76, true)
+      end
+    end
   end
 
   local status = Navigation.lastStatus
@@ -1372,16 +1378,18 @@ local function ensureHUDFrame()
   local ok, f = pcall(
     CreateFrame,
     "Frame",
-    "ForeverHubRivergladesHUD",
+    "ForeverHubTrackerHUD",
     UIParent,
     BackdropTemplateMixin and "BackdropTemplate" or nil
   )
   if not ok or not f then
-    ok, f = pcall(CreateFrame, "Frame", "ForeverHubRivergladesHUD", UIParent)
+    ok, f = pcall(CreateFrame, "Frame", "ForeverHubTrackerHUD", UIParent)
   end
   if not ok or not f then
     return nil
   end
+  _G.ForeverHubTrackerHUD = f
+  _G.ForeverHubRivergladesHUD = f
 
   f:SetSize(initW, initH)
   f.__width = initW
@@ -1469,7 +1477,7 @@ local function ensureHUDFrame()
     or f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   if header then
     if header.SetWordWrap then header:SetWordWrap(false) end
-    header:SetText("Riverglades")
+    header:SetText("Gold & Farms")
     if header.Hide then header:Hide() end
   end
   f.headerText = header
@@ -1589,21 +1597,17 @@ local function ensureHUDFrame()
       if overflowMenu.Hide then overflowMenu:Hide() end
     end
 
-    f.nextBtn = createHudMenuRowButton(overflowMenu, -6, "Skip objective", function()
+    f.nextBtn = createHudMenuRowButton(overflowMenu, -6, "Next hop", function()
       closeMenu()
-      if Navigation.activeContext == "gold_farm" and ns.Events and ns.Events.HandleGoldSubcommand then
+      if ns.Events and ns.Events.HandleGoldSubcommand then
         ns.Events.HandleGoldSubcommand("next")
-      elseif ns.Events and ns.Events.HandleRivergladesSubcommand then
-        ns.Events.HandleRivergladesSubcommand("next")
       end
     end)
 
     f.prevBtn = createHudMenuRowButton(overflowMenu, -32, "Previous step", function()
       closeMenu()
-      if Navigation.activeContext == "gold_farm" and ns.Events and ns.Events.HandleGoldSubcommand then
+      if ns.Events and ns.Events.HandleGoldSubcommand then
         ns.Events.HandleGoldSubcommand("prev")
-      elseif ns.Events and ns.Events.HandleRivergladesSubcommand then
-        ns.Events.HandleRivergladesSubcommand("prev")
       end
     end)
 
@@ -1611,10 +1615,8 @@ local function ensureHUDFrame()
       closeMenu()
       local isPausedNow = (f.viewModel and f.viewModel.stateKey == "paused")
       local subcmd = isPausedNow and "start" or "pause"
-      if Navigation.activeContext == "gold_farm" and ns.Events and ns.Events.HandleGoldSubcommand then
+      if ns.Events and ns.Events.HandleGoldSubcommand then
         ns.Events.HandleGoldSubcommand(subcmd)
-      elseif ns.Events and ns.Events.HandleRivergladesSubcommand then
-        ns.Events.HandleRivergladesSubcommand(subcmd)
       end
     end)
 
@@ -1639,7 +1641,7 @@ local function ensureHUDFrame()
     f.openWorkspaceBtn = createHudMenuRowButton(overflowMenu, -136, "Open Workspace", function()
       closeMenu()
       if ns.UI and ns.UI.Workspace and ns.UI.Workspace.Show then
-        ns.UI.Workspace.Show(Navigation.activeContext == "gold_farm" and "gold" or "riverglades")
+        ns.UI.Workspace.Show("gold")
       end
     end)
 
@@ -1655,10 +1657,8 @@ local function ensureHUDFrame()
 
     f.closeBtn = createHudMenuRowButton(overflowMenu, -188, "Stop navigation", function()
       closeMenu()
-      if Navigation.activeContext == "gold_farm" and ns.Events and ns.Events.HandleGoldSubcommand then
+      if ns.Events and ns.Events.HandleGoldSubcommand then
         ns.Events.HandleGoldSubcommand("stop")
-      elseif ns.Events and ns.Events.HandleRivergladesSubcommand then
-        ns.Events.HandleRivergladesSubcommand("stop")
       end
     end)
 
@@ -1762,6 +1762,11 @@ updateTargetHysteresis = function(target, vec)
       target.isArrivedState = false
       target.inCampState = false
     end
+    return
+  end
+  if target.spawnRadarActive == true then
+    target.isArrivedState = false
+    target.inCampState = false
     return
   end
   local y = vec.yards
@@ -2020,6 +2025,17 @@ local function buildProviderStatus(provider, dest, fallbackReason, builtinArrowA
       vectorStatus = vecStatus,
       deferred = false,
     }
+  elseif provider == "spawn_radar" then
+    return {
+      activeProvider = "spawn_radar",
+      navigationLabel = builtinArrowActive and "Spawn Radar Arrow" or ("Spawn Radar" .. facingMissingSuffix),
+      fallbackReason = fallbackReason,
+      hasDirectionalArrow = (builtinArrowActive == true),
+      hasBuiltinArrow = (builtinArrowActive == true),
+      arrowDelegated = false,
+      vectorStatus = vecStatus,
+      deferred = false,
+    }
   elseif provider == "native_waypoint" then
     return {
       activeProvider = "native_waypoint",
@@ -2130,10 +2146,6 @@ local function hasActiveProviderOrRxpMonitorableSession()
   if gProg and gProg.mode ~= "paused" then
     return true
   end
-  local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-  if rProg and rProg.mode ~= "paused" then
-    return true
-  end
   return false
 end
 
@@ -2141,76 +2153,173 @@ local function hasVisibleOrRetainedHudSession()
   if hasActiveProviderOrRxpMonitorableSession() then
     return true
   end
-  if Navigation.activeContext == "gold_farm" then
-    local gProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
-    if gProg and gProg.mode == "paused" and gProg.pausedHudRetained == true then
-      return true
-    end
-  else
-    local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-    if rProg and rProg.mode == "paused" and rProg.pausedHudRetained == true then
-      return true
-    end
-  end
-  return false
-end
-
-function Navigation.TickActiveStepWatchdog(stepDt)
-  if Navigation.activeContext == "gold_farm" or not Navigation.questWatchdogActive then
-    return false
-  end
-  local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-  if not rProg or rProg.mode ~= "standalone" then
-    return false
-  end
-  if not (ns.Compat and ns.Compat.GetActiveStepTruthFingerprint) then
-    return false
-  end
-  Navigation.questWatchdogAccum = (Navigation.questWatchdogAccum or 0) + (tonumber(stepDt) or 0)
-  if Navigation.questWatchdogAccum < QUEST_TRUTH_WATCHDOG_INTERVAL then
-    return false
-  end
-  Navigation.questWatchdogAccum = 0
-  local freshFp = ns.Compat.GetActiveStepTruthFingerprint(Navigation.watchedQuestRef, true)
-  if freshFp ~= Navigation.watchedQuestFingerprint then
-    Navigation.watchedQuestFingerprint = freshFp
-    if ns.Events and ns.Events.CaptureQuestFieldTelemetry then
-      pcall(ns.Events.CaptureQuestFieldTelemetry, "objective_scan")
-    end
-    if ns.Events and ns.Events.FlushRouteReconcileNow then
-      ns.Events.FlushRouteReconcileNow()
-    else
-      Navigation.SyncFromEvaluation(nil, rProg)
-    end
+  local gProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
+  if gProg and gProg.mode == "paused" and gProg.pausedHudRetained == true then
     return true
   end
   return false
 end
 
-local function syncRivergladesQuestWatchBaseline(act, activeStandalone)
-  if not activeStandalone then
-    Navigation.questWatchdogActive = false
-    Navigation.watchedQuestRef = nil
-    Navigation.watchedQuestActionID = nil
-    Navigation.watchedQuestFingerprint = nil
-    Navigation.questWatchdogAccum = 0
-    return
+function Navigation.TickActiveStepWatchdog(_stepDt)
+  return false
+end
+
+function Navigation.TickSpawnRadar(stepDt, forceImmediate)
+  if Navigation.activeContext ~= "gold_farm" then
+    return false
   end
-  local qref = nil
-  local actionID = nil
-  if type(act) == "table" then
-    qref = (type(act.questKey) == "string" and act.questKey ~= "" and act.questKey) or act.questID
-    actionID = act.actionID
+  local gProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
+  if not gProg or gProg.mode ~= "standalone" then
+    return false
   end
-  Navigation.questWatchdogActive = true
-  Navigation.watchedQuestRef = qref
-  Navigation.watchedQuestActionID = actionID
-  Navigation.questWatchdogAccum = 0
-  if ns.Compat and ns.Compat.GetActiveStepTruthFingerprint then
-    Navigation.watchedQuestFingerprint = ns.Compat.GetActiveStepTruthFingerprint(qref, false)
-  else
-    Navigation.watchedQuestFingerprint = nil
+  local target = Navigation.activeTarget
+  if not target or target.context ~= "gold_farm" then
+    return false
   end
+
+  local GoldFarms = ns.Domain and ns.Domain.GoldFarms
+  local SpawnRadar = ns.Domain and ns.Domain.SpawnRadar
+  if not GoldFarms or not SpawnRadar then
+    return false
+  end
+
+  local eval = GoldFarms.Evaluate(nil, gProg)
+  local farm = eval and eval.farm
+  local step = eval and eval.activeStep
+  if not farm or not step or step.kind ~= "grind" then
+    target.spawnRadarActive = false
+    return false
+  end
+
+  local radarActive = SpawnRadar.IsActiveForStep
+    and SpawnRadar.IsActiveForStep(farm, step, gProg)
+    or (SpawnRadar.IsActiveForFarm and SpawnRadar.IsActiveForFarm(farm, gProg))
+    or false
+  if not radarActive then
+    if target.spawnRadarActive == true and step.destination then
+      target.spawnRadarActive = false
+      target.radarDistanceUnavailable = false
+      target.radarNodeIndex = nil
+      target.spawnNodeIndex = nil
+      target.radarCountsTag = nil
+      target.radarAllCoolingDown = false
+      target.radarReadyInSec = 0
+      target.radarStepTitle = nil
+      target.radarUndockedLine = nil
+      target._lastArrowCaptionText = nil
+      target._lastHudStepText = nil
+      local rad = math.max(5, tonumber(step.arrivalRadiusYards) or 25)
+      target.uiMapID = tonumber(step.destination.uiMapID)
+      target.x01 = step.destination.x01
+      target.y01 = step.destination.y01
+      target.arrivalRadiusYards = rad
+      if ns.Compat and ns.Compat.ResolveTargetWorldAnchor then
+        target.anchor = ns.Compat.ResolveTargetWorldAnchor(target.uiMapID, target.x01, target.y01, rad)
+      end
+      local cap = tostring(step.title or step.destination.zoneName or "Camp")
+      if not string.find(string.lower(cap), "camp", 1, true) then
+        cap = cap .. " (Camp)"
+      end
+      target.caption = truncateArrowCaption(cap, 34)
+      if Navigation.arrowFrame and Navigation.arrowFrame.captionText then
+        Navigation.arrowFrame.captionText:SetText(target.caption)
+      end
+      if Navigation.frame and Navigation.frame.stepText then
+        Navigation.frame.stepText:SetText(tostring(step.title or step.stepID))
+      end
+      Navigation.RefreshArrowSettings()
+    end
+    return false
+  end
+
+  local summary = SpawnRadar.EvaluateNearestNode(farm, step, nil, stepDt, nil, gProg)
+  if not summary or not summary.node then
+    return false
+  end
+
+  if summary.mode == "zone_entry" or summary.zoneStatus == "off_zone" then
+    target.spawnRadarActive = false
+    target.radarDistanceUnavailable = false
+    return false
+  end
+
+  local wasRadarActive = (target.spawnRadarActive == true)
+  local isDistUnavail = (summary.status == "distance_unavailable")
+  local distStateChanged = (target.radarDistanceUnavailable ~= isDistUnavail)
+  local node = summary.node
+  local nodeChanged = (not wasRadarActive)
+    or distStateChanged
+    or (target.radarNodeIndex ~= summary.nodeIndex)
+    or (target.x01 ~= node.x01)
+    or (target.y01 ~= node.y01)
+
+  target.spawnRadarActive = true
+  target.radarDistanceUnavailable = isDistUnavail
+  target.inCampState = false
+  target.isArrivedState = false
+  target.radarNodeIndex = summary.nodeIndex
+  target.spawnNodeIndex = summary.nodeIndex
+  if not wasRadarActive then
+    Navigation.RefreshArrowSettings()
+  end
+  target.radarAllCoolingDown = (summary.allCoolingDown == true)
+  target.radarReadyInSec = tonumber(summary.readyInSeconds or summary.readyInSec) or 0
+  local nextCountsTag = string.format("%d/%d", tonumber(summary.unobservedCount or summary.readyCount) or 0, tonumber(summary.totalCount) or 0)
+  local countsChanged = (target.radarCountsTag ~= nextCountsTag)
+  target.radarCountsTag = nextCountsTag
+
+  local mobName = tostring(node.npcName or step.npcName or "Target Mob")
+  local nodeLabel = summary.allCoolingDown
+    and string.format("Next (~%ds): %s #%d", target.radarReadyInSec, mobName, summary.nodeIndex)
+    or string.format("%s #%d", mobName, summary.nodeIndex)
+  target.radarStepTitle = nodeLabel
+  target.radarUndockedLine = isDistUnavail
+    and string.format("%s (Distance unavailable)", nodeLabel)
+    or string.format("%s (%s active pool)", nodeLabel, nextCountsTag)
+
+  if nodeChanged or forceImmediate or countsChanged then
+    target.uiMapID = tonumber(summary.uiMapID or (step.destination and step.destination.uiMapID))
+    target.x01 = node.x01
+    target.y01 = node.y01
+    target.arrivalRadiusYards = 6
+    if (nodeChanged or not target.anchor) and ns.Compat and ns.Compat.ResolveTargetWorldAnchor then
+      target.anchor = ns.Compat.ResolveTargetWorldAnchor(target.uiMapID, node.x01, node.y01, 6)
+    end
+    local xPct = (tonumber(node.x01) or 0) * 100
+    local yPct = (tonumber(node.y01) or 0) * 100
+    local zName = tostring((step.destination and step.destination.zoneName) or farm.zoneName or "")
+    target.coordSummary = isDistUnavail
+      and string.format("%s (%.1f, %.1f) • Distance unavailable", zName, xPct, yPct)
+      or string.format("%s (%.1f, %.1f) • %s unvisited", zName, xPct, yPct, nextCountsTag)
+    target.caption = truncateArrowCaption(string.format("%s (%s)", nodeLabel, nextCountsTag), 34)
+    if Navigation.arrowFrame and Navigation.arrowFrame.captionText and target._lastArrowCaptionText ~= target.caption then
+      target._lastArrowCaptionText = target.caption
+      Navigation.arrowFrame.captionText:SetText(target.caption)
+    end
+    if Navigation.frame and Navigation.frame.stepText and target._lastHudStepText ~= nodeLabel then
+      target._lastHudStepText = nodeLabel
+      Navigation.frame.stepText:SetText(nodeLabel)
+    end
+    if forceImmediate or nodeChanged or countsChanged then
+      local vec = ns.Compat.ComputeNavigationVector(target.anchor, Navigation._scratchVec)
+      target.lastVecStatus = vec and vec.status or "unavailable"
+      updateTargetHysteresis(target, vec)
+      if target.dockedRendererEnabled and Navigation.frame and Navigation.frame.dockedArrowLane and (forceImmediate or nodeChanged) then
+        updateArrowVisualFromVector(Navigation.frame.dockedArrowLane, target, vec, true, true)
+      end
+      if target.floatingRendererEnabled and Navigation.arrowFrame and Navigation.arrowFrame:IsShown() and (forceImmediate or nodeChanged) then
+        updateArrowVisualFromVector(Navigation.arrowFrame, target, vec, true, false)
+      end
+      Navigation.RefreshCompactHUDFromVector(target, vec, forceImmediate or nodeChanged)
+      if (forceImmediate or nodeChanged) and ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+        ns.UI.WorldMapPins.RequestRefresh()
+      elseif (forceImmediate or nodeChanged) and ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.Refresh then
+        pcall(ns.UI.WorldMapPins.Refresh)
+      end
+    end
+  end
+
+  return true
 end
 
 local function onControllerFrameUpdateBody(self, elapsed)
@@ -2234,21 +2343,7 @@ local function onControllerFrameUpdateBody(self, elapsed)
         return
       end
     end
-  else
-    local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-    if rProg and rProg.mode ~= "paused"
-      and ns.Bridges and ns.Bridges.RXPBridge and ns.Bridges.RXPBridge.IsRivergladesGuideSelected
-    then
-      local rxpNow = (ns.Bridges.RXPBridge.IsRivergladesGuideSelected() == true)
-      if (rProg.mode == "rxp") ~= rxpNow then
-        Navigation.SyncFromEvaluation(nil, rProg)
-        return
-      end
-    end
-    -- 1b) 1 Hz Active-Step & Quest Log Truth Watchdog: guarantees real-time advancement even if WoW: Forever drops or delays quest events
-    if Navigation.TickActiveStepWatchdog(stepDt) then
-      return
-    end
+    Navigation.TickSpawnRadar(stepDt, false)
   end
 
   local target = Navigation.activeTarget
@@ -2510,7 +2605,9 @@ local function ensureArrowFrame()
     if t.coordSummary and t.coordSummary ~= "" then
       _G.GameTooltip:AddLine(tostring(t.coordSummary), 0.95, 0.82, 0.35)
     end
-    if isGrindCampStepKind(t.stepKind) then
+    if t.spawnRadarActive then
+      _G.GameTooltip:AddLine("Spawn Radar active: points to nearest recorded mob spawn point (verified kills ~180s revisit est.; /fh gold skip ~120s).", 0.45, 0.88, 0.98, true)
+    elseif isGrindCampStepKind(t.stepKind) then
       _G.GameTooltip:AddLine("Standalone mode points to Camp Anchor (auto-dims inside camp).", 0.65, 0.92, 0.75, true)
     end
     local settings = ns.State and ns.State.GetArrowSettings and ns.State.GetArrowSettings()
@@ -2559,7 +2656,7 @@ function Navigation.InvalidateTargetAnchor()
   end
 end
 
-local function shouldUseBuiltinArrowForProvider(provider, dest)
+local function shouldUseBuiltinArrowForProvider(provider, dest, context, stepKind)
   if not dest then
     return false
   end
@@ -2575,6 +2672,22 @@ local function shouldUseBuiltinArrowForProvider(provider, dest)
     return true
   end
   if provider == "tomtom" then
+    local effContext = context or (type(dest) == "table" and dest.context) or Navigation.activeContext
+    local effKind = stepKind or (type(dest) == "table" and dest.stepKind) or nil
+    if (type(dest) == "table" and dest.spawnRadarActive == true) then
+      return true
+    end
+    if effContext == "gold_farm" and isGrindCampStepKind(effKind) then
+      local gProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
+      local SR = ns.Domain and ns.Domain.SpawnRadar
+      local GF = ns.Domain and ns.Domain.GoldFarms
+      if gProg and SR and GF and SR.IsActiveForFarm and GF.LookupFarmByID then
+        local farm = GF.LookupFarmByID(gProg.selectedFarmID)
+        if farm and SR.IsActiveForFarm(farm, gProg) then
+          return true
+        end
+      end
+    end
     local isCustomMap = CUSTOM_UNVERIFIED_ARROW_MAPS[tonumber(dest.uiMapID) or 0] == true
     if not isCustomMap then
       return false
@@ -2660,7 +2773,7 @@ function Navigation.SetArrowTarget(
   local coordSummary = zoneName ~= "" and string.format("%s (%.1f, %.1f)", zoneName, xPct, yPct)
     or string.format("(%.1f, %.1f)", xPct, yPct)
 
-  local builtinDesired = shouldUseBuiltinArrowForProvider(provider, dest)
+  local builtinDesired = shouldUseBuiltinArrowForProvider(provider, dest, context, stepKind)
   local dockedEnabled, floatingEnabled = resolveArrowRenderers(builtinDesired)
   local effectiveCaption = captionLabel or titleText or coordSummary
   if isGrindCampStepKind(stepKind) and not string.find(string.lower(tostring(effectiveCaption)), "camp", 1, true) then
@@ -2892,74 +3005,15 @@ function Navigation.GetLiveArrowSnapshot()
   }
 end
 
-function Navigation.HideRivergladesHUD()
-  if Navigation.frame and Navigation.activeContext == "riverglades" then
+function Navigation.HideTrackerHUD()
+  if Navigation.frame then
     Navigation.frame:Hide()
   end
-  if Navigation.activeTarget and Navigation.activeTarget.context == "riverglades" then
+  if Navigation.activeTarget then
     Navigation.ClearArrowTarget()
   end
 end
-
-local function formatRivergladesHudParts(act, route, progress, explicitDest, explicitTargetName)
-  if type(act) ~= "table" or type(act.destination) ~= "table" then
-    return nil, ""
-  end
-  local dest = explicitDest
-  local targetName = explicitTargetName
-  if not dest and ns.Domain and ns.Domain.RoutePlanner and ns.Domain.RoutePlanner.ResolveActiveActionTarget then
-    progress = progress or (ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress())
-    dest, targetName = ns.Domain.RoutePlanner.ResolveActiveActionTarget(act, progress)
-  end
-  dest = dest or act.destination
-  targetName = targetName or act.npcName
-
-  local xPct, yPct = ns.Domain.RoutePlanner.NormalizedToPercent(dest.x01, dest.y01)
-  local mID = tonumber(dest.uiMapID)
-  local zoneLabel = tostring(
-    dest.zoneName
-      or (mID == 2548 and "Riverglades")
-      or (mID == 1444 and "Feralas")
-      or (C_Map and C_Map.GetMapInfo and mID and (C_Map.GetMapInfo(mID) or {}).name)
-      or "Riverglades"
-  )
-  local prefix = string.format("%s (%.1f, %.1f)", zoneLabel, xPct or 0, yPct or 0)
-  if dest.coordConfidence == "estimated" then
-    prefix = prefix .. " [Est.]"
-  end
-
-  local suffixParts = {}
-  if targetName and targetName ~= "" then
-    table.insert(suffixParts, " — " .. tostring(targetName))
-  end
-
-  if act.kind == "objective" and ns.Compat and ns.Compat.GetQuestObjectivesResult then
-    local qref = (type(act.questKey) == "string" and act.questKey ~= "" and act.questKey) or act.questID
-    if qref then
-      local objRes = ns.Compat.GetQuestObjectivesResult(qref)
-      if type(objRes) == "table" and objRes.status == "ok" and type(objRes.summaryText) == "string" and objRes.summaryText ~= "" then
-        table.insert(suffixParts, " [" .. objRes.summaryText .. "]")
-      end
-      route = route or (ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute())
-      local qMeta = nil
-      if type(route) == "table" then
-        if type(qref) == "number" and type(route.questsByID) == "table" then
-          qMeta = route.questsByID[qref]
-        elseif type(qref) == "string" and type(route.questsByTitleKey) == "table" then
-          qMeta = route.questsByTitleKey[qref]
-        end
-      end
-      if qMeta and qMeta.supplyItemID and ns.State and ns.State.GetBankItemCount then
-        local bankQty = ns.State.GetBankItemCount(qMeta.supplyItemID)
-        if bankQty and bankQty > 0 then
-          table.insert(suffixParts, string.format(" (%d in bank!)", bankQty))
-        end
-      end
-    end
-  end
-
-  return prefix, table.concat(suffixParts, "")
-end
+Navigation.HideRivergladesHUD = Navigation.HideTrackerHUD
 
 local function notifyWorldMapPinsRefresh()
   if ns.UI and ns.UI.WorldMapPins and type(ns.UI.WorldMapPins.RequestRefresh) == "function" then
@@ -2981,492 +3035,8 @@ local function showOrHideHUDRespectingPreference(f, status)
   end
 end
 
-local function inspectRivergladesActionMeta(act, route)
-  local objSummaryText = nil
-  local bankSupplyCount = 0
-  if type(act) ~= "table" then
-    return nil, 0
-  end
-  local qref = (type(act.questKey) == "string" and act.questKey ~= "" and act.questKey) or act.questID
-  if qref then
-    if act.kind == "objective" and ns.Compat and ns.Compat.GetQuestObjectivesResult then
-      local objRes = ns.Compat.GetQuestObjectivesResult(qref)
-      if type(objRes) == "table" and objRes.status == "ok" and type(objRes.summaryText) == "string" and objRes.summaryText ~= "" then
-        objSummaryText = objRes.summaryText
-      end
-    end
-    route = route or (ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute())
-    local qMeta = nil
-    if type(route) == "table" then
-      if type(qref) == "number" and type(route.questsByID) == "table" then
-        qMeta = route.questsByID[qref]
-      elseif type(qref) == "string" and type(route.questsByTitleKey) == "table" then
-        qMeta = route.questsByTitleKey[qref]
-      end
-    end
-    if not qMeta and ns.Compat and ns.Compat.LookupRouteQuestMeta then
-      qMeta = ns.Compat.LookupRouteQuestMeta(qref)
-    end
-    if qMeta and qMeta.supplyItemID and ns.State and ns.State.GetBankItemCount then
-      local bankQty = tonumber(ns.State.GetBankItemCount(qMeta.supplyItemID)) or 0
-      if bankQty > 0 then
-        bankSupplyCount = bankQty
-      end
-    end
-  end
-  return objSummaryText, bankSupplyCount
-end
-
-local function updateHUDPresentation(eval, status)
-  notifyWorldMapPinsRefresh()
-  local f = ensureHUDFrame()
-  if not f then
-    return
-  end
-
-  local progress = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-  if not progress then
-    if Navigation.activeContext == "riverglades" then
-      if f.overflowMenu and f.overflowMenu.Hide then f.overflowMenu:Hide() end
-      f:Hide()
-    end
-    return
-  end
-
-  -- CRITICAL (Astra Release Blocker #2):
-  -- A paused session (`pausedHudRetained == true`) remains visible with `"Paused"` and `"Resume navigation"` in `...`.
-  -- A stopped/idle session (`pausedHudRetained ~= true`) hides the HUD.
-  if progress.mode == "paused" and progress.pausedHudRetained ~= true then
-    if Navigation.activeContext == "riverglades" then
-      if f.overflowMenu and f.overflowMenu.Hide then f.overflowMenu:Hide() end
-      f:Hide()
-    end
-    return
-  end
-
-  if f.nextBtn and f.nextBtn.SetLabel then
-    f.nextBtn:SetLabel("Skip objective")
-  elseif f.nextBtn and f.nextBtn.SetText then
-    f.nextBtn:SetText("Skip objective")
-  end
-
-  local counts = (eval and eval.counts) or { completed = 0, total = 0, skipped = 0 }
-  local act = eval and eval.nextAction
-  local cleanHeader = "Riverglades"
-  local cleanQuestName = nil
-  if act and (act.questID or act.questKey) and ns.Compat and ns.Compat.LookupRouteQuestMeta then
-    local qMeta = ns.Compat.LookupRouteQuestMeta(act.questKey or act.questID)
-    local qName = qMeta and qMeta.name or nil
-    if type(qName) == "string" and qName ~= "" then
-      cleanQuestName = qName
-      local lvl = tonumber(qMeta.questLevel)
-      local lvlPrefix = ""
-      if lvl and lvl > 0 then
-        local plus = (act.isEliteBounty == true or qMeta.isEliteBounty == true) and "+" or ""
-        lvlPrefix = string.format("[%d%s] ", lvl, plus)
-      end
-      local fullHdr = "Riverglades · " .. lvlPrefix .. qName
-      if ns.Compat.UTF8Truncate then
-        cleanHeader = ns.Compat.UTF8Truncate(fullHdr, 44)
-      else
-        cleanHeader = fullHdr
-      end
-    end
-  end
-  if not cleanQuestName and act then
-    cleanQuestName = extractCleanQuestOrStepName(act, "riverglades")
-  end
-  if cleanQuestName and cleanQuestName ~= "" then
-    Navigation.lastRetainedTitleByContext.riverglades = cleanQuestName
-  end
-  if Navigation.activeTarget and Navigation.activeTarget.context == "riverglades" then
-    Navigation.activeTarget.hudCleanHeader = cleanHeader
-  end
-  if f.headerText then
-    f.headerText:SetText(cleanHeader)
-  end
-
-  if progress.mode == "paused" then
-    local retainedTitle = cleanQuestName
-      or Navigation.lastRetainedTitleByContext.riverglades
-      or "Riverglades"
-    f.viewModel = {
-      context = "riverglades",
-      mode = "paused",
-      stateKey = "paused",
-      titleText = retainedTitle,
-      fullInstruction = (act and act.title) or retainedTitle,
-      headerSummary = cleanHeader,
-    }
-    f.stepText:SetText(retainedTitle)
-    showOrHideHUDRespectingPreference(f, status)
-    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
-    return
-  end
-
-  if progress.mode == "rxp" then
-    local rxpTitle = cleanQuestName or "RXPGuides"
-    f.viewModel = {
-      context = "riverglades",
-      mode = "rxp",
-      stateKey = "rxp_owned",
-      titleText = rxpTitle,
-      fullInstruction = "RXPGuides owns active step progression",
-      headerSummary = cleanHeader,
-      extraNote = "Use RXP window for steps, or /fh rg start after deselecting in RXP.",
-    }
-    f.stepText:SetText(rxpTitle)
-    showOrHideHUDRespectingPreference(f, status)
-    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
-    return
-  end
-
-  if not act then
-    if eval and eval.blockedNotice and eval.blockedNotice.state == "blocked_quest_log_full" then
-      local blockedAct = eval.blockedNotice.action
-      local pendingQuestName = extractCleanQuestOrStepName(blockedAct, "riverglades") or "Quest log full"
-      f.viewModel = {
-        context = "riverglades",
-        mode = progress.mode,
-        stateKey = "quest_log_full",
-        titleText = pendingQuestName,
-        fullInstruction = "Quest Log Full — clear a slot to accept next quest",
-        headerSummary = cleanHeader,
-        extraNote = tostring(blockedAct and blockedAct.title or ""),
-      }
-      f.stepText:SetText(pendingQuestName)
-    elseif eval and (
-      (eval.blockedNotice and eval.blockedNotice.state == "blocked_unresolved_history")
-      or ((counts.blockedUnresolvedHistory or 0) > 0)
-    ) then
-      local blockedAct = eval.blockedNotice and eval.blockedNotice.action or nil
-      local unresolvedTitle = extractCleanQuestOrStepName(blockedAct, "riverglades") or "Quest history"
-      f.viewModel = {
-        context = "riverglades",
-        mode = progress.mode,
-        stateKey = "unresolved_history",
-        titleText = unresolvedTitle,
-        fullInstruction = string.format(
-          "%d custom title quest(s) awaiting pre-install history check",
-          tonumber(counts.blockedUnresolvedHistory) or 1
-        ),
-        headerSummary = cleanHeader,
-        extraNote = "Open Workspace (/fh rg) or run /fh rg unresolved to review.",
-        showNeutralDockedMarker = true,
-      }
-      f.stepText:SetText(unresolvedTitle)
-    else
-      f.viewModel = {
-        context = "riverglades",
-        mode = progress.mode,
-        stateKey = "segment_complete",
-        titleText = "Riverglades",
-        fullInstruction = "Reviewed Riverglades segment complete!",
-        headerSummary = cleanHeader,
-        extraNote = "All eligible steps completed or skipped (/fh rg stop to close).",
-      }
-      f.stepText:SetText("Riverglades")
-    end
-    showOrHideHUDRespectingPreference(f, status)
-    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
-    return
-  end
-
-  local plan = (eval and type(eval.plan) == "table") and eval.plan or nil
-  local isOffZone = (plan and plan.zoneStatus == "off_zone")
-  local isPosUnavail = (plan and plan.zoneStatus == "position_unavailable")
-  local displayTitle = cleanQuestName or tostring(act.title or act.actionID)
-  local fullInstruction = isOffZone
-    and ("Travel to Riverglades · " .. tostring(act.title or act.actionID))
-    or tostring(act.title or act.actionID)
-
-  local objProgressText, bankSupplyCount = inspectRivergladesActionMeta(act)
-  f.stepText:SetText(displayTitle)
-
-  if act.destination then
-    local prefix, suffix = formatRivergladesHudParts(act)
-    local t = Navigation.activeTarget
-    local vec = nil
-    if t and t.context == "riverglades" and t.anchor then
-      t.hudCoordPrefix = prefix
-      t.hudSuffix = suffix
-      vec = ns.Compat.ComputeNavigationVector(t.anchor, Navigation._scratchVec)
-      updateTargetHysteresis(t, vec)
-    end
-    f.viewModel = {
-      context = "riverglades",
-      mode = progress.mode,
-      stateKey = isPosUnavail and "position_unavailable" or "normal",
-      titleText = displayTitle,
-      fullInstruction = fullInstruction,
-      headerSummary = cleanHeader,
-      coordSummary = (prefix or "") .. (suffix or ""),
-      undockedStatusText = act.npcName or prefix,
-      objectiveProgressText = objProgressText,
-      bankSupplyCount = bankSupplyCount,
-      forcePositionUnavailable = isPosUnavail,
-    }
-    showOrHideHUDRespectingPreference(f, status)
-    Navigation.WriteCompactHUDLine2(f, f.viewModel, t, vec, true)
-  else
-    f.viewModel = {
-      context = "riverglades",
-      mode = progress.mode,
-      stateKey = "manual_objective",
-      titleText = displayTitle,
-      fullInstruction = fullInstruction,
-      headerSummary = cleanHeader,
-      objectiveProgressText = objProgressText,
-      bankSupplyCount = bankSupplyCount,
-      extraNote = tostring(act.note or "Manual objective — see quest log / live Questie"),
-      showNeutralDockedMarker = true,
-    }
-    showOrHideHUDRespectingPreference(f, status)
-    Navigation.WriteCompactHUDLine2(f, f.viewModel, nil, nil, true)
-  end
-end
-
-function Navigation.SyncFromEvaluation(eval, progress, expectedGeneration)
-  Navigation.HydrateOwnerFromSavedStateIfUnset()
-  if expectedGeneration ~= nil and not Navigation.IsGenerationCurrent(expectedGeneration) then
-    return Navigation.lastStatus, "stale_generation_discarded"
-  end
-
-  progress = progress or (ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress())
-  if not progress then
-    return Navigation.lastStatus
-  end
-
-  -- Ignore syncs from an inactive paused Riverglades context while Gold Farms actively owns navigation
-  if progress.mode == "paused" and Navigation.activeContext == "gold_farm" then
-    local gfProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
-    if gfProg and gfProg.mode ~= "paused" then
-      return Navigation.lastStatus
-    end
-  end
-
-  if progress.mode ~= "paused" and Navigation.activeContext ~= "riverglades" then
-    Navigation.RequestContextSwitch("riverglades")
-  elseif progress.mode ~= "paused" then
-    Navigation.activeContext = "riverglades"
-  end
-
-  eval = eval or ns.Domain.RouteProgress.Reconcile(nil, progress)
-
-  if progress.mode ~= "paused"
-    and ns.Bridges
-    and ns.Bridges.RXPBridge
-    and ns.Bridges.RXPBridge.IsRivergladesGuideSelected()
-  then
-    progress.mode = "rxp"
-  elseif progress.mode == "rxp"
-    and ns.Bridges
-    and ns.Bridges.RXPBridge
-    and not ns.Bridges.RXPBridge.IsRivergladesGuideSelected()
-  then
-    progress.mode = "standalone"
-  end
-
-  local gen = Navigation.BumpGeneration()
-
-  if progress.mode == "paused" then
-    syncRivergladesQuestWatchBaseline(nil, false)
-    Navigation.StopTravelTicker()
-    Navigation.ClearArrowTarget()
-    Navigation.owner.pendingDestination = nil
-    syncProgressMirrorsAndPersist()
-    if Navigation.owner.ownerContext == "riverglades" or Navigation.owner.pendingRelease then
-      local relOk, relReason = Navigation.TryReleaseOwnedResource(progress)
-      if not relOk then
-        Navigation.lastStatus = {
-          activeProvider = "none",
-          navigationLabel = ns.Compat.IsInCombat() and "Paused (Cleanup Deferred — In Combat)" or "Paused (Cleanup Unconfirmed)",
-          cleanupReason = relReason,
-          hasDirectionalArrow = false,
-          deferred = true,
-        }
-        updateHUDPresentation(eval, Navigation.lastStatus)
-        return Navigation.lastStatus
-      end
-    end
-    Navigation.lastStatus = {
-      activeProvider = "none",
-      navigationLabel = "Paused",
-      hasDirectionalArrow = false,
-      deferred = false,
-    }
-    updateHUDPresentation(eval, Navigation.lastStatus)
-    return Navigation.lastStatus
-  end
-
-  if progress.mode == "rxp" then
-    syncRivergladesQuestWatchBaseline(nil, false)
-    Navigation.StopTravelTicker()
-    Navigation.ClearArrowTarget()
-    Navigation.owner.pendingDestination = nil
-    Navigation.TryReleaseOwnedResource(progress)
-    syncControllerActivity()
-    Navigation.lastStatus = {
-      activeProvider = "rxp",
-      navigationLabel = "RXP Guide Selected",
-      hasDirectionalArrow = false,
-      deferred = false,
-    }
-    updateHUDPresentation(eval, Navigation.lastStatus)
-    return Navigation.lastStatus
-  end
-
-  local nextAct = eval and eval.nextAction
-  syncRivergladesQuestWatchBaseline(nextAct, true)
-  if not nextAct or not nextAct.destination then
-    Navigation.StopTravelTicker()
-    Navigation.ClearArrowTarget()
-    Navigation.owner.pendingDestination = nil
-    Navigation.TryReleaseOwnedResource(progress)
-    syncControllerActivity()
-    Navigation.lastStatus = {
-      activeProvider = "text_manual",
-      navigationLabel = nextAct and "Manual / Text Note" or "Segment Idle",
-      hasDirectionalArrow = false,
-      deferred = false,
-    }
-    updateHUDPresentation(eval, Navigation.lastStatus)
-    return Navigation.lastStatus
-  end
-
-  local activeDest, activeTargetName = nextAct.destination, nextAct.npcName
-  if ns.Domain and ns.Domain.RoutePlanner and ns.Domain.RoutePlanner.ResolveActiveActionTarget then
-    local resolvedDest, resolvedName = ns.Domain.RoutePlanner.ResolveActiveActionTarget(nextAct, progress)
-    if type(resolvedDest) == "table" then
-      activeDest = resolvedDest
-      activeTargetName = resolvedName or activeTargetName
-    end
-  end
-
-  local counts = (eval and eval.counts) or { completed = 0, total = 0, skipped = 0 }
-  local rgHeaderTpl = string.format(
-    "ForeverHub Riverglades [%d/%d done, %d skipped] — Nav: %%s",
-    counts.completed or 0,
-    counts.total or 0,
-    counts.skipped or 0
-  )
-  local rgHudPrefix, rgHudSuffix = formatRivergladesHudParts(nextAct, nil, progress, activeDest, activeTargetName)
-  local rgCaption = activeTargetName or nextAct.title or rgHudPrefix
-  local rgArrivalRadius = tonumber(nextAct.arrivalRadiusYards or (activeDest and activeDest.radiusYards)) or 18
-
-  if ns.Compat.IsInCombat() then
-    local alreadyOwnsSamePin = (Navigation.owner.ownerContext == "riverglades")
-      and (Navigation.owner.provider ~= "none")
-      and (not Navigation.owner.pendingRelease)
-      and type(Navigation.owner.handle) == "table"
-      and coordsMatch(
-        Navigation.owner.handle.uiMapID,
-        Navigation.owner.handle.x01,
-        Navigation.owner.handle.y01,
-        activeDest.uiMapID,
-        activeDest.x01,
-        activeDest.y01
-      )
-    if alreadyOwnsSamePin then
-      local sameArrowOk, sameVec = Navigation.SetArrowTarget(
-        "riverglades",
-        activeDest,
-        nextAct.title,
-        rgCaption,
-        rgArrivalRadius,
-        Navigation.owner.provider,
-        rgHudPrefix,
-        rgHudSuffix,
-        nextAct.kind,
-        nil,
-        false,
-        rgHeaderTpl
-      )
-      Navigation.lastStatus = buildProviderStatus(
-        Navigation.owner.provider,
-        activeDest,
-        nil,
-        sameArrowOk,
-        sameVec and sameVec.status or nil
-      )
-      updateHUDPresentation(eval, Navigation.lastStatus)
-      return Navigation.lastStatus
-    end
-
-    if Navigation.owner.provider ~= "none" and Navigation.owner.ownerContext ~= "riverglades" then
-      Navigation.owner.pendingRelease = true
-    end
-    Navigation.owner.pendingDestination = {
-      context = "riverglades",
-      generation = gen,
-      destination = activeDest,
-      title = nextAct.title,
-    }
-    syncProgressMirrorsAndPersist()
-    local combatArrowOk, combatVec = Navigation.SetArrowTarget(
-      "riverglades",
-      activeDest,
-      nextAct.title,
-      rgCaption,
-      rgArrivalRadius,
-      "deferred",
-      rgHudPrefix,
-      rgHudSuffix,
-      nextAct.kind,
-      "deferred_in_combat",
-      true,
-      rgHeaderTpl
-    )
-    Navigation.lastStatus = buildProviderStatus(
-      "deferred",
-      activeDest,
-      "deferred_in_combat",
-      combatArrowOk,
-      combatVec and combatVec.status or nil
-    )
-    updateHUDPresentation(eval, Navigation.lastStatus)
-    return Navigation.lastStatus
-  end
-
-  Navigation.owner.pendingDestination = nil
-  updateDeferredMirror()
-
-  local okAcq, provider, reason = tryAcquireDestinationForContext("riverglades", activeDest, nextAct.title)
-  local queuedDeferred = shouldQueuePendingDestination(okAcq, reason)
-  if queuedDeferred then
-    Navigation.owner.pendingDestination = {
-      context = "riverglades",
-      generation = gen,
-      destination = activeDest,
-      title = nextAct.title,
-    }
-  end
-  syncProgressMirrorsAndPersist()
-  Navigation.EnsureTravelTicker((nextAct.kind == "travel") or queuedDeferred, "riverglades")
-  local effProvider = okAcq and provider or "text_manual"
-  local arrowOk, vec = Navigation.SetArrowTarget(
-    "riverglades",
-    activeDest,
-    nextAct.title,
-    rgCaption,
-    rgArrivalRadius,
-    effProvider,
-    rgHudPrefix,
-    rgHudSuffix,
-    nextAct.kind,
-    reason,
-    queuedDeferred,
-    rgHeaderTpl
-  )
-  Navigation.lastStatus = buildProviderStatus(effProvider, activeDest, reason, arrowOk, vec and vec.status or nil)
-  if queuedDeferred then
-    Navigation.lastStatus.deferred = true
-  end
-  updateHUDPresentation(eval, Navigation.lastStatus)
-  return Navigation.lastStatus
-end
-
 local function updateGoldFarmHUDPresentation(eval, status)
+  notifyWorldMapPinsRefresh()
   local f = ensureHUDFrame()
   if not f then
     return
@@ -3587,6 +3157,7 @@ local function updateGoldFarmHUDPresentation(eval, status)
       coordSummary = prefix .. suffix,
       undockedStatusText = prefix,
       extraNote = step.note,
+      sameNameHazardNote = step.sameNameHazardNote,
     }
     showOrHideHUDRespectingPreference(f, status)
     Navigation.WriteCompactHUDLine2(f, f.viewModel, t, vec, true)
@@ -3606,6 +3177,135 @@ local function updateGoldFarmHUDPresentation(eval, status)
   end
 end
 
+function Navigation.IsPlayerInDungeonOrRaidInstance()
+  if ns.Compat and type(ns.Compat.ProbeSunkenTempleInstanceIdentity) == "function" then
+    local probe = ns.Compat.ProbeSunkenTempleInstanceIdentity()
+    if type(probe) == "table" and probe.inInstance == true then
+      local t = probe.instanceType
+      return (t == "party" or t == "raid")
+    end
+    return false
+  end
+  if ns.Domain and ns.Domain.InstanceLedger and type(ns.Domain.InstanceLedger.ClassifyEnvironment) == "function" then
+    local env = ns.Domain.InstanceLedger.ClassifyEnvironment()
+    return type(env) == "table" and env.isDungeonOrRaid == true
+  end
+  return false
+end
+
+function Navigation.IsPlayerCorpseOrGhost()
+  if ns.State and ns.State.overridePlayerIsDeadOrGhost ~= nil then
+    return ns.State.overridePlayerIsDeadOrGhost == true
+  end
+  if ns.Compat and type(ns.Compat.CallAndClassifySecretSafe) == "function" then
+    local gRes = ns.Compat.CallAndClassifySecretSafe(function()
+      if type(_G.UnitIsDeadOrGhost) == "function" then
+        return _G.UnitIsDeadOrGhost("player")
+      elseif type(_G.UnitIsGhost) == "function" then
+        return _G.UnitIsGhost("player")
+      end
+      return false
+    end, { secretCapable = false })
+    if gRes.status == "readable" then
+      return (gRes.value == true or gRes.value == 1)
+    end
+    return false
+  end
+  if type(_G.UnitIsDeadOrGhost) == "function" then
+    local ok, dead = pcall(_G.UnitIsDeadOrGhost, "player")
+    if ok then
+      return (dead == true or dead == 1)
+    end
+  end
+  return false
+end
+
+-- Gate ST-03: Portal entry suppresses outdoor arrow immediately and lets `Navigation.owner`
+-- release its owned resource (retaining deferred ownership token in combat or on clear failure,
+-- and preserving user-replaced pins). The dungeon coach takes ZERO waypoint ownership.
+function Navigation.OnInstancePortalEntry(progress)
+  Navigation.HydrateOwnerFromSavedStateIfUnset()
+  Navigation.BumpGeneration()
+  Navigation.StopTravelTicker()
+  Navigation.ClearArrowTarget()
+  Navigation.owner.pendingDestination = nil
+  syncProgressMirrorsAndPersist()
+
+  local relOk, relReason = true, "already_clean"
+  if Navigation.owner.provider ~= "none" or Navigation.owner.pendingRelease == true then
+    relOk, relReason = Navigation.TryReleaseOwnedResource(progress)
+  end
+  updateDeferredMirror()
+  Navigation.lastStatus = {
+    activeProvider = "none",
+    navigationLabel = relOk and "Suppressed Inside Instance"
+      or (ns.Compat.IsInCombat() and "Instance Entry (Cleanup Deferred — In Combat)" or "Instance Entry (Cleanup Unconfirmed)"),
+    cleanupReason = (not relOk) and relReason or nil,
+    hasDirectionalArrow = false,
+    deferred = (not relOk),
+  }
+  if Navigation.frame and Navigation.frame.Hide then
+    if Navigation.frame.overflowMenu and Navigation.frame.overflowMenu.Hide then
+      Navigation.frame.overflowMenu:Hide()
+    end
+    Navigation.frame:Hide()
+  end
+  return relOk, relReason
+end
+
+-- Gate ST-03: On exit, revalidates generation, corpse state, confirmed release, and destination before any reacquire.
+function Navigation.OnInstancePortalExit(expectedGeneration, explicitIsCorpse)
+  Navigation.HydrateOwnerFromSavedStateIfUnset()
+  if expectedGeneration ~= nil and not Navigation.IsGenerationCurrent(expectedGeneration) then
+    return false, "stale_generation_discarded"
+  end
+  if Navigation.IsPlayerInDungeonOrRaidInstance() then
+    return false, "still_inside_instance"
+  end
+
+  local isCorpse = (explicitIsCorpse == true) or Navigation.IsPlayerCorpseOrGhost()
+  if isCorpse then
+    Navigation.StopTravelTicker()
+    Navigation.ClearArrowTarget()
+    Navigation.owner.pendingDestination = nil
+    if Navigation.owner.pendingRelease == true and not ns.Compat.IsInCombat() then
+      Navigation.TryReleaseOwnedResource()
+    end
+    syncProgressMirrorsAndPersist()
+    return false, "corpse_transition_suppressed"
+  end
+
+  if Navigation.owner.pendingRelease == true or Navigation.owner.provider ~= "none" then
+    local relOk, relReason = Navigation.TryReleaseOwnedResource()
+    if not relOk then
+      updateDeferredMirror()
+      return false, relReason or "previous_owner_release_pending"
+    end
+  end
+
+  local gProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
+  if not gProg or gProg.mode == "paused" then
+    return true, "no_active_outdoor_route"
+  end
+  local GF = ns.Domain and ns.Domain.GoldFarms
+  if not GF or type(GF.ReconcileActive) ~= "function" or type(GF.ValidateStepDestination) ~= "function" then
+    return false, "gold_farms_unavailable"
+  end
+  local gEval = GF.ReconcileActive(nil, gProg)
+  local activeStep = gEval and gEval.activeStep or nil
+  if not activeStep then
+    return false, "missing_active_step"
+  end
+  local destValid, destErr = GF.ValidateStepDestination(activeStep)
+  if not destValid then
+    Navigation.ClearArrowTarget()
+    return false, destErr or "invalid_destination"
+  end
+
+  Navigation.SyncFromGoldFarmEvaluation(gEval, gProg, Navigation.owner.generation)
+  return true, "reacquired_outdoor_route"
+end
+
 function Navigation.SyncFromGoldFarmEvaluation(eval, progress, expectedGeneration)
   Navigation.HydrateOwnerFromSavedStateIfUnset()
   if expectedGeneration ~= nil and not Navigation.IsGenerationCurrent(expectedGeneration) then
@@ -3617,18 +3317,14 @@ function Navigation.SyncFromGoldFarmEvaluation(eval, progress, expectedGeneratio
     return Navigation.lastStatus
   end
 
-  if progress.mode == "paused" and Navigation.activeContext == "riverglades" then
-    local rgProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-    if rgProg and rgProg.mode ~= "paused" then
-      return Navigation.lastStatus
-    end
+  if progress.mode ~= "paused" and Navigation.IsPlayerInDungeonOrRaidInstance() then
+    Navigation.OnInstancePortalEntry(progress)
+    return Navigation.lastStatus, "suppressed_inside_instance"
   end
 
   if progress.mode ~= "paused" and Navigation.activeContext ~= "gold_farm" then
-    syncRivergladesQuestWatchBaseline(nil, false)
     Navigation.RequestContextSwitch("gold_farm")
   elseif progress.mode ~= "paused" then
-    syncRivergladesQuestWatchBaseline(nil, false)
     Navigation.activeContext = "gold_farm"
   end
 
@@ -3738,8 +3434,11 @@ function Navigation.SyncFromGoldFarmEvaluation(eval, progress, expectedGeneratio
   local gfArrivalRadius = tonumber(step.arrivalRadiusYards or (step.destination and step.destination.radiusYards)) or 25
   local ttTitle = string.format("%s — %s", tostring(gfFarm.shortLabel or "Gold Farm"), tostring(step.title or ""))
 
+  local SR = ns.Domain and ns.Domain.SpawnRadar
+  local radarActiveForStep = (SR and SR.IsActiveForStep and SR.IsActiveForStep(gfFarm, step, progress)) or false
+
   if ns.Compat.IsInCombat() then
-    if Navigation.owner.provider ~= "none" and Navigation.owner.ownerContext ~= "gold_farm" then
+    if Navigation.owner.provider ~= "none" and (Navigation.owner.ownerContext ~= "gold_farm" or radarActiveForStep) then
       Navigation.owner.pendingRelease = true
     end
     Navigation.owner.pendingDestination = {
@@ -3771,28 +3470,49 @@ function Navigation.SyncFromGoldFarmEvaluation(eval, progress, expectedGeneratio
       combatVec and combatVec.status or nil
     )
     updateGoldFarmHUDPresentation(eval, Navigation.lastStatus)
+    Navigation.TickSpawnRadar(0, true)
     return Navigation.lastStatus
   end
 
   Navigation.owner.pendingDestination = nil
   updateDeferredMirror()
 
-  local okAcq, provider, reason = tryAcquireDestinationForContext("gold_farm", step.destination, ttTitle)
-  local queuedDeferred = shouldQueuePendingDestination(okAcq, reason)
-  if queuedDeferred then
-    Navigation.owner.pendingDestination = {
-      context = "gold_farm",
-      generation = gen,
-      destination = step.destination,
-      title = ttTitle,
-    }
+  local effProvider, reason, queuedDeferred
+  if radarActiveForStep then
+    -- Single-arrow SpawnRadar handoff (Astra P1-9): release ONLY ForeverHub's owned TomTom/native waypoint
+    -- so TomTom does not point to a static camp pin while ForeverHub points to dynamic spawn nodes.
+    -- User/other-addon TomTom waypoints are strictly preserved!
+    local relOk, relReason = Navigation.TryReleaseOwnedResource(progress)
+    queuedDeferred = (not relOk)
+    if queuedDeferred then
+      Navigation.owner.pendingDestination = {
+        context = "gold_farm",
+        generation = gen,
+        destination = step.destination,
+        title = ttTitle,
+      }
+    end
+    effProvider = "spawn_radar"
+    reason = (not relOk) and relReason or nil
+  else
+    local okAcq, provider, acqReason = tryAcquireDestinationForContext("gold_farm", step.destination, ttTitle)
+    queuedDeferred = shouldQueuePendingDestination(okAcq, acqReason)
+    if queuedDeferred then
+      Navigation.owner.pendingDestination = {
+        context = "gold_farm",
+        generation = gen,
+        destination = step.destination,
+        title = ttTitle,
+      }
+    end
+    effProvider = okAcq and provider or "text_manual"
+    reason = acqReason
   end
   syncProgressMirrorsAndPersist()
   Navigation.EnsureTravelTicker(
     (step.kind == "travel" or step.kind == "boat_crossing") or queuedDeferred,
     "gold_farm"
   )
-  local effProvider = okAcq and provider or "text_manual"
   local arrowOk, vec = Navigation.SetArrowTarget(
     "gold_farm",
     step.destination,
@@ -3812,6 +3532,7 @@ function Navigation.SyncFromGoldFarmEvaluation(eval, progress, expectedGeneratio
     Navigation.lastStatus.deferred = true
   end
   updateGoldFarmHUDPresentation(eval, Navigation.lastStatus)
+  Navigation.TickSpawnRadar(0, true)
   return Navigation.lastStatus
 end
 
@@ -3838,8 +3559,12 @@ function Navigation.FlushDeferredIfReady()
     end
   end
 
-  -- Reject stale or cancelled pending destination (e.g. Gold -> Riverglades -> Stop before cleanup succeeded)
-  if not pending or not Navigation.IsGenerationCurrent(pending.generation) then
+  -- Reject stale or cancelled pending destination (or reacquire while inside dungeon/raid or corpse-running, ST-03)
+  if not pending
+    or not Navigation.IsGenerationCurrent(pending.generation)
+    or Navigation.IsPlayerInDungeonOrRaidInstance()
+    or Navigation.IsPlayerCorpseOrGhost()
+  then
     Navigation.owner.pendingDestination = nil
     syncProgressMirrorsAndPersist()
     return Navigation.lastStatus
@@ -3851,21 +3576,9 @@ function Navigation.FlushDeferredIfReady()
       local gEval = ns.Domain.GoldFarms.ReconcileActive(nil, gProg)
       return Navigation.SyncFromGoldFarmEvaluation(gEval, gProg)
     end
-    Navigation.owner.pendingDestination = nil
-    syncProgressMirrorsAndPersist()
-    return Navigation.lastStatus
-  elseif pending.context == "riverglades" then
-    local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-    if rProg and rProg.mode ~= "paused" then
-      local eval = ns.Domain.RouteProgress.Reconcile(nil, rProg)
-      return Navigation.SyncFromEvaluation(eval, rProg)
-    end
-    Navigation.owner.pendingDestination = nil
-    syncProgressMirrorsAndPersist()
-    return Navigation.lastStatus
   end
 
   Navigation.owner.pendingDestination = nil
   syncProgressMirrorsAndPersist()
-  return nil
+  return Navigation.lastStatus
 end

@@ -243,6 +243,82 @@ function Compat.ResolveItemName(itemID, fallbackName)
   return nil
 end
 
+function Compat.GetClientLocale()
+  if ns.State and type(ns.State.overrideClientLocale) == "string" and ns.State.overrideClientLocale ~= "" then
+    return ns.State.overrideClientLocale
+  end
+  local getLoc = _G.GetLocale
+  if type(getLoc) == "function" then
+    local ok, loc = pcall(getLoc)
+    if ok and not Compat.IsSecretOrRestrictedValue(loc) and type(loc) == "string" and loc ~= "" then
+      return loc
+    end
+  end
+  return nil
+end
+
+-- Resolves an item name safe for exact client-locale Auction House searches (`isExact = true`).
+-- Never substitutes English static catalog names on non-English clients (`deDE`, `esMX`, `frFR`, etc.):
+-- when the live client item cache is cold, requests async load via `C_Item.RequestLoadItemDataByID`
+-- and returns `(nil, "pending_item_cache")` so callers mark the entry `pending` instead of emitting
+-- a wrong-language search.
+function Compat.ResolveClientLocalizedItemName(itemID, fallbackName, entryOpts)
+  itemID = tonumber(itemID)
+  local cItem = _G.C_Item
+  local getItemInfoFn = _G.GetItemInfo
+  local hasLiveItemAPI = (
+    (not Compat.IsSecretOrRestrictedValue(cItem))
+    and type(cItem) == "table"
+    and type(cItem.GetItemNameByID) == "function"
+  ) or (type(getItemInfoFn) == "function")
+
+  if itemID and itemID > 0 then
+    if (not Compat.IsSecretOrRestrictedValue(cItem)) and type(cItem) == "table" and type(cItem.GetItemNameByID) == "function" then
+      local ok, name = pcall(cItem.GetItemNameByID, itemID)
+      if ok and not Compat.IsSecretOrRestrictedValue(name) and type(name) == "string" and name ~= "" then
+        return name, "resolved_live"
+      end
+    end
+    if type(getItemInfoFn) == "function" then
+      local ok, name = pcall(getItemInfoFn, itemID)
+      if ok and not Compat.IsSecretOrRestrictedValue(name) and type(name) == "string" and name ~= "" then
+        return name, "resolved_live"
+      end
+    end
+  end
+
+  if hasLiveItemAPI then
+    if itemID and itemID > 0 and (not Compat.IsSecretOrRestrictedValue(cItem)) and type(cItem) == "table" and type(cItem.RequestLoadItemDataByID) == "function" then
+      pcall(cItem.RequestLoadItemDataByID, itemID)
+    end
+    local locale = Compat.GetClientLocale()
+    local isEnglishLocale = (locale == nil or locale == "enUS" or locale == "enGB")
+    if entryOpts and entryOpts.requireLiveCache == true then
+      return nil, "pending_item_cache"
+    end
+    if not isEnglishLocale then
+      if entryOpts and entryOpts.nameLocale == locale and type(fallbackName) == "string" and fallbackName ~= "" and not string.match(fallbackName, "^Item %d+$") then
+        return fallbackName, "resolved_explicit_locale"
+      end
+      return nil, "pending_item_cache"
+    end
+    local enName = Compat.ResolveItemName(itemID, fallbackName)
+    if enName and enName ~= "" then
+      return enName, "resolved_english_fallback"
+    end
+    if itemID and itemID > 0 then
+      return nil, "pending_item_cache"
+    end
+    return nil, "unresolved_item_name"
+  end
+
+  local resolved = Compat.ResolveItemName(itemID, fallbackName)
+  if resolved and resolved ~= "" then
+    return resolved, "resolved_headless_fallback"
+  end
+  return nil, "unresolved_item_name"
+end
+
 function Compat.GetPlayerLevel()
   if ns.State and type(ns.State.overridePlayerLevel) == "number" then
     return math.max(1, math.floor(ns.State.overridePlayerLevel))
@@ -559,32 +635,7 @@ function Compat.InvalidateQuestStateCaches()
   Compat.liveMapQuestsCache = {}
 end
 
-function Compat.LookupRouteQuestMeta(questRef)
-  local route = ns.RivergladesData and ns.RivergladesData.route
-  if type(route) ~= "table" then
-    return nil
-  end
-  local qid = tonumber(questRef)
-  if qid and type(route.questsByID) == "table" and type(route.questsByID[qid]) == "table" then
-    return route.questsByID[qid]
-  end
-  if qid and type(route.questsByTitleKey) == "table" then
-    for _, row in pairs(route.questsByTitleKey) do
-      if type(row) == "table" and tonumber(row.knownQuestID) == qid then
-        return row
-      end
-    end
-  end
-  if type(questRef) == "string" and type(route.questsByTitleKey) == "table" then
-    local direct = route.questsByTitleKey[questRef]
-    if type(direct) == "table" then
-      return direct
-    end
-    local norm = Compat.NormalizeQuestTitle(questRef)
-    if norm and type(route.questsByTitleKey["title:" .. norm]) == "table" then
-      return route.questsByTitleKey["title:" .. norm]
-    end
-  end
+function Compat.LookupRouteQuestMeta(_questRef)
   return nil
 end
 
@@ -1222,14 +1273,6 @@ local function isDialogTitleCompatibleWithQuestID(dialogNormTitle, qid)
       return false
     end
   end
-  local route = ns.RivergladesData and ns.RivergladesData.route
-  if type(route) == "table" and type(route.questsByID) == "table" then
-    for catID, qEntry in pairs(route.questsByID) do
-      if type(qEntry) == "table" and Compat.NormalizeQuestTitle(qEntry.name) == dialogNormTitle and tonumber(catID) ~= qid then
-        return false
-      end
-    end
-  end
   return true
 end
 
@@ -1283,13 +1326,6 @@ function Compat.RecordRecentQuestAccepted(questID, rawTitle)
     Compat.recentQuestTurnedInByTitle[normTitle] = nil
     if ns.State and type(ns.State.ClearUnresolvedQuestConfirmation) == "function" then
       ns.State.ClearUnresolvedQuestConfirmation(normTitle)
-    end
-    if _G.ForeverHubCharDB and type(_G.ForeverHubCharDB.routeProgress) == "table" then
-      local uct = _G.ForeverHubCharDB.routeProgress.userConfirmedCompletedQuestTitles
-      if type(uct) == "table" then
-        uct[normTitle] = nil
-        uct["title:" .. normTitle] = nil
-      end
     end
   end
   Compat.InvalidateQuestStateCaches()
@@ -1514,22 +1550,6 @@ function Compat.IsQuestCompletedResult(questRef)
   end
   if questID and ns.State and type(ns.State.IsObservedCompletedQuestId) == "function" and ns.State.IsObservedCompletedQuestId(questID) then
     return { status = "ok", value = true, source = "observed_id_history", identityConfidence = identityConfidence }
-  end
-  if normTitle and _G.ForeverHubCharDB and type(_G.ForeverHubCharDB.routeProgress) == "table" then
-    local obsTitles = _G.ForeverHubCharDB.routeProgress.observedCompletedQuestTitles
-    if type(obsTitles) == "table" and obsTitles[normTitle] == true then
-      return { status = "ok", value = true, source = "observed_title_history", identityConfidence = identityConfidence }
-    end
-    local userConfirmed = _G.ForeverHubCharDB.routeProgress.userConfirmedCompletedQuestTitles
-    if type(userConfirmed) == "table" and userConfirmed[normTitle] == true then
-      return {
-        status = "ok",
-        value = true,
-        source = "user_confirmed",
-        completionSource = "user_confirmed",
-        identityConfidence = identityConfidence,
-      }
-    end
   end
 
   if not questID then
@@ -2249,6 +2269,18 @@ function Compat.GetPlayerPosition01()
   return { status = status, reason = reason }
 end
 
+Compat.GetPlayerMapPosition = Compat.GetPlayerPosition01
+
+Compat._mapWorldSizeCache = Compat._mapWorldSizeCache or {}
+
+function Compat.InvalidateMapWorldSizeCache(uiMapID)
+  if uiMapID ~= nil then
+    Compat._mapWorldSizeCache[tonumber(uiMapID) or uiMapID] = nil
+  else
+    Compat._mapWorldSizeCache = {}
+  end
+end
+
 function Compat.GetMapWorldSizeYards(uiMapID)
   uiMapID = tonumber(uiMapID)
   if not Compat.IsFiniteNumber(uiMapID) or uiMapID <= 0 then
@@ -2271,17 +2303,36 @@ function Compat.GetMapWorldSizeYards(uiMapID)
     end
     return { status = "unavailable", reason = "invalid_override_world_size" }
   end
-  if C_Map and type(C_Map.GetMapWorldSize) == "function" then
-    local okSz, w, h = pcall(C_Map.GetMapWorldSize, uiMapID)
+  local curFnSize = C_Map and C_Map.GetMapWorldSize or nil
+  local curFnPos = C_Map and C_Map.GetWorldPosFromMapPos or nil
+  local cached = Compat._mapWorldSizeCache[uiMapID]
+  if type(cached) == "table"
+    and cached.status == "ok"
+    and cached._fnSize == curFnSize
+    and cached._fnPos == curFnPos
+  then
+    return cached
+  end
+  if type(curFnSize) == "function" then
+    local okSz, w, h = pcall(curFnSize, uiMapID)
     if okSz and not Compat.IsSecretOrRestrictedValue(w) and not Compat.IsSecretOrRestrictedValue(h) then
       w = tonumber(w)
       h = tonumber(h)
       if Compat.IsFiniteNumber(w) and Compat.IsFiniteNumber(h) and w > 0 and h > 0 then
-        return { status = "ok", widthYards = w, heightYards = h, source = "GetMapWorldSize" }
+        local res = {
+          status = "ok",
+          widthYards = w,
+          heightYards = h,
+          source = "GetMapWorldSize",
+          _fnSize = curFnSize,
+          _fnPos = curFnPos,
+        }
+        Compat._mapWorldSizeCache[uiMapID] = res
+        return res
       end
     end
   end
-  if C_Map and type(C_Map.GetWorldPosFromMapPos) == "function" then
+  if type(curFnPos) == "function" then
     local makeVec = type(_G.CreateVector2D) == "function" and _G.CreateVector2D
       or function(vx, vy)
         return { x = vx, y = vy, GetXY = function(self) return self.x, self.y end }
@@ -2314,11 +2365,22 @@ function Compat.GetMapWorldSizeYards(uiMapID)
             local wYards = math.sqrt(((xx - x0) * (xx - x0)) + ((xy - y0) * (xy - y0)))
             local hYards = math.sqrt(((yx - x0) * (yx - x0)) + ((yy - y0) * (yy - y0)))
             if wYards > 0 and hYards > 0 then
-              return { status = "ok", widthYards = wYards, heightYards = hYards, source = "GetWorldPosFromMapPos" }
+              local res = {
+                status = "ok",
+                widthYards = wYards,
+                heightYards = hYards,
+                source = "GetWorldPosFromMapPos",
+                _fnSize = curFnSize,
+                _fnPos = curFnPos,
+              }
+              Compat._mapWorldSizeCache[uiMapID] = res
+              return res
             end
           end
         elseif spanA > 0 and spanB > 0 then
-          return { status = "ok", widthYards = spanB, heightYards = spanA, source = "GetWorldPosFromMapPos" }
+          local res = { status = "ok", widthYards = spanB, heightYards = spanA, source = "GetWorldPosFromMapPos" }
+          Compat._mapWorldSizeCache[uiMapID] = res
+          return res
         end
       end
     end
@@ -2689,6 +2751,387 @@ function Compat.GetPlayerMoneyCopper()
     return { status = "unavailable", copper = nil, reason = "get_money_failed" }
   end
   return { status = "unavailable", copper = nil, reason = "missing_get_money" }
+end
+
+function Compat.GetPlayerLevel()
+  if ns.State and type(ns.State.overridePlayerLevel) == "number" then
+    return math.max(1, math.floor(ns.State.overridePlayerLevel))
+  end
+  if type(UnitLevel) == "function" then
+    local ok, lvl = pcall(UnitLevel, "player")
+    if ok and not Compat.IsSecretOrRestrictedValue(lvl) and type(lvl) == "number" and Compat.IsFiniteNumber(lvl) and lvl > 0 then
+      return math.floor(lvl)
+    end
+  end
+  local ident = type(Compat.GetPlayerIdentity) == "function" and Compat.GetPlayerIdentity() or nil
+  if type(ident) == "table" and type(ident.level) == "number" and ident.level > 0 then
+    return math.floor(ident.level)
+  end
+  return 1
+end
+
+Compat.MAX_PLAYER_LEVEL = 60
+
+local function normalizePlayerXPProbe(effLvl, rawCurXP, rawMaxXP)
+  if Compat.IsSecretOrRestrictedValue(effLvl)
+    or Compat.IsSecretOrRestrictedValue(rawCurXP)
+    or Compat.IsSecretOrRestrictedValue(rawMaxXP)
+  then
+    return { status = "unavailable", level = 1, reason = "xp_query_secret" }
+  end
+  local lvl = tonumber(effLvl)
+  if not Compat.IsFiniteNumber(lvl) or lvl < 1 then
+    lvl = 1
+  else
+    lvl = math.floor(lvl)
+  end
+  local curXP = tonumber(rawCurXP)
+  local maxXP = tonumber(rawMaxXP)
+  if not Compat.IsFiniteNumber(curXP) or not Compat.IsFiniteNumber(maxXP) or curXP < 0 or maxXP < 0 then
+    return { status = "unavailable", level = lvl, reason = "xp_query_invalid" }
+  end
+  curXP = math.floor(curXP)
+  maxXP = math.floor(maxXP)
+
+  if lvl >= Compat.MAX_PLAYER_LEVEL then
+    return {
+      status = "capped",
+      isCapped = true,
+      currentXP = curXP,
+      maxXP = maxXP,
+      remainingXP = 0,
+      fraction = 1.0,
+      pct = 100.0,
+      level = lvl,
+    }
+  end
+
+  if maxXP == 0 then
+    if lvl == (Compat.MAX_PLAYER_LEVEL - 1) and curXP == 0 then
+      return {
+        status = "transitional_cap_zero",
+        isCapped = false,
+        currentXP = 0,
+        maxXP = 0,
+        remainingXP = 0,
+        fraction = 1.0,
+        pct = 100.0,
+        level = lvl,
+      }
+    end
+    return { status = "unavailable", level = lvl, reason = "xp_query_zero_max_subcap" }
+  end
+
+  local frac = math.max(0.0, math.min(1.0, curXP / maxXP))
+  return {
+    status = "ok",
+    isCapped = false,
+    currentXP = curXP,
+    maxXP = maxXP,
+    remainingXP = math.max(0, maxXP - curXP),
+    fraction = frac,
+    pct = frac * 100.0,
+    level = lvl,
+  }
+end
+
+function Compat.GetPlayerXPState()
+  local lvl = Compat.GetPlayerLevel()
+  if ns.State and ns.State.overridePlayerXPState ~= nil then
+    local ov = ns.State.overridePlayerXPState
+    if type(ov) == "table" then
+      local effLvl = tonumber(ov.level) or lvl
+      if ov.status and ov.status ~= "ok" and ov.status ~= "capped" and ov.status ~= "transitional_cap_zero" then
+        return {
+          status = tostring(ov.status),
+          level = math.max(1, math.floor(effLvl)),
+          reason = ov.reason or "override_not_ok",
+        }
+      end
+      local rawCur = (ov.currentXP ~= nil) and ov.currentXP or 0
+      local rawMax = ov.maxXP
+      if rawMax == nil then
+        rawMax = (effLvl >= Compat.MAX_PLAYER_LEVEL) and 0 or 100000
+      end
+      return normalizePlayerXPProbe(effLvl, rawCur, rawMax)
+    end
+    return { status = tostring(ov), level = lvl }
+  end
+  if type(_G.UnitXP) == "function" and type(_G.UnitXPMax) == "function" then
+    local okCur, curXP = pcall(_G.UnitXP, "player")
+    local okMax, maxXP = pcall(_G.UnitXPMax, "player")
+    if okCur and okMax then
+      return normalizePlayerXPProbe(lvl, curXP, maxXP)
+    end
+    return { status = "unavailable", level = lvl, reason = "xp_query_invalid" }
+  end
+  return { status = "unavailable", level = lvl, reason = "missing_unit_xp_api" }
+end
+
+function Compat.GetCombatLockdownState()
+  if ns.State and type(ns.State.overrideCombatLockdownState) == "table" then
+    local ov = ns.State.overrideCombatLockdownState
+    return {
+      ok = (ov.ok == true),
+      locked = (ov.locked ~= false),
+      reason = ov.reason,
+    }
+  end
+  if ns.State and type(ns.State.overrideInCombat) == "boolean" then
+    return {
+      ok = true,
+      locked = (ns.State.overrideInCombat == true),
+      reason = ns.State.overrideInCombat and "combat_lockdown" or nil,
+    }
+  end
+  if type(_G.InCombatLockdown) ~= "function" then
+    return { ok = false, locked = true, reason = "lockdown_probe_missing" }
+  end
+  local okCall, res = pcall(_G.InCombatLockdown)
+  if not okCall or Compat.IsSecretOrRestrictedValue(res) or type(res) ~= "boolean" then
+    return { ok = false, locked = true, reason = "lockdown_probe_unavailable" }
+  end
+  return {
+    ok = true,
+    locked = (res == true),
+    reason = res and "combat_lockdown" or nil,
+  }
+end
+
+function Compat.GetPlayerRestedXPState()
+  if ns.State and ns.State.overrideRestedXP ~= nil then
+    local ov = ns.State.overrideRestedXP
+    if type(ov) == "table" then
+      if ov.status and ov.status ~= "ok" then
+        return { status = tostring(ov.status), reason = ov.reason or "override_not_ok" }
+      end
+      local exh = math.max(0, math.floor(tonumber(ov.exhaustionXP) or 0))
+      return {
+        status = "ok",
+        exhaustionXP = exh,
+        isRested = (ov.isRested ~= nil) and (ov.isRested == true) or (exh > 0),
+      }
+    elseif type(ov) == "number" and Compat.IsFiniteNumber(ov) then
+      local exh = math.max(0, math.floor(ov))
+      return {
+        status = "ok",
+        exhaustionXP = exh,
+        isRested = (exh > 0),
+      }
+    end
+    return { status = "unavailable", reason = "invalid_rested_override" }
+  end
+  if type(_G.GetXPExhaustion) ~= "function" then
+    return { status = "unavailable", reason = "missing_get_xp_exhaustion" }
+  end
+  local okCall, exh = pcall(_G.GetXPExhaustion)
+  if not okCall or Compat.IsSecretOrRestrictedValue(exh) then
+    return { status = "unavailable", reason = "exhaustion_query_failed" }
+  end
+  if exh == nil then
+    return { status = "ok", exhaustionXP = 0, isRested = false }
+  end
+  if type(exh) == "number" and Compat.IsFiniteNumber(exh) then
+    local cleanExh = math.max(0, math.floor(exh))
+    return { status = "ok", exhaustionXP = cleanExh, isRested = (cleanExh > 0) }
+  end
+  return { status = "unavailable", reason = "exhaustion_query_invalid" }
+end
+
+local function extractCreatureNpcIDFromGUID(guid)
+  if Compat.IsSecretOrRestrictedValue(guid) or type(guid) ~= "string" then
+    return nil
+  end
+  local nid = string.match(guid, "^Creature%-%d+%-%d+%-%d+%-%d+%-(%d+)%-")
+    or string.match(guid, "^Vehicle%-%d+%-%d+%-%d+%-%d+%-(%d+)%-")
+  if nid then
+    return tonumber(nid)
+  end
+  return nil
+end
+
+Compat.ExtractCreatureNpcIDFromGUID = extractCreatureNpcIDFromGUID
+
+function Compat.ObserveUnitForTargetSet(unitToken, npcIDSet, npcNameSet)
+  if Compat.IsSecretOrRestrictedValue(unitToken) or type(unitToken) ~= "string" or unitToken == "" then
+    return { status = "observation_unavailable", matched = false, reason = "invalid_unit_token" }
+  end
+  npcIDSet = (not Compat.IsSecretOrRestrictedValue(npcIDSet) and type(npcIDSet) == "table") and npcIDSet or {}
+  npcNameSet = (not Compat.IsSecretOrRestrictedValue(npcNameSet) and type(npcNameSet) == "table") and npcNameSet or {}
+
+  if type(_G.UnitExists) ~= "function"
+    or type(_G.UnitIsDeadOrGhost) ~= "function"
+    or type(_G.UnitCanAttack) ~= "function"
+  then
+    return { status = "observation_unavailable", matched = false, reason = "missing_unit_probe_api" }
+  end
+
+  local okEx, exists = pcall(_G.UnitExists, unitToken)
+  if not okEx or Compat.IsSecretOrRestrictedValue(exists) or type(exists) ~= "boolean" then
+    return { status = "observation_unavailable", matched = false, reason = "unit_exists_unavailable" }
+  end
+  if exists == false then
+    return { status = "not_matched", matched = false, reason = "unit_absent" }
+  end
+
+  local okDead, isDead = pcall(_G.UnitIsDeadOrGhost, unitToken)
+  if not okDead or Compat.IsSecretOrRestrictedValue(isDead) or type(isDead) ~= "boolean" then
+    return { status = "observation_unavailable", matched = false, reason = "unit_dead_probe_unavailable" }
+  end
+  if isDead == true then
+    return { status = "not_matched", matched = false, reason = "unit_dead" }
+  end
+
+  local okAtk, canAtk = pcall(_G.UnitCanAttack, "player", unitToken)
+  if not okAtk or Compat.IsSecretOrRestrictedValue(canAtk) or type(canAtk) ~= "boolean" then
+    return { status = "observation_unavailable", matched = false, reason = "unit_hostility_probe_unavailable" }
+  end
+  if canAtk == false then
+    return { status = "not_matched", matched = false, reason = "unit_not_attackable" }
+  end
+
+  local readableIdentity = false
+  local matched = false
+  local cleanGuid, cleanNpcID, cleanName = nil, nil, nil
+  local sawIdentityError = false
+
+  if type(_G.UnitGUID) == "function" then
+    local okGuid, guid = pcall(_G.UnitGUID, unitToken)
+    if not okGuid or Compat.IsSecretOrRestrictedValue(guid) then
+      sawIdentityError = true
+    elseif type(guid) == "string" and guid ~= "" then
+      readableIdentity = true
+      cleanGuid = guid
+      cleanNpcID = extractCreatureNpcIDFromGUID(guid)
+      if cleanNpcID and npcIDSet[cleanNpcID] == true then
+        matched = true
+      end
+    end
+  end
+
+  if type(_G.UnitName) == "function" then
+    local okNm, nm = pcall(_G.UnitName, unitToken)
+    if not okNm or Compat.IsSecretOrRestrictedValue(nm) then
+      sawIdentityError = true
+    elseif type(nm) == "string" and nm ~= "" then
+      readableIdentity = true
+      cleanName = nm
+      if npcNameSet[nm] == true or npcNameSet[string.lower(nm)] == true then
+        matched = true
+      end
+    end
+  end
+
+  if not readableIdentity then
+    return {
+      status = "observation_unavailable",
+      matched = false,
+      reason = sawIdentityError and "unit_identity_restricted" or "unit_identity_unavailable",
+    }
+  end
+
+  if matched then
+    return {
+      status = "matched_live_hostile",
+      matched = true,
+      unitToken = unitToken,
+      guid = cleanGuid,
+      npcID = cleanNpcID,
+      name = cleanName,
+    }
+  end
+
+  return {
+    status = "not_matched",
+    matched = false,
+    reason = "identity_mismatch",
+    unitToken = unitToken,
+    guid = cleanGuid,
+    npcID = cleanNpcID,
+    name = cleanName,
+  }
+end
+
+function Compat.ObserveMatchingHostileTargetOrNameplate(npcIDSet, npcNameSet)
+  if ns.State and ns.State.overrideHasMatchingHostileTarget ~= nil then
+    if ns.State.overrideHasMatchingHostileTarget == true then
+      return { status = "matched_live_hostile", matched = true, source = "override" }
+    elseif ns.State.overrideHasMatchingHostileTarget == false then
+      return { status = "not_matched", matched = false, source = "override" }
+    end
+    return { status = "observation_unavailable", matched = false, source = "override" }
+  end
+
+  local sawUnavailable = false
+  for _, tok in ipairs({ "target", "mouseover" }) do
+    local obs = Compat.ObserveUnitForTargetSet(tok, npcIDSet, npcNameSet)
+    if obs.status == "matched_live_hostile" then
+      return obs
+    elseif obs.status == "observation_unavailable" then
+      sawUnavailable = true
+    end
+  end
+
+  if _G.C_NamePlate and type(_G.C_NamePlate.GetNamePlates) == "function" then
+    local okPlates, plates = pcall(_G.C_NamePlate.GetNamePlates)
+    if not okPlates or Compat.IsSecretOrRestrictedValue(plates) or type(plates) ~= "table" then
+      sawUnavailable = true
+    else
+      local okLen, plateCount = pcall(function() return #plates end)
+      if not okLen or Compat.IsSecretOrRestrictedValue(plateCount) or type(plateCount) ~= "number" then
+        sawUnavailable = true
+      else
+        local maxScan = math.min(plateCount, 40)
+        for i = 1, maxScan do
+          local okEntry, plate = pcall(function() return plates[i] end)
+          if not okEntry or Compat.IsSecretOrRestrictedValue(plate) or type(plate) ~= "table" then
+            sawUnavailable = true
+          else
+            local token = nil
+            local okTok1, rawTok1 = pcall(function() return plate.namePlateUnitToken end)
+            if not okTok1 or Compat.IsSecretOrRestrictedValue(rawTok1) then
+              sawUnavailable = true
+            elseif type(rawTok1) == "string" and rawTok1 ~= "" then
+              token = rawTok1
+            end
+
+            if token == nil then
+              local okUF, uf = pcall(function() return plate.UnitFrame end)
+              if not okUF or Compat.IsSecretOrRestrictedValue(uf) then
+                sawUnavailable = true
+              elseif type(uf) == "table" then
+                local okTok2, rawTok2 = pcall(function() return uf.unit end)
+                if not okTok2 or Compat.IsSecretOrRestrictedValue(rawTok2) then
+                  sawUnavailable = true
+                elseif type(rawTok2) == "string" and rawTok2 ~= "" then
+                  token = rawTok2
+                end
+              end
+            end
+
+            if token ~= nil then
+              local obs = Compat.ObserveUnitForTargetSet(token, npcIDSet, npcNameSet)
+              if obs.status == "matched_live_hostile" then
+                return obs
+              elseif obs.status == "observation_unavailable" then
+                sawUnavailable = true
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  if sawUnavailable then
+    return { status = "observation_unavailable", matched = false, reason = "partial_or_restricted_probe" }
+  end
+  return { status = "not_matched", matched = false, reason = "none_observed" }
+end
+
+function Compat.HasMatchingHostileTargetOrNameplate(npcIDSet, npcNameSet)
+  local obs = Compat.ObserveMatchingHostileTargetOrNameplate(npcIDSet, npcNameSet)
+  return type(obs) == "table" and obs.status == "matched_live_hostile"
 end
 
 local TWO_PI = math.pi * 2
@@ -3231,10 +3674,6 @@ function Compat.MatchNpcFromQuestText(rawText, route)
   if type(rawText) ~= "string" or rawText == "" or Compat.IsSecretOrRestrictedValue(rawText) then
     return nil
   end
-  route = route
-    or (ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute())
-    or (ns.RivergladesData and ns.RivergladesData.route)
-    or nil
   if type(route) ~= "table" or type(route.npcDirectoryByNormName) ~= "table" or type(route.npcDirectoryByID) ~= "table" then
     return nil
   end
@@ -3445,10 +3884,6 @@ function Compat.ResolveLiveQuestTargetOverride(action, route, progress, ctx, opt
     return nil
   end
 
-  route = route
-    or (ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute())
-    or (ns.RivergladesData and ns.RivergladesData.route)
-    or nil
   if type(route) ~= "table" then
     return nil
   end
@@ -3620,4 +4055,1426 @@ function Compat.ResolveLiveQuestTargetOverride(action, route, progress, ctx, opt
     Compat.liveQuestTargetDrifts[action.actionID] = override
   end
   return override
+end
+
+-- ============================================================================
+-- Phase 0 Economy Runtime Capability Probes (`contracts/market-projection-v1.md`)
+-- Read-only capability & safe return-shape inspection; NEVER invokes protected
+-- purchase, post, craft, or mail-extraction operations.
+-- ============================================================================
+
+function Compat.GetServerTimeSafe()
+  local getSrv = _G.GetServerTime
+  if type(getSrv) == "function" then
+    local ok, val = pcall(getSrv)
+    if ok and not Compat.IsSecretOrRestrictedValue(val) and Compat.IsFiniteNumber(val) and val > 0 then
+      return {
+        epochSec = math.floor(val),
+        authority = "server_time",
+      }
+    end
+  end
+  if type(time) == "function" then
+    local okT, localT = pcall(time)
+    if okT and not Compat.IsSecretOrRestrictedValue(localT) and Compat.IsFiniteNumber(localT) and localT > 0 then
+      return {
+        epochSec = math.floor(localT),
+        authority = "local_clock",
+      }
+    end
+  end
+  return {
+    epochSec = nil,
+    authority = "unavailable",
+  }
+end
+
+local function hasFunctionAt(tbl, key)
+  if Compat.IsSecretOrRestrictedValue(tbl) or type(tbl) ~= "table" then
+    return false
+  end
+  local v = tbl[key]
+  if Compat.IsSecretOrRestrictedValue(v) then
+    return false
+  end
+  return type(v) == "function"
+end
+
+function Compat.ProbeEconomyRuntimeCapabilities()
+  local version, build, tocVersion = "unknown", "unknown", 0
+  if type(_G.GetBuildInfo) == "function" then
+    local okB, v, b, _, t = pcall(_G.GetBuildInfo)
+    if okB then
+      if not Compat.IsSecretOrRestrictedValue(v) and type(v) == "string" then
+        version = v
+      end
+      if not Compat.IsSecretOrRestrictedValue(b) and type(b) == "string" then
+        build = b
+      end
+      if not Compat.IsSecretOrRestrictedValue(t) and Compat.IsFiniteNumber(t) then
+        tocVersion = math.floor(t)
+      end
+    end
+  end
+
+  local cAH = _G.C_AuctionHouse
+  local hasModernAH = (not Compat.IsSecretOrRestrictedValue(cAH))
+    and type(cAH) == "table"
+    and (hasFunctionAt(cAH, "SendBrowseQuery") or hasFunctionAt(cAH, "SendSearchQuery"))
+  local hasLegacyAH = hasFunctionAt(_G, "QueryAuctionItems") and hasFunctionAt(_G, "GetAuctionItemInfo")
+  local ahFamily = "unavailable"
+  if hasModernAH and hasLegacyAH then
+    ahFamily = "hybrid_both"
+  elseif hasModernAH then
+    ahFamily = "modern_c_auctionhouse"
+  elseif hasLegacyAH then
+    ahFamily = "legacy_ah"
+  end
+
+  local liveAuctionWindowShape = nil
+  local inCombat = Compat.IsInCombat()
+  if not inCombat and ns.State and ns.State.ahOpen == true then
+    if hasLegacyAH and hasFunctionAt(_G, "GetNumAuctionItems") then
+      local okCount, batchCount, totalCount = pcall(_G.GetNumAuctionItems, "list")
+      if okCount
+        and not Compat.IsSecretOrRestrictedValue(batchCount)
+        and not Compat.IsSecretOrRestrictedValue(totalCount)
+        and Compat.IsFiniteNumber(batchCount)
+      then
+        local bc = math.floor(batchCount)
+        local buyoutPositiveCount = 0
+        local bidOnlyZeroBuyoutCount = 0
+        if bc > 0 and hasFunctionAt(_G, "GetAuctionItemInfo") then
+          local inspectLimit = math.min(bc, 50)
+          for idx = 1, inspectLimit do
+            local okRow, _, _, count, _, _, _, _, _, _, buyoutPrice = pcall(_G.GetAuctionItemInfo, "list", idx)
+            if okRow and not Compat.IsSecretOrRestrictedValue(count) and not Compat.IsSecretOrRestrictedValue(buyoutPrice) then
+              local bPrice = tonumber(buyoutPrice) or 0
+              if bPrice > 0 then
+                buyoutPositiveCount = buyoutPositiveCount + 1
+              else
+                bidOnlyZeroBuyoutCount = bidOnlyZeroBuyoutCount + 1
+              end
+            end
+          end
+        end
+        liveAuctionWindowShape = {
+          mode = "legacy_list",
+          batchCount = bc,
+          totalCount = Compat.IsFiniteNumber(totalCount) and math.floor(totalCount) or nil,
+          buyoutPositiveSampleCount = buyoutPositiveCount,
+          bidOnlyZeroBuyoutSampleCount = bidOnlyZeroBuyoutCount,
+        }
+      end
+    end
+  end
+
+  local hasMerchantAPI = hasFunctionAt(_G, "GetMerchantNumItems") and hasFunctionAt(_G, "GetMerchantItemInfo")
+  local hasMerchantItemLink = hasFunctionAt(_G, "GetMerchantItemLink")
+  local hasMerchantCostInfo = hasFunctionAt(_G, "GetMerchantItemCostInfo")
+  local hasCanMerchantRepair = hasFunctionAt(_G, "CanMerchantRepair")
+  local liveMerchantSummary = nil
+  if not inCombat and ns.State and ns.State.merchantOpen == true and hasMerchantAPI then
+    local okM, mCount = pcall(_G.GetMerchantNumItems)
+    if okM and not Compat.IsSecretOrRestrictedValue(mCount) and Compat.IsFiniteNumber(mCount) then
+      local mc = math.max(0, math.floor(mCount))
+      local unlimitedCount = 0
+      local limitedStockCount = 0
+      local altCurrencyCount = 0
+      for idx = 1, math.min(mc, 80) do
+        local okInfo, _, _, price, quantity, numAvailable, _, extendedCost = pcall(_G.GetMerchantItemInfo, idx)
+        if okInfo and not Compat.IsSecretOrRestrictedValue(price) and not Compat.IsSecretOrRestrictedValue(numAvailable) then
+          if tonumber(numAvailable) == -1 then
+            unlimitedCount = unlimitedCount + 1
+          elseif Compat.IsFiniteNumber(numAvailable) and numAvailable >= 0 then
+            limitedStockCount = limitedStockCount + 1
+          end
+          if not Compat.IsSecretOrRestrictedValue(extendedCost) and extendedCost == true then
+            altCurrencyCount = altCurrencyCount + 1
+          end
+          local _ = quantity
+        end
+      end
+      liveMerchantSummary = {
+        offerCount = mc,
+        unlimitedOfferSampleCount = unlimitedCount,
+        limitedStockSampleCount = limitedStockCount,
+        extendedCostSampleCount = altCurrencyCount,
+      }
+    end
+  end
+
+  local cItem = _G.C_Item
+  local cTip = _G.C_TooltipInfo
+  local cCont = _G.C_Container
+  local hasCItem = (not Compat.IsSecretOrRestrictedValue(cItem)) and type(cItem) == "table"
+  local hasCTooltipInfo = (not Compat.IsSecretOrRestrictedValue(cTip))
+    and type(cTip) == "table"
+    and hasFunctionAt(cTip, "GetBagItem")
+  local hasContainerDurability = (
+    (not Compat.IsSecretOrRestrictedValue(cCont))
+    and type(cCont) == "table"
+    and hasFunctionAt(cCont, "GetContainerItemDurability")
+  ) or hasFunctionAt(_G, "GetContainerItemDurability")
+
+  local cTS = _G.C_TradeSkillUI
+  local hasModernTS = (not Compat.IsSecretOrRestrictedValue(cTS))
+    and type(cTS) == "table"
+    and hasFunctionAt(cTS, "GetAllRecipeIDs")
+  local hasClassicTS = hasFunctionAt(_G, "GetNumTradeSkills") and hasFunctionAt(_G, "GetTradeSkillInfo")
+  local hasClassicCraft = hasFunctionAt(_G, "GetNumCrafts") and hasFunctionAt(_G, "GetCraftInfo")
+  local profFamily = "unavailable"
+  if hasModernTS and (hasClassicTS or hasClassicCraft) then
+    profFamily = "hybrid"
+  elseif hasModernTS then
+    profFamily = "modern_c_tradeskillui"
+  elseif hasClassicTS and hasClassicCraft then
+    profFamily = "classic_tradeskill_and_craft"
+  elseif hasClassicTS then
+    profFamily = "classic_tradeskill_only"
+  end
+
+  local hasMailHeader = hasFunctionAt(_G, "GetInboxNumItems") and hasFunctionAt(_G, "GetInboxHeaderInfo")
+  local hasMailInvoice = hasFunctionAt(_G, "GetInboxInvoiceInfo")
+  local liveInboxSummary = nil
+  if not inCombat and ns.State and ns.State.mailOpen == true and hasMailHeader then
+    local okNum, numItems, totalItems = pcall(_G.GetInboxNumItems)
+    if okNum
+      and not Compat.IsSecretOrRestrictedValue(numItems)
+      and Compat.IsFiniteNumber(numItems)
+    then
+      liveInboxSummary = {
+        numItems = math.floor(numItems),
+        totalItems = (not Compat.IsSecretOrRestrictedValue(totalItems) and Compat.IsFiniteNumber(totalItems))
+          and math.floor(totalItems)
+          or nil,
+      }
+    end
+  end
+
+  local hasLootSlots = hasFunctionAt(_G, "GetNumLootItems") and hasFunctionAt(_G, "GetLootSlotInfo")
+  local cEnc = _G.C_EncodingUtil
+  local hasNativeCBOR = (not Compat.IsSecretOrRestrictedValue(cEnc))
+    and type(cEnc) == "table"
+    and hasFunctionAt(cEnc, "SerializeCBOR")
+    and hasFunctionAt(cEnc, "DeserializeCBOR")
+
+  return {
+    client = {
+      version = version,
+      build = build,
+      tocVersion = tocVersion,
+      clientLocale = Compat.GetClientLocale() or "unknown",
+      hasSecretValueGuard = hasFunctionAt(_G, "issecretvalue"),
+      hasNativeCBOR = hasNativeCBOR,
+    },
+    auctions = {
+      detectedFamily = ahFamily,
+      hasLegacyQuery = hasLegacyAH,
+      hasLegacyDepositCalc = hasFunctionAt(_G, "CalculateAuctionDeposit") or hasFunctionAt(_G, "GetAuctionDeposit"),
+      hasModernNamespace = hasModernAH,
+      hasModernCommodityDeposit = hasModernAH and hasFunctionAt(cAH, "CalculateCommodityDeposit") or false,
+      hasModernItemDeposit = hasModernAH and hasFunctionAt(cAH, "CalculateItemDeposit") or false,
+      liveWindowObservation = liveAuctionWindowShape,
+    },
+    merchant = {
+      hasMerchantAPI = hasMerchantAPI,
+      hasMerchantItemLink = hasMerchantItemLink,
+      hasMerchantCostInfo = hasMerchantCostInfo,
+      hasCanMerchantRepair = hasCanMerchantRepair,
+      liveWindowObservation = liveMerchantSummary,
+    },
+    itemInspection = {
+      hasGetItemInfo = hasFunctionAt(_G, "GetItemInfo"),
+      hasCItem = hasCItem,
+      hasRequestLoadItemDataByID = hasCItem and hasFunctionAt(cItem, "RequestLoadItemDataByID") or false,
+      hasCTooltipInfo = hasCTooltipInfo,
+      hasContainerDurability = hasContainerDurability,
+    },
+    professions = {
+      detectedFamily = profFamily,
+      hasClassicTradeSkill = hasClassicTS,
+      hasClassicCraft = hasClassicCraft,
+      hasModernTradeSkillUI = hasModernTS,
+    },
+    mail = {
+      hasInboxHeader = hasMailHeader,
+      hasInboxInvoice = hasMailInvoice,
+      liveWindowObservation = liveInboxSummary,
+    },
+    loot = {
+      hasLootSlotInfo = hasLootSlots,
+      hasLootSlotLink = hasFunctionAt(_G, "GetLootSlotLink"),
+    },
+  }
+end
+
+-- ============================================================================
+-- Stage 6A.2 / 6A.3 / 6B.1 Runtime Adapters (`1.60.1.70938` Safe):
+--   1. Locale-Safe Profession Snapshot (`P1.B` — numeric skillLine IDs -> spell IDs -> locale-aware fallback)
+--   2. Dual-Clock Cooldown Capture (`P1.E` — monotonic GetTime() + UTC GetServerTime() in one capture)
+--   3. Detailed Bag Slot Snapshot (with `bagFamily` for `P0.6` safe consolidation)
+--   4. Redacted Runtime Contract Fixture Capture (`6A.2` `/fh probe` extension)
+-- ============================================================================
+
+local SKILL_LINE_ID_TO_KEY = {
+  [171] = "ALCHEMY",
+  [164] = "BLACKSMITHING",
+  [333] = "ENCHANTING",
+  [202] = "ENGINEERING",
+  [182] = "HERBALISM",
+  [165] = "LEATHERWORKING",
+  [186] = "MINING",
+  [393] = "SKINNING",
+  [197] = "TAILORING",
+  [129] = "FIRST_AID",
+  [185] = "COOKING",
+  [356] = "FISHING",
+}
+
+local ENGLISH_SKILL_NAME_TO_KEY = {
+  ["alchemy"] = "ALCHEMY",
+  ["blacksmithing"] = "BLACKSMITHING",
+  ["enchanting"] = "ENCHANTING",
+  ["engineering"] = "ENGINEERING",
+  ["herbalism"] = "HERBALISM",
+  ["herb gathering"] = "HERBALISM",
+  ["leatherworking"] = "LEATHERWORKING",
+  ["mining"] = "MINING",
+  ["skinning"] = "SKINNING",
+  ["tailoring"] = "TAILORING",
+  ["first aid"] = "FIRST_AID",
+  ["cooking"] = "COOKING",
+  ["fishing"] = "FISHING",
+}
+
+local PROFESSION_KNOWN_SPELL_IDS = {
+  ALCHEMY = { 2259, 3101, 3464, 11611 },
+  BLACKSMITHING = { 2018, 3100, 3538, 9785 },
+  ENCHANTING = { 7411, 7412, 7413, 13920 },
+  ENGINEERING = { 4036, 4037, 4038, 12656 },
+  HERBALISM = { 2366, 2368, 3570, 11993, 2383 },
+  LEATHERWORKING = { 2108, 3104, 3811, 10662 },
+  MINING = { 2575, 2576, 3564, 10248, 2580, 2656 },
+  SKINNING = { 8613, 8617, 8618, 10768 },
+  TAILORING = { 3908, 3909, 3910, 12180 },
+  FIRST_AID = { 3273, 3274, 7924, 10846 },
+  COOKING = { 2550, 3102, 3413, 18260, 818 },
+  FISHING = { 7620, 7731, 7732, 18248 },
+}
+
+function Compat.GetDualClockNow()
+  local serverEpoch = nil
+  if ns.State and type(ns.State.overrideServerTimeEpoch) == "number" then
+    serverEpoch = math.floor(ns.State.overrideServerTimeEpoch)
+  elseif type(_G.GetServerTime) == "function" then
+    local okS, s = pcall(_G.GetServerTime)
+    if okS and not Compat.IsSecretOrRestrictedValue(s) and Compat.IsFiniteNumber(s) and s > 0 then
+      serverEpoch = math.floor(s)
+    end
+  elseif type(_G.time) == "function" then
+    local okT, t = pcall(_G.time)
+    if okT and not Compat.IsSecretOrRestrictedValue(t) and Compat.IsFiniteNumber(t) and t > 0 then
+      serverEpoch = math.floor(t)
+    end
+  end
+
+  local monotonicSec = nil
+  if ns.State and type(ns.State.overrideMonotonicTime) == "number" then
+    monotonicSec = ns.State.overrideMonotonicTime
+  elseif type(_G.GetTime) == "function" then
+    local okM, m = pcall(_G.GetTime)
+    if okM and not Compat.IsSecretOrRestrictedValue(m) and Compat.IsFiniteNumber(m) and m >= 0 then
+      monotonicSec = m
+    end
+  end
+
+  return {
+    serverEpoch = serverEpoch,
+    monotonicSec = monotonicSec,
+  }
+end
+
+function Compat.IsTradeSkillViewLinked()
+  if ns.State and ns.State.overrideTradeSkillLinked ~= nil then
+    return ns.State.overrideTradeSkillLinked == true
+  end
+  if type(_G.IsTradeSkillLinked) == "function" then
+    local okL, linked = pcall(_G.IsTradeSkillLinked)
+    if okL and not Compat.IsSecretOrRestrictedValue(linked) and linked == true then
+      return true
+    end
+  end
+  local cTS = _G.C_TradeSkillUI
+  if not Compat.IsSecretOrRestrictedValue(cTS) and type(cTS) == "table" then
+    if type(cTS.IsTradeSkillLinked) == "function" then
+      local okM, isL = pcall(cTS.IsTradeSkillLinked)
+      if okM and isL == true then
+        return true
+      end
+    end
+    if type(cTS.IsTradeSkillGuild) == "function" then
+      local okG, isG = pcall(cTS.IsTradeSkillGuild)
+      if okG and isG == true then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+function Compat.CaptureProfessionSnapshot()
+  local clocks = Compat.GetDualClockNow()
+  local nowEpoch = clocks.serverEpoch or 0
+
+  -- Never overwrite character profession state from a chat-linked / guild trade-skill inspection!
+  if Compat.IsTradeSkillViewLinked() then
+    return {
+      snapshotStatus = "LINKED_VIEW_IGNORED",
+      isLinkedView = true,
+      learnedSkills = {},
+      baseRanks = {},
+      effectiveModifiers = {},
+      maxRanks = {},
+      observedAt = nowEpoch,
+    }
+  end
+
+  local baseRanks = {}
+  local modifiers = {}
+  local maxRanks = {}
+
+  -- Path 1: Modern/Hybrid `GetProfessions` + `GetProfessionInfo` numeric `skillLine` IDs (100% locale-invariant!)
+  if type(_G.GetProfessions) == "function" and type(_G.GetProfessionInfo) == "function" then
+    local okP, p1, p2, arch, fish, cook, firstAid = pcall(_G.GetProfessions)
+    if okP then
+      local indices = { p1, p2, arch, fish, cook, firstAid }
+      local anyNumericFailed = false
+      for _, idx in ipairs(indices) do
+        if type(idx) == "number" and idx > 0 then
+          local okInfo, _, _, rank, maxRank, _, _, skillLine, mod = pcall(_G.GetProfessionInfo, idx)
+          if okInfo and type(skillLine) == "number" then
+            local key = SKILL_LINE_ID_TO_KEY[math.floor(skillLine)]
+            if key and Compat.IsFiniteNumber(rank) then
+              baseRanks[key] = math.max(0, math.floor(rank))
+              modifiers[key] = Compat.IsFiniteNumber(mod) and math.floor(mod) or 0
+              maxRanks[key] = Compat.IsFiniteNumber(maxRank) and math.max(0, math.floor(maxRank)) or 300
+            end
+          else
+            anyNumericFailed = true
+          end
+        end
+      end
+      return {
+        snapshotStatus = anyNumericFailed and "PARTIAL" or "COMPLETE",
+        source = "get_professions_numeric_skillline",
+        isLinkedView = false,
+        learnedSkills = baseRanks,
+        baseRanks = baseRanks,
+        effectiveModifiers = modifiers,
+        maxRanks = maxRanks,
+        observedAt = nowEpoch,
+      }
+    end
+  end
+
+  -- Path 2: Classic `GetNumSkillLines` + `GetSkillLineInfo` with locale safety + spellbook cross-check:
+  if type(_G.GetNumSkillLines) == "function" and type(_G.GetSkillLineInfo) == "function" then
+    local okN, numLines = pcall(_G.GetNumSkillLines)
+    if not okN or not Compat.IsFiniteNumber(numLines) or numLines <= 0 then
+      return {
+        snapshotStatus = "PENDING",
+        source = "skill_lines_empty_before_init",
+        isLinkedView = false,
+        learnedSkills = {},
+        baseRanks = {},
+        effectiveModifiers = {},
+        maxRanks = {},
+        observedAt = nowEpoch,
+      }
+    end
+
+    local locale = Compat.GetClientLocale() or "enUS"
+    local isEnglish = (locale == "enUS" or locale == "enGB")
+
+    -- Build localized client global name map where available (`PROFESSIONS_FIRST_AID`, `PROFESSIONS_COOKING`, `PROFESSIONS_FISHING`)
+    local localizedNameMap = {}
+    if isEnglish then
+      for k, v in pairs(ENGLISH_SKILL_NAME_TO_KEY) do
+        localizedNameMap[k] = v
+      end
+    end
+    local globalPairs = {
+      { _G.PROFESSIONS_FIRST_AID, "FIRST_AID" },
+      { _G.PROFESSIONS_COOKING, "COOKING" },
+      { _G.PROFESSIONS_FISHING, "FISHING" },
+    }
+    for _, gp in ipairs(globalPairs) do
+      if type(gp[1]) == "string" and gp[1] ~= "" then
+        localizedNameMap[string.lower(gp[1])] = gp[2]
+      end
+    end
+
+    local totalNonHeaderLines = 0
+    local hadUnmappedOnNonEnglish = false
+
+    for i = 1, math.floor(numLines) do
+      local okL, skillName, isHeader, _, skillRank, numTempPoints, skillModifier, skillMaxRank = pcall(_G.GetSkillLineInfo, i)
+      if okL and not isHeader and type(skillName) == "string" and skillName ~= "" then
+        totalNonHeaderLines = totalNonHeaderLines + 1
+        local norm = string.lower(string.gsub(skillName, "^%s*(.-)%s*$", "%1"))
+        local mappedKey = localizedNameMap[norm]
+        if mappedKey and Compat.IsFiniteNumber(skillRank) then
+          baseRanks[mappedKey] = math.max(0, math.floor(skillRank))
+          local effMod = Compat.IsFiniteNumber(skillModifier) and math.floor(skillModifier)
+            or (Compat.IsFiniteNumber(numTempPoints) and math.floor(numTempPoints) or 0)
+          modifiers[mappedKey] = effMod
+          maxRanks[mappedKey] = Compat.IsFiniteNumber(skillMaxRank) and math.max(0, math.floor(skillMaxRank)) or 300
+        elseif not isEnglish and Compat.IsFiniteNumber(skillMaxRank) and (skillMaxRank == 75 or skillMaxRank == 150 or skillMaxRank == 225 or skillMaxRank == 300) then
+          hadUnmappedOnNonEnglish = true
+        end
+      end
+    end
+
+    -- Supplemental locale-invariant spellbook detection (`IsSpellKnown` / `IsPlayerSpell`):
+    local checkSpellFn = (type(_G.IsSpellKnown) == "function" and _G.IsSpellKnown)
+      or (type(_G.IsPlayerSpell) == "function" and _G.IsPlayerSpell)
+      or nil
+    if checkSpellFn then
+      for profKey, spellList in pairs(PROFESSION_KNOWN_SPELL_IDS) do
+        if baseRanks[profKey] == nil then
+          for _, spID in ipairs(spellList) do
+            local okSp, known = pcall(checkSpellFn, spID)
+            if okSp and known == true then
+              -- Known via spellbook, exact rank unknown on non-English skill line -> mark PARTIAL (rank >= 1)
+              baseRanks[profKey] = 1
+              modifiers[profKey] = 0
+              maxRanks[profKey] = 75
+              hadUnmappedOnNonEnglish = true
+              break
+            end
+          end
+        end
+      end
+    end
+
+    if totalNonHeaderLines == 0 then
+      return {
+        snapshotStatus = "PENDING",
+        source = "skill_lines_headers_collapsed_or_pending",
+        isLinkedView = false,
+        learnedSkills = {},
+        baseRanks = {},
+        effectiveModifiers = {},
+        maxRanks = {},
+        observedAt = nowEpoch,
+      }
+    end
+
+    return {
+      snapshotStatus = (not isEnglish and hadUnmappedOnNonEnglish) and "PARTIAL" or "COMPLETE",
+      source = "classic_skill_lines",
+      isLinkedView = false,
+      learnedSkills = baseRanks,
+      baseRanks = baseRanks,
+      effectiveModifiers = modifiers,
+      maxRanks = maxRanks,
+      observedAt = nowEpoch,
+    }
+  end
+
+  return {
+    snapshotStatus = "PENDING",
+    source = "no_profession_api_available",
+    isLinkedView = false,
+    learnedSkills = {},
+    baseRanks = {},
+    effectiveModifiers = {},
+    maxRanks = {},
+    observedAt = nowEpoch,
+  }
+end
+
+-- Dual-clock item & recipe cooldown converter (`P1.E`):
+-- Converts monotonic `(startTime, duration, enable)` or recipe `remainingSeconds` into UTC server epoch.
+-- `nil` NEVER becomes ready!
+function Compat.NormalizeItemCooldownToServerEpoch(startTime, duration, enable, clocks)
+  clocks = type(clocks) == "table" and clocks or Compat.GetDualClockNow()
+  local serverNow = clocks.serverEpoch
+  local monoNow = clocks.monotonicSec
+
+  if not Compat.IsFiniteNumber(serverNow) or serverNow <= 0 or not Compat.IsFiniteNumber(monoNow) then
+    return { status = "CLOCK_UNAVAILABLE", readyAtServerEpoch = nil }
+  end
+  if startTime == nil or duration == nil or enable == nil then
+    return { status = "UNKNOWN", readyAtServerEpoch = nil, reason = "nil_cooldown_tuple" }
+  end
+  if enable == 0 or enable == false then
+    return { status = "PAUSED_OR_INACTIVE", readyAtServerEpoch = nil }
+  end
+  if not Compat.IsFiniteNumber(startTime) or not Compat.IsFiniteNumber(duration) or startTime < 0 or duration < 0 then
+    return { status = "UNKNOWN", readyAtServerEpoch = nil, reason = "non_finite_cooldown_tuple" }
+  end
+  if startTime == 0 and duration == 0 then
+    return {
+      status = "READY_OBSERVED",
+      remainingSeconds = 0,
+      readyAtServerEpoch = serverNow,
+      observedAtServerEpoch = serverNow,
+    }
+  end
+  local rem = math.max(0, (startTime + duration) - monoNow)
+  local remCeil = math.ceil(rem)
+  return {
+    status = (remCeil == 0) and "READY_OBSERVED" or "ON_COOLDOWN_OBSERVED",
+    remainingSeconds = remCeil,
+    readyAtServerEpoch = serverNow + remCeil,
+    observedAtServerEpoch = serverNow,
+  }
+end
+
+function Compat.NormalizeRecipeCooldownToServerEpoch(rawRemainingSeconds, rowVerified, isLinkedView, clocks, cooldownApiObserved)
+  if isLinkedView == true then
+    return { status = "LINKED_VIEW_IGNORED", readyAtServerEpoch = nil }
+  end
+  if rowVerified ~= true then
+    return { status = "UNKNOWN", readyAtServerEpoch = nil, reason = "recipe_row_unverified" }
+  end
+  if cooldownApiObserved == false then
+    return { status = "UNKNOWN", readyAtServerEpoch = nil, reason = "cooldown_api_unavailable" }
+  end
+  clocks = type(clocks) == "table" and clocks or Compat.GetDualClockNow()
+  local serverNow = clocks.serverEpoch
+  if not Compat.IsFiniteNumber(serverNow) or serverNow <= 0 then
+    return { status = "CLOCK_UNAVAILABLE", readyAtServerEpoch = nil }
+  end
+  -- Astra P0-8: NEVER normalize `nil` cooldown returns to `0` (`READY_OBSERVED`)!
+  if rawRemainingSeconds == nil then
+    return { status = "UNKNOWN", readyAtServerEpoch = nil, reason = "nil_cooldown_value" }
+  end
+  if rawRemainingSeconds == 0 then
+    return {
+      status = "READY_OBSERVED",
+      remainingSeconds = 0,
+      readyAtServerEpoch = serverNow,
+      observedAtServerEpoch = serverNow,
+    }
+  end
+  if not Compat.IsFiniteNumber(rawRemainingSeconds) or rawRemainingSeconds < 0 then
+    return { status = "UNKNOWN", readyAtServerEpoch = nil, reason = "invalid_remaining_seconds" }
+  end
+  local remCeil = math.ceil(rawRemainingSeconds)
+  return {
+    status = "ON_COOLDOWN_OBSERVED",
+    remainingSeconds = remCeil,
+    readyAtServerEpoch = serverNow + remCeil,
+    observedAtServerEpoch = serverNow,
+  }
+end
+
+-- Detailed bag slot snapshot with `bagFamily` for `P0.6` safe consolidation & `P1.C` merchant reconciliation:
+function Compat.SnapshotDetailedPlayerBagSlots()
+  local out = {}
+  local cCont = _G.C_Container
+  local getNumFreeModern = (not Compat.IsSecretOrRestrictedValue(cCont)) and type(cCont) == "table" and cCont.GetContainerNumFreeSlots or nil
+  local getNumFreeLegacy = _G.GetContainerNumFreeSlots
+  local getItemInfoFn = _G.GetItemInfo
+
+  for bagID = 0, 4 do
+    local numSlots = Compat.GetContainerNumSlots(bagID)
+    if numSlots > 0 then
+      local bagFamily = 0
+      if type(getNumFreeModern) == "function" then
+        local okF, _, fam = pcall(getNumFreeModern, bagID)
+        if okF and Compat.IsFiniteNumber(fam) then
+          bagFamily = math.max(0, math.floor(fam))
+        end
+      elseif type(getNumFreeLegacy) == "function" then
+        local okF, _, fam = pcall(getNumFreeLegacy, bagID)
+        if okF and Compat.IsFiniteNumber(fam) then
+          bagFamily = math.max(0, math.floor(fam))
+        end
+      end
+
+      for slotID = 1, numSlots do
+        local info = Compat.GetContainerItemInfo(bagID, slotID)
+        if info and info.hasItem and tonumber(info.itemID) then
+          local itemID = tonumber(info.itemID)
+          local locked = Compat.IsContainerItemLocked(bagID, slotID)
+          local quality, maxStack, equipLoc, sellPrice, classID, subClassID, bindType = nil, nil, nil, nil, nil, nil, nil
+          local metaComplete = false
+
+          if type(getItemInfoFn) == "function" then
+            local okI, _, _, q, _, _, _, _, stCount, eqLoc, _, sp, cID, scID, bType = pcall(getItemInfoFn, info.hyperlink or itemID)
+            if okI and q ~= nil and sp ~= nil then
+              quality = tonumber(q)
+              maxStack = tonumber(stCount)
+              equipLoc = type(eqLoc) == "string" and eqLoc or ""
+              sellPrice = tonumber(sp)
+              classID = tonumber(cID)
+              subClassID = tonumber(scID)
+              bindType = tonumber(bType)
+              metaComplete = true
+            end
+          end
+
+          local canonicalKey = nil
+          if ns.Domain and ns.Domain.MarketIdentity and type(ns.Domain.MarketIdentity.ClassifyItemIdentity) == "function" then
+            local okK, kRes = pcall(ns.Domain.MarketIdentity.ClassifyItemIdentity, {
+              itemID = itemID,
+              itemLink = info.hyperlink,
+              clientClassInfo = classID and { classID = classID, equipLoc = equipLoc } or nil,
+            })
+            if okK and type(kRes) == "table" then
+              canonicalKey = kRes.itemKey
+            end
+          end
+
+          table.insert(out, {
+            bagID = bagID,
+            slotID = slotID,
+            bagFamily = bagFamily,
+            hasItem = true,
+            itemID = itemID,
+            itemKey = canonicalKey,
+            hyperlink = info.hyperlink,
+            stackCount = info.stackCount or 1,
+            maxStack = maxStack or Compat.GetItemMaxStack(itemID),
+            isLocked = locked,
+            isBound = info.isBound,
+            quality = quality,
+            unitSellPrice = sellPrice,
+            classID = classID,
+            subClassID = subClassID,
+            equipLoc = equipLoc,
+            bindType = bindType,
+            metadataComplete = metaComplete,
+          })
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- Stage 6A.2 Redacted Runtime Contract Fixture Capture (`/fh probe` extension):
+-- Strips all player/guild/mail-sender PII while capturing exact `1.60.1.70938` return shapes.
+function Compat.CaptureRedactedContractFixture()
+  local baseProbe = Compat.ProbeEconomyRuntimeCapabilities and Compat.ProbeEconomyRuntimeCapabilities() or {}
+  local profSnap = Compat.CaptureProfessionSnapshot()
+  local clocks = Compat.GetDualClockNow()
+
+  local ahRedactedSample = nil
+  if not Compat.IsInCombat() and ns.State and ns.State.ahOpen == true and type(_G.GetNumAuctionItems) == "function" and type(_G.GetAuctionItemInfo) == "function" then
+    local okCnt, batchCount, totalCount = pcall(_G.GetNumAuctionItems, "list")
+    if okCnt and Compat.IsFiniteNumber(batchCount) then
+      local bc = math.max(0, math.floor(batchCount))
+      local ownerPresentCount = 0
+      local ownerNilCount = 0
+      local sampleRows = {}
+      for idx = 1, math.min(bc, 5) do
+        local okRow, _, _, count, quality, _, _, _, minBid, _, buyoutPrice, bidAmount, _, _, owner, _, saleStatus, itemId =
+          pcall(_G.GetAuctionItemInfo, "list", idx)
+        if okRow then
+          local resolvedID = tonumber(itemId)
+          if (not resolvedID or resolvedID <= 0) and type(_G.GetAuctionItemLink) == "function" then
+            local okLink, link = pcall(_G.GetAuctionItemLink, "list", idx)
+            if okLink and type(link) == "string" then
+              resolvedID = Compat.ExtractItemID(link)
+            end
+          end
+          local hasOwner = (type(owner) == "string" and owner ~= "")
+          if hasOwner then
+            ownerPresentCount = ownerPresentCount + 1
+          else
+            ownerNilCount = ownerNilCount + 1
+          end
+          table.insert(sampleRows, {
+            index = idx,
+            itemID = resolvedID,
+            count = tonumber(count),
+            quality = tonumber(quality),
+            minBid = tonumber(minBid),
+            buyoutPrice = tonumber(buyoutPrice),
+            bidAmount = tonumber(bidAmount),
+            ownerPopulated = hasOwner, -- PII redacted to boolean!
+            saleStatus = tonumber(saleStatus),
+          })
+        end
+      end
+      ahRedactedSample = {
+        batchCount = bc,
+        totalCount = Compat.IsFiniteNumber(totalCount) and math.floor(totalCount) or nil,
+        ownerPresentSampleCount = ownerPresentCount,
+        ownerNilSampleCount = ownerNilCount,
+        rows = sampleRows,
+      }
+    end
+  end
+
+  local mailRedactedInvoices = nil
+  if not Compat.IsInCombat() and ns.State and ns.State.mailOpen == true and type(_G.GetInboxNumItems) == "function" and type(_G.GetInboxInvoiceInfo) == "function" then
+    local okM, numItems = pcall(_G.GetInboxNumItems)
+    if okM and Compat.IsFiniteNumber(numItems) then
+      mailRedactedInvoices = {}
+      for idx = 1, math.min(math.floor(numItems), 10) do
+        local okInv, invType, _, playerName, bid, buyout, deposit, consignment = pcall(_G.GetInboxInvoiceInfo, idx)
+        if okInv and type(invType) == "string" and invType ~= "" then
+          table.insert(mailRedactedInvoices, {
+            mailIndex = idx,
+            invoiceType = invType,
+            counterpartyPresent = (type(playerName) == "string" and playerName ~= ""), -- PII redacted!
+            bid = tonumber(bid),
+            buyout = tonumber(buyout),
+            deposit = tonumber(deposit),
+            consignment = tonumber(consignment),
+          })
+        end
+      end
+    end
+  end
+
+    return {
+      schema = "foreverhub-redacted-runtime-fixture-v1",
+      piiRedacted = true,
+      capturedAtServerEpoch = clocks.serverEpoch,
+      monotonicClockAvailable = (clocks.monotonicSec ~= nil),
+      capabilities = baseProbe,
+      professionSnapshot = {
+        snapshotStatus = profSnap.snapshotStatus,
+        status = profSnap.snapshotStatus,
+        source = profSnap.source,
+        isLinkedView = profSnap.isLinkedView,
+        learnedCount = 0,
+      },
+      auctionPage = ahRedactedSample and {
+        inspectedCount = #(ahRedactedSample.rows or {}),
+        totalCount = ahRedactedSample.totalCount,
+      } or nil,
+      mailInbox = mailRedactedInvoices and {
+        numItems = #mailRedactedInvoices,
+      } or nil,
+      redactedAuctionSample = ahRedactedSample,
+      redactedMailInvoices = mailRedactedInvoices,
+      ahPostProbe = Compat.CaptureRedactedAhPostProbe(),
+      mailPostageAndCodProbe = Compat.CaptureRedactedMailPostageAndCodProbe(),
+    }
+  end
+
+function Compat.ParseCreatureGUIDSafe(rawGuid)
+  if Compat.IsSecretOrRestrictedValue(rawGuid) or type(rawGuid) ~= "string" or rawGuid == "" then
+    return { status = "UNKNOWN_NPC", npcType = nil, npcID = nil }
+  end
+  local unitType, npcIDStr = string.match(rawGuid, "^(Creature)%-%d+%-%d+%-%d+%-%d+%-(%d+)%-[%x]+$")
+  if not unitType then
+    unitType, npcIDStr = string.match(rawGuid, "^(Vehicle)%-%d+%-%d+%-%d+%-%d+%-(%d+)%-[%x]+$")
+  end
+  local npcID = tonumber(npcIDStr)
+  if unitType and Compat.IsFiniteNumber(npcID) and npcID >= 1 and math.floor(npcID) == npcID then
+    return {
+      status = "VERIFIED_NPC_GUID",
+      npcType = string.lower(unitType),
+      npcID = npcID,
+    }
+  end
+  return { status = "UNKNOWN_NPC", npcType = nil, npcID = nil }
+end
+
+-- Stage 7A.1 Redacted AH Post & Deposit Runtime Probe (`GetAuctionDeposit` + `Auctionator` Selling controls):
+function Compat.CaptureRedactedAhPostProbe()
+  local hasGetAuctionDeposit = (type(_G.GetAuctionDeposit) == "function")
+  local hasCalculateAuctionDeposit = (type(_G.CalculateAuctionDeposit) == "function")
+  local hasGetAuctionSellItemInfo = (type(_G.GetAuctionSellItemInfo) == "function")
+  local atrSell = _G.AuctionatorSellingFrame
+  local hasAtrSellingFrame = (not Compat.IsSecretOrRestrictedValue(atrSell)) and (atrSell ~= nil)
+  local hasAtrStackPrice = false
+  if hasAtrSellingFrame and type(atrSell) == "table" and type(atrSell.SaleItemFrame) == "table" then
+    local sif = atrSell.SaleItemFrame
+    hasAtrStackPrice = (type(sif.StackPrice) == "table" and type(sif.StackPrice.GetAmount) == "function")
+      or (type(sif.Price) == "table" and type(sif.Price.GetAmount) == "function")
+  end
+
+  local npcGuidInfo = { status = "UNKNOWN_NPC", npcType = nil, npcID = nil }
+  if not Compat.IsInCombat() and type(_G.UnitGUID) == "function" then
+    local okG, rawG = pcall(_G.UnitGUID, "npc")
+    if (not okG or not rawG) then
+      okG, rawG = pcall(_G.UnitGUID, "target")
+    end
+    if okG and rawG then
+      npcGuidInfo = Compat.ParseCreatureGUIDSafe(rawG)
+    end
+  end
+
+  local slottedSellItem = nil
+  local durationQuotes = nil
+  if not Compat.IsInCombat() and ns.State and ns.State.ahOpen == true and hasGetAuctionSellItemInfo then
+    local okS, sName, _, sCount, sQuality, _, sVendorPrice, sPricePerUnit, sStackCount, sTotalCount, sItemID =
+      pcall(_G.GetAuctionSellItemInfo)
+    if okS and sName ~= nil then
+      slottedSellItem = {
+        slotted = true,
+        count = Compat.IsFiniteNumber(sCount) and math.floor(sCount) or nil,
+        quality = Compat.IsFiniteNumber(sQuality) and math.floor(sQuality) or nil,
+        vendorPriceCopper = Compat.IsFiniteNumber(sVendorPrice) and math.floor(sVendorPrice) or nil,
+        pricePerUnitCopper = Compat.IsFiniteNumber(sPricePerUnit) and math.floor(sPricePerUnit) or nil,
+        stackCount = Compat.IsFiniteNumber(sStackCount) and math.floor(sStackCount) or nil,
+        totalCount = Compat.IsFiniteNumber(sTotalCount) and math.floor(sTotalCount) or nil,
+        itemID = Compat.IsFiniteNumber(sItemID) and math.floor(sItemID) or nil,
+      }
+      if hasGetAuctionDeposit then
+        durationQuotes = {}
+        local probeStack = math.max(1, tonumber(slottedSellItem.count) or 1)
+        for durIdx = 1, 3 do
+          local okD1, qSingle = pcall(_G.GetAuctionDeposit, durIdx, 100, 200, probeStack, 1)
+          local okD2, qBatch2 = pcall(_G.GetAuctionDeposit, durIdx, 100, 200, probeStack, 2)
+          durationQuotes[durIdx] = {
+            durationIndex = durIdx,
+            foreverDisplayHours = (durIdx == 1 and 2) or (durIdx == 2 and 8) or 24,
+            singleStackCallOk = okD1,
+            singleStackDepositCopper = (okD1 and Compat.IsFiniteNumber(qSingle)) and math.floor(qSingle) or nil,
+            twoStackCallOk = okD2,
+            twoStackDepositCopper = (okD2 and Compat.IsFiniteNumber(qBatch2)) and math.floor(qBatch2) or nil,
+          }
+        end
+      end
+    else
+      slottedSellItem = { slotted = false }
+    end
+  end
+
+  return {
+    piiRedacted = true,
+    hasGetAuctionDeposit = hasGetAuctionDeposit,
+    hasCalculateAuctionDeposit = hasCalculateAuctionDeposit,
+    hasGetAuctionSellItemInfo = hasGetAuctionSellItemInfo,
+    hasAuctionatorSellingFrame = hasAtrSellingFrame,
+    hasAuctionatorStackPriceReader = hasAtrStackPrice,
+    auctioneerNpc = npcGuidInfo,
+    slottedSellItem = slottedSellItem,
+    durationDepositProbe = durationQuotes,
+  }
+end
+
+-- Stage 7A.1 Redacted Mail Postage & COD Runtime Probe:
+function Compat.CaptureRedactedMailPostageAndCodProbe()
+  local hasGetSendMailPrice = (type(_G.GetSendMailPrice) == "function")
+  local hasGetInboxHeaderInfo = (type(_G.GetInboxHeaderInfo) == "function")
+  local hasGetInboxItem = (type(_G.GetInboxItem) == "function")
+  local sendMailPriceCopper = nil
+  if not Compat.IsInCombat() and ns.State and ns.State.mailOpen == true and hasGetSendMailPrice then
+    local okP, pVal = pcall(_G.GetSendMailPrice)
+    if okP and Compat.IsFiniteNumber(pVal) and pVal >= 0 then
+      sendMailPriceCopper = math.floor(pVal)
+    end
+  end
+
+  local inboxSummary = nil
+  if not Compat.IsInCombat() and ns.State and ns.State.mailOpen == true and type(_G.GetInboxNumItems) == "function" and hasGetInboxHeaderInfo then
+    local okN, numItems = pcall(_G.GetInboxNumItems)
+    if okN and Compat.IsFiniteNumber(numItems) then
+      local n = math.min(100, math.max(0, math.floor(numItems)))
+      local codCount = 0
+      local attachmentRowCount = 0
+      local incompleteCount = 0
+      for idx = 1, n do
+        local okH, _, _, sender, subject, money, codAmount, _, hasItem = pcall(_G.GetInboxHeaderInfo, idx)
+        if not okH or (sender == nil and subject == nil) then
+          incompleteCount = incompleteCount + 1
+        else
+          if Compat.IsFiniteNumber(codAmount) and codAmount > 0 then
+            codCount = codCount + 1
+          end
+          if (Compat.IsFiniteNumber(hasItem) and hasItem > 0) or hasItem == true then
+            attachmentRowCount = attachmentRowCount + 1
+          end
+        end
+      end
+      inboxSummary = {
+        inspectedCount = n,
+        codRowCount = codCount,
+        attachmentRowCount = attachmentRowCount,
+        incompleteHeaderCount = incompleteCount,
+      }
+    end
+  end
+
+  return {
+    piiRedacted = true,
+    hasGetSendMailPrice = hasGetSendMailPrice,
+    hasGetInboxHeaderInfo = hasGetInboxHeaderInfo,
+    hasGetInboxItem = hasGetInboxItem,
+    sendMailPriceCopper = sendMailPriceCopper,
+    inboxSummary = inboxSummary,
+  }
+end
+
+-- ============================================================================
+-- KI-ST-001 Strict Secret-Safe Classifier & Instance Identity Probe (ST-01, ST-04)
+-- Classifies each input as `"readable" | "missing" | "restricted" | "errored" | "unknown"`
+-- BEFORE comparing, formatting, indexing, arithmetic, or storing it.
+-- - Unavailable `_G.issecretvalue` on a `secretCapable` path returns `"unknown"`.
+-- - Throwing `_G.issecretvalue` returns `"errored"`.
+-- - Preserves legitimate `false` and `0` ONLY after validation.
+-- - Never retains raw secret/hostile payloads on non-readable results.
+-- ============================================================================
+
+function Compat.ClassifySecretSafeValue(rawVal, opts)
+  opts = type(opts) == "table" and opts or nil
+  local secretCapable = (opts == nil) or (opts.secretCapable ~= false)
+
+  local okLookup, detFn = pcall(function()
+    return _G.issecretvalue
+  end)
+  if not okLookup then
+    return { status = "errored", reason = "secret_detector_lookup_threw", value = nil }
+  end
+
+  local hasDetector = (type(detFn) == "function")
+  if secretCapable and not hasDetector then
+    return { status = "unknown", reason = "secret_detector_unavailable", value = nil }
+  end
+
+  local rawEq = _G.rawequal
+  if hasDetector then
+    local okDet, isSec = pcall(detFn, rawVal)
+    if not okDet then
+      return { status = "errored", reason = "secret_detector_threw", value = nil }
+    end
+    if rawEq(isSec, true) then
+      return { status = "restricted", reason = "secret_value", value = nil }
+    end
+    if not rawEq(isSec, false) then
+      return { status = "unknown", reason = "secret_detector_non_boolean", value = nil }
+    end
+  end
+
+  if rawEq(rawVal, nil) then
+    return { status = "missing", reason = "nil_value", value = nil }
+  end
+
+  local valType = type(rawVal)
+  local expectedType = opts and opts.expectedType or nil
+  if expectedType ~= nil and valType ~= expectedType then
+    return { status = "errored", reason = "unexpected_type_" .. tostring(valType), value = nil }
+  end
+
+  if valType == "boolean" then
+    if rawEq(rawVal, true) then
+      return { status = "readable", value = true, valueType = "boolean" }
+    elseif rawEq(rawVal, false) then
+      return { status = "readable", value = false, valueType = "boolean" }
+    end
+    return { status = "errored", reason = "invalid_boolean", value = nil }
+  elseif valType == "number" then
+    local okNum, cleanNum = pcall(function()
+      if rawVal ~= rawVal or rawVal == math.huge or rawVal == -math.huge then
+        error("non_finite")
+      end
+      return rawVal + 0
+    end)
+    if not okNum or type(cleanNum) ~= "number" then
+      return { status = "errored", reason = "non_finite_or_hostile_number", value = nil }
+    end
+    return { status = "readable", value = cleanNum, valueType = "number" }
+  elseif valType == "string" then
+    local okStr, isEmpty = pcall(function()
+      return rawVal == ""
+    end)
+    if not okStr or type(isEmpty) ~= "boolean" then
+      return { status = "errored", reason = "hostile_string", value = nil }
+    end
+    if isEmpty and not (opts and opts.allowEmptyString == true) then
+      return { status = "missing", reason = "empty_string", value = nil }
+    end
+    return { status = "readable", value = rawVal, valueType = "string" }
+  elseif valType == "table" then
+    return { status = "readable", value = rawVal, valueType = "table" }
+  end
+
+  return { status = "errored", reason = "unsupported_type_" .. tostring(valType), value = nil }
+end
+
+function Compat.CallAndClassifySecretSafe(getterFn, opts)
+  if type(getterFn) ~= "function" then
+    return { status = "missing", reason = "missing_api", value = nil }
+  end
+  local okCall, rawVal = pcall(getterFn)
+  if not okCall then
+    return { status = "errored", reason = "api_call_threw", value = nil }
+  end
+  return Compat.ClassifySecretSafeValue(rawVal, opts)
+end
+
+function Compat.ClassifySecretSafeField(tbl, fieldKey, opts)
+  local tblCheck = Compat.ClassifySecretSafeValue(tbl, {
+    secretCapable = (type(opts) == "table") and (opts.secretCapable ~= false) or true,
+    expectedType = "table",
+  })
+  if tblCheck.status ~= "readable" then
+    return { status = tblCheck.status, reason = tblCheck.reason or "parent_table_unreadable", value = nil }
+  end
+  local okField, rawField = pcall(function()
+    return tbl[fieldKey]
+  end)
+  if not okField then
+    return { status = "errored", reason = "field_index_threw", value = nil }
+  end
+  return Compat.ClassifySecretSafeValue(rawField, opts)
+end
+
+-- Probes both return #8 (`instanceID`) and return #9 (`instanceGroupSize`) of `GetInstanceInfo()`
+-- alongside `IsInInstance()` and validates exact Sunken Temple identity (`instanceType == "party"` and `instanceID == 109`).
+-- Localized instance names NEVER arm Sunken Temple without verified numeric `instanceID == 109` (ST-01).
+function Compat.ProbeSunkenTempleInstanceIdentity(explicitOverride)
+  local stData = ns.SunkenTempleData
+  local targetInstanceID = (stData and tonumber(stData.SUNKEN_TEMPLE_INSTANCE_ID)) or 109
+  local nameHints = (stData and stData.LOCALIZED_NAME_HINTS) or {
+    ["the temple of atal'hakkar"] = true,
+    ["temple of atal'hakkar"] = true,
+    ["sunken temple"] = true,
+  }
+
+  local bInRaw, isInTypeRaw = nil, nil
+  local hasIsInAPI = false
+  local isInCallOk = false
+  if type(explicitOverride) == "table" and explicitOverride.useExplicit == true then
+    hasIsInAPI = true
+    isInCallOk = true
+    bInRaw = explicitOverride.inInstance
+    isInTypeRaw = explicitOverride.isInInstanceType
+  elseif type(_G.IsInInstance) == "function" then
+    hasIsInAPI = true
+    local okI, r1, r2 = pcall(_G.IsInInstance)
+    isInCallOk = okI
+    if okI then
+      bInRaw, isInTypeRaw = r1, r2
+    end
+  end
+
+  local hasGetInfoAPI = false
+  local getInfoCallOk = false
+  local gName, gType, gMaxPlayers, gReturn8, gReturn9 = nil, nil, nil, nil, nil
+  if type(explicitOverride) == "table" and explicitOverride.useExplicit == true then
+    hasGetInfoAPI = true
+    getInfoCallOk = true
+    gName = explicitOverride.name
+    gType = explicitOverride.infoInstanceType
+    gMaxPlayers = explicitOverride.maxPlayers
+    gReturn8 = explicitOverride.return8_instanceID
+    gReturn9 = explicitOverride.return9_instanceGroupSize
+  elseif type(_G.GetInstanceInfo) == "function" then
+    hasGetInfoAPI = true
+    local okG, r1, r2, _r3, _r4, r5, _r6, _r7, r8, r9 = pcall(_G.GetInstanceInfo)
+    getInfoCallOk = okG
+    if okG then
+      gName, gType, gMaxPlayers, gReturn8, gReturn9 = r1, r2, r5, r8, r9
+    end
+  end
+
+  local nonSecretMetaOptsBool = { secretCapable = false }
+  local nonSecretMetaOptsStr = { secretCapable = false, expectedType = "string" }
+  local nonSecretMetaOptsNum = { secretCapable = false, expectedType = "number" }
+
+  local inInstStatus = "missing"
+  local inInstBool = nil
+  if not hasIsInAPI then
+    inInstStatus = "missing"
+  elseif not isInCallOk then
+    inInstStatus = "errored"
+  else
+    local c = Compat.ClassifySecretSafeValue(bInRaw, nonSecretMetaOptsBool)
+    inInstStatus = c.status
+    if c.status == "readable" then
+      if c.valueType == "boolean" then
+        inInstBool = c.value
+      elseif c.valueType == "number" then
+        inInstBool = (c.value == 1)
+      else
+        inInstStatus = "errored"
+      end
+    end
+  end
+
+  local isInTypeRes = (not hasIsInAPI and { status = "missing" })
+    or (not isInCallOk and { status = "errored" })
+    or Compat.ClassifySecretSafeValue(isInTypeRaw, nonSecretMetaOptsStr)
+
+  local nameRes = (not hasGetInfoAPI and { status = "missing" })
+    or (not getInfoCallOk and { status = "errored" })
+    or Compat.ClassifySecretSafeValue(gName, nonSecretMetaOptsStr)
+
+  local infoTypeRes = (not hasGetInfoAPI and { status = "missing" })
+    or (not getInfoCallOk and { status = "errored" })
+    or Compat.ClassifySecretSafeValue(gType, nonSecretMetaOptsStr)
+
+  local maxPlayersRes = (not hasGetInfoAPI and { status = "missing" })
+    or (not getInfoCallOk and { status = "errored" })
+    or Compat.ClassifySecretSafeValue(gMaxPlayers, nonSecretMetaOptsNum)
+
+  local return8Res = (not hasGetInfoAPI and { status = "missing" })
+    or (not getInfoCallOk and { status = "errored" })
+    or Compat.ClassifySecretSafeValue(gReturn8, nonSecretMetaOptsNum)
+
+  local return9Res = (not hasGetInfoAPI and { status = "missing" })
+    or (not getInfoCallOk and { status = "errored" })
+    or Compat.ClassifySecretSafeValue(gReturn9, nonSecretMetaOptsNum)
+
+  local localizedNameHintMatched = false
+  if nameRes.status == "readable" and type(nameRes.value) == "string" then
+    local lowName = string.lower(nameRes.value)
+    if nameHints[lowName] == true then
+      localizedNameHintMatched = true
+    end
+  end
+
+  -- Determine instance presence & type strictly fail-closed:
+  if inInstStatus ~= "readable" then
+    return {
+      verifiedSunkenTemple = false,
+      classification = "ambiguous_instance_state",
+      inInstanceStatus = inInstStatus,
+      inInstance = nil,
+      isInTypeStatus = isInTypeRes.status,
+      infoTypeStatus = infoTypeRes.status,
+      nameStatus = nameRes.status,
+      return8Status = return8Res.status,
+      return8Value = return8Res.status == "readable" and return8Res.value or nil,
+      return9Status = return9Res.status,
+      return9Value = return9Res.status == "readable" and return9Res.value or nil,
+      maxPlayersStatus = maxPlayersRes.status,
+      localizedNameHintMatched = localizedNameHintMatched,
+    }
+  end
+
+  if inInstBool == false then
+    return {
+      verifiedSunkenTemple = false,
+      classification = "outside_instance",
+      inInstanceStatus = "readable",
+      inInstance = false,
+      isInTypeStatus = isInTypeRes.status,
+      infoTypeStatus = infoTypeRes.status,
+      nameStatus = nameRes.status,
+      return8Status = return8Res.status,
+      return8Value = return8Res.status == "readable" and return8Res.value or nil,
+      return9Status = return9Res.status,
+      return9Value = return9Res.status == "readable" and return9Res.value or nil,
+      maxPlayersStatus = maxPlayersRes.status,
+      localizedNameHintMatched = localizedNameHintMatched,
+    }
+  end
+
+  local tA = (isInTypeRes.status == "readable") and string.lower(isInTypeRes.value) or nil
+  local tB = (infoTypeRes.status == "readable") and string.lower(infoTypeRes.value) or nil
+  if tA ~= nil and tB ~= nil and tA ~= tB then
+    return {
+      verifiedSunkenTemple = false,
+      classification = "instance_type_conflict",
+      inInstanceStatus = "readable",
+      inInstance = true,
+      instanceType = nil,
+      isInTypeStatus = isInTypeRes.status,
+      infoTypeStatus = infoTypeRes.status,
+      nameStatus = nameRes.status,
+      return8Status = return8Res.status,
+      return8Value = return8Res.status == "readable" and return8Res.value or nil,
+      return9Status = return9Res.status,
+      return9Value = return9Res.status == "readable" and return9Res.value or nil,
+      maxPlayersStatus = maxPlayersRes.status,
+      localizedNameHintMatched = localizedNameHintMatched,
+    }
+  end
+
+  local effType = tB or tA
+  if effType == nil then
+    return {
+      verifiedSunkenTemple = false,
+      classification = "ambiguous_instance_type",
+      inInstanceStatus = "readable",
+      inInstance = true,
+      instanceType = nil,
+      isInTypeStatus = isInTypeRes.status,
+      infoTypeStatus = infoTypeRes.status,
+      nameStatus = nameRes.status,
+      return8Status = return8Res.status,
+      return8Value = return8Res.status == "readable" and return8Res.value or nil,
+      return9Status = return9Res.status,
+      return9Value = return9Res.status == "readable" and return9Res.value or nil,
+      maxPlayersStatus = maxPlayersRes.status,
+      localizedNameHintMatched = localizedNameHintMatched,
+    }
+  end
+
+  if effType ~= "party" then
+    return {
+      verifiedSunkenTemple = false,
+      classification = "instance_type_mismatch",
+      inInstanceStatus = "readable",
+      inInstance = true,
+      instanceType = effType,
+      isInTypeStatus = isInTypeRes.status,
+      infoTypeStatus = infoTypeRes.status,
+      nameStatus = nameRes.status,
+      return8Status = return8Res.status,
+      return8Value = return8Res.status == "readable" and return8Res.value or nil,
+      return9Status = return9Res.status,
+      return9Value = return9Res.status == "readable" and return9Res.value or nil,
+      maxPlayersStatus = maxPlayersRes.status,
+      localizedNameHintMatched = localizedNameHintMatched,
+    }
+  end
+
+  -- Require return #8 (`instanceID`) to be a readable positive integer (never trust return #9 or name alone!).
+  if return8Res.status ~= "readable"
+    or type(return8Res.value) ~= "number"
+    or math.floor(return8Res.value) ~= return8Res.value
+    or return8Res.value <= 0
+  then
+    return {
+      verifiedSunkenTemple = false,
+      classification = "ambiguous_unresolved_identity",
+      inInstanceStatus = "readable",
+      inInstance = true,
+      instanceType = effType,
+      isInTypeStatus = isInTypeRes.status,
+      infoTypeStatus = infoTypeRes.status,
+      nameStatus = nameRes.status,
+      return8Status = return8Res.status,
+      return8Value = nil,
+      return9Status = return9Res.status,
+      return9Value = return9Res.status == "readable" and return9Res.value or nil,
+      maxPlayersStatus = maxPlayersRes.status,
+      localizedNameHintMatched = localizedNameHintMatched,
+    }
+  end
+
+  local instID = math.floor(return8Res.value)
+  if instID ~= targetInstanceID then
+    return {
+      verifiedSunkenTemple = false,
+      classification = "other_instance",
+      inInstanceStatus = "readable",
+      inInstance = true,
+      instanceType = effType,
+      instanceID = instID,
+      isInTypeStatus = isInTypeRes.status,
+      infoTypeStatus = infoTypeRes.status,
+      nameStatus = nameRes.status,
+      return8Status = "readable",
+      return8Value = instID,
+      return9Status = return9Res.status,
+      return9Value = return9Res.status == "readable" and return9Res.value or nil,
+      maxPlayersStatus = maxPlayersRes.status,
+      localizedNameHintMatched = localizedNameHintMatched,
+    }
+  end
+
+  return {
+    verifiedSunkenTemple = true,
+    classification = "verified_sunken_temple",
+    inInstanceStatus = "readable",
+    inInstance = true,
+    instanceType = effType,
+    instanceID = instID,
+    instanceName = (nameRes.status == "readable") and nameRes.value or nil,
+    isInTypeStatus = isInTypeRes.status,
+    infoTypeStatus = infoTypeRes.status,
+    nameStatus = nameRes.status,
+    return8Status = "readable",
+    return8Value = instID,
+    return9Status = return9Res.status,
+    return9Value = return9Res.status == "readable" and return9Res.value or nil,
+    maxPlayersStatus = maxPlayersRes.status,
+    localizedNameHintMatched = localizedNameHintMatched,
+  }
+end
+
+-- ============================================================================
+-- Interface 16001 Restricted CallbackEvent Registration Guard
+-- In WoW: Forever (12.0-derived runtime), calling `Frame:RegisterEvent` on a
+-- `HasRestrictions = true, CallbackEvent = true` event (e.g. `COMBAT_LOG_EVENT_UNFILTERED`)
+-- fires C++ `ADDON_ACTION_FORBIDDEN` EVEN INSIDE `pcall(...)` and taints
+-- `Enum.ForbiddenAspect.EventRegistrations` on the frame!
+-- Always pre-screen via denylist + `C_EventUtils` BEFORE calling `RegisterEvent`.
+-- ============================================================================
+
+Compat.FORBIDDEN_CALLBACK_EVENTS = {
+  ["COMBAT_LOG_EVENT_UNFILTERED"] = true,
+  ["COMBAT_LOG_EVENT"] = true,
+  ["ENCOUNTER_STATE_CHANGED"] = true,
+}
+
+local function isFrameObject(f)
+  local t = type(f)
+  return t == "table" or t == "userdata"
+end
+
+function Compat.IsFrameEventRegistrable(eventName)
+  if type(eventName) ~= "string" or eventName == "" then
+    return false, "invalid_event_name"
+  end
+  if Compat.FORBIDDEN_CALLBACK_EVENTS[eventName] == true then
+    return false, "restricted_callback_event"
+  end
+  if type(_G.C_EventUtils) == "table" then
+    if type(_G.C_EventUtils.IsCallbackEvent) == "function" then
+      local okCb, isCb = pcall(_G.C_EventUtils.IsCallbackEvent, eventName)
+      if okCb and isCb == true then
+        return false, "callback_event_restricted"
+      end
+    end
+    if type(_G.C_EventUtils.IsEventValid) == "function" then
+      local okValid, isValid = pcall(_G.C_EventUtils.IsEventValid, eventName)
+      if okValid and isValid == false then
+        return false, "invalid_event_for_client"
+      end
+    end
+  end
+  return true, "ok"
+end
+
+function Compat.SafeRegisterFrameEvent(frame, eventName)
+  if not isFrameObject(frame) then
+    return false, "missing_event_frame"
+  end
+  local canReg, reason = Compat.IsFrameEventRegistrable(eventName)
+  if not canReg then
+    return false, reason
+  end
+  local okLookup, regFn = pcall(function()
+    return frame.RegisterEvent
+  end)
+  if not okLookup or type(regFn) ~= "function" then
+    return false, "missing_register_method"
+  end
+  local okReg, resReg = pcall(regFn, frame, eventName)
+  if not okReg or resReg == false then
+    return false, "registration_rejected"
+  end
+  return true, "registered"
+end
+
+function Compat.SafeRegisterFrameUnitEvent(frame, eventName, unitToken)
+  if not isFrameObject(frame) then
+    return false, "missing_event_frame"
+  end
+  local canReg, reason = Compat.IsFrameEventRegistrable(eventName)
+  if not canReg then
+    return false, reason
+  end
+  local okLookupU, unitRegFn = pcall(function()
+    return frame.RegisterUnitEvent
+  end)
+  if okLookupU and type(unitRegFn) == "function" then
+    local okRU, resRU = pcall(unitRegFn, frame, eventName, unitToken)
+    if okRU and resRU ~= false then
+      return true, "registered_unit_" .. tostring(unitToken)
+    end
+    return false, "registration_rejected"
+  end
+  local okReg, regReason = Compat.SafeRegisterFrameEvent(frame, eventName)
+  if okReg then
+    return true, "registered_global"
+  end
+  return false, regReason
 end

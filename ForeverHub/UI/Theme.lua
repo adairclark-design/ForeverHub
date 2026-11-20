@@ -49,37 +49,44 @@ Theme.METRICS = {
   hudArrowLaneHeight = 36,
 }
 
--- Exact Astra v0.8.0 Color Tokens (RGBA + WoW |cffRRGGBB hex)
+-- Sanctuary Opaque-Readable Palette (foreverhub.cc obsidian/gold/crystal/arcane tokens)
+Theme.PALETTE_ID = "foreverhub-sanctuary-v1"
+
 Theme.COLORS = {
   surface = {
-    window = { 0.063, 0.075, 0.090, 0.98, hex = "101317" },
-    card = { 0.090, 0.106, 0.125, 1.00, hex = "171B20" },
-    elevated = { 0.122, 0.141, 0.165, 1.00, hex = "1F242A" },
-    hover = { 0.157, 0.180, 0.208, 1.00, hex = "282E35" },
-    selected = { 0.157, 0.208, 0.251, 1.00, hex = "283540" },
-    reserved = { 0.137, 0.196, 0.176, 1.00, hex = "23322D" },
+    window = { 0.035, 0.055, 0.082, 0.98, hex = "090E15" },
+    card = { 0.051, 0.075, 0.102, 1.00, hex = "0D131A" },
+    elevated = { 0.063, 0.090, 0.125, 1.00, hex = "101720" },
+    hover = { 0.086, 0.125, 0.173, 1.00, hex = "16202C" },
+    selected = { 0.098, 0.153, 0.212, 1.00, hex = "192736" },
+    reserved = { 0.071, 0.137, 0.169, 1.00, hex = "12232B" },
   },
   border = {
-    default = { 0.267, 0.302, 0.341, 1.00, hex = "444D57" },
-    subtle = { 0.173, 0.200, 0.231, 1.00, hex = "2C333B" },
+    default = { 0.227, 0.286, 0.361, 1.00, hex = "3A495C" },
+    subtle = { 0.122, 0.165, 0.220, 1.00, hex = "1F2A38" },
+    gold = { 0.843, 0.737, 0.518, 1.00, hex = "D7BC84" },
   },
   text = {
-    primary = { 0.933, 0.910, 0.855, 1.00, hex = "EEE8DA" },
-    secondary = { 0.737, 0.769, 0.800, 1.00, hex = "BCC4CC" },
-    muted = { 0.569, 0.616, 0.663, 1.00, hex = "919DA9" },
-    onAccent = { 0.063, 0.075, 0.090, 1.00, hex = "101317" },
+    primary = { 0.957, 0.937, 0.902, 1.00, hex = "F4EFE6" },
+    secondary = { 0.776, 0.816, 0.863, 1.00, hex = "C6D0DC" },
+    muted = { 0.557, 0.612, 0.682, 1.00, hex = "8E9CAE" },
+    onAccent = { 0.035, 0.055, 0.082, 1.00, hex = "090E15" },
   },
   accent = {
-    gold = { 0.847, 0.714, 0.416, 1.00, hex = "D8B66A" },
-    goldHover = { 0.914, 0.788, 0.502, 1.00, hex = "E9C980" },
+    gold = { 0.953, 0.824, 0.549, 1.00, hex = "F3D28C" },
+    goldMuted = { 0.843, 0.737, 0.518, 1.00, hex = "D7BC84" },
+    goldHover = { 0.980, 0.878, 0.651, 1.00, hex = "FAE0A6" },
+    crystal = { 0.361, 0.882, 1.000, 1.00, hex = "5CE1FF" },
+    arcane = { 0.400, 0.322, 0.557, 1.00, hex = "66528E" },
   },
   status = {
     ready = { 0.494, 0.827, 0.635, 1.00, hex = "7ED3A2" },
-    reserved = { 0.561, 0.749, 0.890, 1.00, hex = "8FBFE3" },
+    reserved = { 0.361, 0.882, 1.000, 1.00, hex = "5CE1FF" },
     bank = { 0.486, 0.796, 0.796, 1.00, hex = "7CCBCB" },
-    buy = { 0.882, 0.718, 0.486, 1.00, hex = "E1B77C" },
+    buy = { 0.953, 0.824, 0.549, 1.00, hex = "F3D28C" },
     warning = { 0.949, 0.769, 0.376, 1.00, hex = "F2C460" },
     danger = { 0.914, 0.541, 0.502, 1.00, hex = "E98A80" },
+    research = { 0.616, 0.525, 0.800, 1.00, hex = "9D86CC" },
   },
 }
 
@@ -108,6 +115,7 @@ Theme.TEXTURE_PATHS = {
   pinRing = "Interface\\AddOns\\ForeverHub\\Textures\\PinRing.tga",
   pinGlow = "Interface\\AddOns\\ForeverHub\\Textures\\PinGlow.tga",
   coinGlyphs = "Interface\\AddOns\\ForeverHub\\Textures\\CoinGlyphs.tga",
+  sanctuaryChrome = "Interface\\AddOns\\ForeverHub\\Textures\\SanctuaryChrome.tga",
   navigationArrow = "Interface\\AddOns\\ForeverHub\\Textures\\NavigationArrow.tga",
 }
 
@@ -115,6 +123,7 @@ Theme.fontObjects = {}
 Theme.appliedFontScale = nil
 Theme.customMeasureFn = nil
 Theme.coinIconsVerified = nil
+Theme.sanctuaryChromeVerified = nil
 
 function Theme.ResolveToken(tokenOrTable)
   if type(tokenOrTable) == "table" and type(tokenOrTable[1]) == "number" then
@@ -439,4 +448,172 @@ function Theme.FormatMoney(copper, opts)
     return Theme.Colorize(opts.colorToken, prefix .. neg) .. table.concat(parts, " ")
   end
   return body
+end
+
+local function srgbChannelToLinear(ch)
+  local c = math.max(0.0, math.min(1.0, tonumber(ch) or 0.0))
+  if c <= 0.04045 then
+    return c / 12.92
+  end
+  return ((c + 0.055) / 1.055) ^ 2.4
+end
+
+function Theme.ComputeContrastRatio(tokenA, tokenB)
+  local a = Theme.ResolveToken(tokenA)
+  local b = Theme.ResolveToken(tokenB)
+  local lumA = 0.2126 * srgbChannelToLinear(a[1]) + 0.7152 * srgbChannelToLinear(a[2]) + 0.0722 * srgbChannelToLinear(a[3])
+  local lumB = 0.2126 * srgbChannelToLinear(b[1]) + 0.7152 * srgbChannelToLinear(b[2]) + 0.0722 * srgbChannelToLinear(b[3])
+  local lighter = math.max(lumA, lumB)
+  local darker = math.min(lumA, lumB)
+  return (lighter + 0.05) / (darker + 0.05)
+end
+
+function Theme.CanUseSanctuaryChrome()
+  if Theme.sanctuaryChromeVerified ~= nil then
+    return Theme.sanctuaryChromeVerified
+  end
+  if type(_G.UIParent) ~= "table" or type(_G.UIParent.CreateTexture) ~= "function" then
+    Theme.sanctuaryChromeVerified = false
+    return false
+  end
+  local ok, probe = pcall(_G.UIParent.CreateTexture, _G.UIParent, nil, "BACKGROUND")
+  if not ok or type(probe) ~= "table" or type(probe.SetTexture) ~= "function" or type(probe.GetTexture) ~= "function" or type(probe.SetTexCoord) ~= "function" then
+    if probe and type(probe.Hide) == "function" then
+      pcall(probe.Hide, probe)
+    end
+    Theme.sanctuaryChromeVerified = false
+    return false
+  end
+  pcall(probe.SetTexture, probe, Theme.TEXTURE_PATHS.sanctuaryChrome)
+  local loaded = nil
+  local okGet, texVal = pcall(probe.GetTexture, probe)
+  if okGet then
+    loaded = texVal
+  end
+  if type(probe.Hide) == "function" then
+    pcall(probe.Hide, probe)
+  end
+  Theme.sanctuaryChromeVerified = (loaded ~= nil)
+  return Theme.sanctuaryChromeVerified
+end
+
+function Theme.ApplySanctuaryChromeCell(tex, col, row, fallbackToken, alpha)
+  if type(tex) ~= "table" then
+    return false, "invalid_texture"
+  end
+  local r, g, b, a = Theme.UnpackRGBA(fallbackToken or "border.gold", alpha)
+  if Theme.CanUseSanctuaryChrome() and type(tex.SetTexture) == "function" and type(tex.SetTexCoord) == "function" then
+    pcall(tex.SetTexture, tex, Theme.TEXTURE_PATHS.sanctuaryChrome)
+    -- Half-texel inset inside the 8px extruded gutter on the 256x256 (4x4 of 64x64) atlas:
+    local u1 = (col * 64 + 8.5) / 256.0
+    local u2 = ((col + 1) * 64 - 8.5) / 256.0
+    local v1 = (row * 64 + 8.5) / 256.0
+    local v2 = ((row + 1) * 64 - 8.5) / 256.0
+    pcall(tex.SetTexCoord, tex, u1, u2, v1, v2)
+    if type(tex.SetVertexColor) == "function" then
+      pcall(tex.SetVertexColor, tex, 1, 1, 1, a)
+    end
+    return true, "atlas_loaded"
+  end
+  if type(tex.SetColorTexture) == "function" then
+    pcall(tex.SetColorTexture, tex, r, g, b, a)
+  elseif type(tex.SetTexture) == "function" then
+    pcall(tex.SetTexture, tex, r, g, b, a)
+  end
+  return true, "solid_rgba_fallback"
+end
+
+-- Operation-specific UI microbenchmark across 760x520 @ 1.25x, missing-texture fallback, combat lockdown, and resize.
+function Theme.RunMicrobenchmarkSuite(opts)
+  opts = type(opts) == "table" and opts or {}
+  local iterations = math.max(1, math.floor(tonumber(opts.iterations) or 25))
+  local clockFn = (type(_G.debugprofilestop) == "function" and _G.debugprofilestop) or nil
+  local function nowMs()
+    if clockFn then
+      return tonumber(clockFn()) or 0
+    end
+    if type(_G.os) == "table" and type(_G.os.clock) == "function" then
+      return _G.os.clock() * 1000.0
+    end
+    return 0
+  end
+
+  local memBeforeKB = (type(_G.collectgarbage) == "function" and tonumber(_G.collectgarbage("count"))) or 0
+  local startMs = nowMs()
+
+  local savedScale = nil
+  if ns.State and type(ns.State.GetWorkspaceUIState) == "function" then
+    local okS, st = pcall(ns.State.GetWorkspaceUIState)
+    if okS and type(st) == "table" then
+      savedScale = st.textScale
+      st.textScale = 1.25
+    end
+  end
+
+  local savedChrome = Theme.sanctuaryChromeVerified
+  Theme.sanctuaryChromeVerified = false -- exercise missing-texture solid RGBA fallback path
+  local fallbackTexCalls = 0
+  local dummyTex = {
+    SetColorTexture = function()
+      fallbackTexCalls = fallbackTexCalls + 1
+    end,
+  }
+
+  local layoutHeights = 0
+  local combatCardsChecked = 0
+  for i = 1, iterations do
+    local okT, mode = Theme.ApplySanctuaryChromeCell(dummyTex, 0, 0, "border.gold", 0.9)
+    if not okT or mode ~= "solid_rgba_fallback" then
+      error("Expected solid_rgba_fallback when texture unavailable")
+    end
+    -- Resize sweep from 960x640 down to minimum 760x520 @ 1.25x scale:
+    local w = (i % 2 == 1) and 760 or 960
+    local h = Theme.EstimateWrappedHeight(
+      "Vendor spread — verify purchase · Outlay: 12s 50c · Loss under stated fallback: 0c",
+      w - 64,
+      "body",
+      18,
+      8
+    )
+    layoutHeights = layoutHeights + h
+    if ns.UI and ns.UI.CommandDeckPresenter and type(ns.UI.CommandDeckPresenter.Build) == "function" then
+      local vm = ns.UI.CommandDeckPresenter.Build({
+        nowSeconds = 1763100000 + i,
+        level = 60,
+        faction = "Alliance",
+        classLabel = "Mage",
+        inCombat = true,
+        reserveSnapshot = { status = "ok", liquidCopper = 500000, protectedCopperNow = 100000, investableCopper = 400000 },
+      }, {})
+      if vm and vm.inCombat == true and #(vm.cards or {}) == 1 then
+        combatCardsChecked = combatCardsChecked + 1
+      end
+    end
+  end
+
+  Theme.sanctuaryChromeVerified = savedChrome
+  if ns.State and type(ns.State.GetWorkspaceUIState) == "function" then
+    local okS, st = pcall(ns.State.GetWorkspaceUIState)
+    if okS and type(st) == "table" then
+      st.textScale = savedScale
+    end
+  end
+
+  local elapsedMs = math.max(0, nowMs() - startMs)
+  local memAfterKB = (type(_G.collectgarbage) == "function" and tonumber(_G.collectgarbage("count"))) or memBeforeKB
+
+  return {
+    paletteID = Theme.PALETTE_ID,
+    iterations = iterations,
+    elapsedMs = elapsedMs,
+    avgMsPerOp = elapsedMs / iterations,
+    memDeltaKB = memAfterKB - memBeforeKB,
+    fallbackTexCalls = fallbackTexCalls,
+    combatCardsChecked = combatCardsChecked,
+    contrastPrimaryOnCard = Theme.ComputeContrastRatio("text.primary", "surface.card"),
+    contrastGoldOnCard = Theme.ComputeContrastRatio("accent.gold", "surface.card"),
+    contrastCrystalOnCard = Theme.ComputeContrastRatio("accent.crystal", "surface.card"),
+    contrastResearchOnCard = Theme.ComputeContrastRatio("status.research", "surface.card"),
+    layoutChecksum = layoutHeights,
+  }
 end

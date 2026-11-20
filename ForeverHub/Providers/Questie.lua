@@ -89,10 +89,9 @@ function QuestieProvider.GetStatus()
   }
 end
 
--- Diagnostic-only manifest reconciliation for `/fh rg doctor`.
+-- Diagnostic-only manifest reconciliation when an explicit route table is passed.
 -- Queries ONLY compiled manifest IDs (bounded, non-enumerating) and NEVER mutates compiled route data!
 function QuestieProvider.AuditManifestAgainstLiveQuestie(route)
-  route = route or (ns.State and ns.State.GetCompiledRivergladesRoute())
   local st = QuestieProvider.GetStatus()
   if not st.ready or not st._module or type(route) ~= "table" then
     return {

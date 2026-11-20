@@ -467,6 +467,7 @@ def verify_tag_and_archives(
         "Textures/PinRing.tga",
         "Textures/PinGlow.tga",
         "Textures/CoinGlyphs.tga",
+        "Textures/SanctuaryChrome.tga",
     ]
     for raw_line in toc_text.splitlines():
         line = raw_line.strip()

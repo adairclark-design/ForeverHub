@@ -578,6 +578,42 @@ function CratesPresenter.Build(snapshot, uiState, draftState)
         primaryActionLabel = string.format("Update ×%d", draftQty)
       end
 
+      local ocl = type(opt.opportunityCostLedger) == "table" and opt.opportunityCostLedger or nil
+      local selectedRowOpportunityDetailText = nil
+      if ocl then
+        local buyPart = "Buy missing materials: "
+          .. (ocl.buyMissingComplete and Theme.FormatMoney(ocl.buyMissingMaterialsCopper, { estimated = (ocl.buyMissingMaterialsCopper or 0) > 0 }) or "Unknown")
+        local ownedPart = "Owned materials: vendor alternative: "
+          .. (ocl.ownedVendorComplete and Theme.FormatMoney(ocl.ownedVendorAlternativeCopper) or "Unknown")
+        local commitPart = "Cash-equivalent commitment: "
+          .. (ocl.cashEquivalentCommitmentCopper ~= nil and Theme.FormatMoney(ocl.cashEquivalentCommitmentCopper, { estimated = (ocl.buyMissingMaterialsCopper or 0) > 0 }) or "Unknown")
+        local fullVendorPart = "Vendor value of completed material set: "
+          .. (ocl.completedBasketVendorComplete and Theme.FormatMoney(ocl.completedBasketVendorCopper) or "Unknown")
+
+        local detailParts = { buyPart, ownedPart, commitPart, fullVendorPart }
+        if ocl.requiresBankRetrieval or ocl.requiresAltRetrieval then
+          local retPieces = {}
+          if ocl.allocatedBankUnits and ocl.allocatedBankUnits > 0 then
+            table.insert(retPieces, string.format("%d bank", ocl.allocatedBankUnits))
+          end
+          if ocl.allocatedAltUnits and ocl.allocatedAltUnits > 0 then
+            table.insert(retPieces, string.format("%d alt (non-liquid)", ocl.allocatedAltUnits))
+          end
+          local xferStr = ocl.transferCostsComplete and Theme.FormatMoney(ocl.knownTransferCostsCopper) or "Unverified postage"
+          table.insert(detailParts, string.format("Bank/alt retrieval required: %s · Known transfer costs: %s", table.concat(retPieces, ", "), xferStr))
+        end
+        if ocl.ahScenarioStatus ~= "EXCLUDED_SOULBOUND_MATERIAL" then
+          local askStr = (ocl.ahAskingPriceScenarioCopper ~= nil)
+              and Theme.FormatMoney(ocl.ahAskingPriceScenarioCopper, { estimated = true })
+            or "Unpriced"
+          table.insert(detailParts, "AH asking-price scenario: " .. askStr)
+        end
+        if ocl.purseImpactWarning and ocl.purseImpactWarning.message then
+          table.insert(detailParts, Theme.Colorize("status.warning", ocl.purseImpactWarning.message))
+        end
+        selectedRowOpportunityDetailText = table.concat(detailParts, "  ·  ")
+      end
+
       table.insert(optionVMs, {
         optionIndex = opt.optionIndex,
         label = opt.label,
@@ -595,6 +631,8 @@ function CratesPresenter.Build(snapshot, uiState, draftState)
         retrieveUnits = (acqMode == "bags_only") and 0 or (tonumber(opt.totalRetrieveUnits) or 0),
         estCostFormatted = estCostFormatted,
         replacementFormatted = repFormatted,
+        opportunityCostLedger = ocl,
+        selectedRowOpportunityDetailText = selectedRowOpportunityDetailText,
         canFillFromBagsNow = (opt.canFillFromBagsNow == true),
         canFillWithTransfer = (opt.canFillWithTransfer == true),
         materials = matRows,

@@ -4,6 +4,95 @@ ns.UI = ns.UI or {}
 local Tooltips = {}
 ns.UI.Tooltips = Tooltips
 
+Tooltips.MAX_LRU_ENTRIES = 256
+Tooltips._econCacheByKey = {}
+Tooltips._econOrder = {}
+Tooltips._econHits = 0
+Tooltips._econMisses = 0
+Tooltips._econEvictions = 0
+Tooltips._vendorMetadataRev = 1
+Tooltips._pendingAsyncItemLoads = {}
+
+function Tooltips.ClearEconomicCache()
+  Tooltips._econCacheByKey = {}
+  Tooltips._econOrder = {}
+  Tooltips._econHits = 0
+  Tooltips._econMisses = 0
+  Tooltips._econEvictions = 0
+end
+
+function Tooltips.BumpVendorMetadataRevision()
+  Tooltips._vendorMetadataRev = (Tooltips._vendorMetadataRev or 1) + 1
+end
+
+function Tooltips.GetCacheStats()
+  return {
+    size = #Tooltips._econOrder,
+    maxEntries = Tooltips.MAX_LRU_ENTRIES,
+    hits = Tooltips._econHits,
+    misses = Tooltips._econMisses,
+    evictions = Tooltips._econEvictions,
+    vendorMetadataRev = Tooltips._vendorMetadataRev,
+  }
+end
+
+function Tooltips.QueueDeferredItemLoad(itemID)
+  if type(itemID) ~= "number" or itemID <= 0 or Tooltips._pendingAsyncItemLoads[itemID] then
+    return
+  end
+  Tooltips._pendingAsyncItemLoads[itemID] = true
+  local function fireLoad()
+    Tooltips._pendingAsyncItemLoads[itemID] = nil
+    if C_Item and type(C_Item.RequestLoadItemDataByID) == "function" then
+      pcall(C_Item.RequestLoadItemDataByID, itemID)
+    elseif ns.Compat and type(ns.Compat.RequestLoadItemData) == "function" then
+      pcall(ns.Compat.RequestLoadItemData, itemID)
+    end
+  end
+  if C_Timer and type(C_Timer.After) == "function" then
+    local ok = pcall(C_Timer.After, 0, fireLoad)
+    if not ok then
+      fireLoad()
+    end
+  else
+    fireLoad()
+  end
+end
+
+local function lruGet(key)
+  local entry = Tooltips._econCacheByKey[key]
+  if not entry then
+    return nil
+  end
+  Tooltips._econHits = Tooltips._econHits + 1
+  local ord = Tooltips._econOrder
+  if ord[#ord] ~= key then
+    for i = #ord, 1, -1 do
+      if ord[i] == key then
+        table.remove(ord, i)
+        break
+      end
+    end
+    table.insert(ord, key)
+  end
+  return entry
+end
+
+local function lruPut(key, entry)
+  if Tooltips._econCacheByKey[key] == nil then
+    while #Tooltips._econOrder >= Tooltips.MAX_LRU_ENTRIES do
+      local oldest = table.remove(Tooltips._econOrder, 1)
+      if oldest ~= nil then
+        Tooltips._econCacheByKey[oldest] = nil
+        Tooltips._econEvictions = Tooltips._econEvictions + 1
+      end
+    end
+    table.insert(Tooltips._econOrder, key)
+  end
+  Tooltips._econCacheByKey[key] = entry
+  return entry
+end
+
 local function col(token, text)
   local Theme = ns.UI and ns.UI.Theme
   if Theme and type(Theme.Colorize) == "function" then
@@ -321,6 +410,378 @@ local function clearTooltipRenderState(self)
   self.__fhHyperlink = nil
 end
 
+local function resolveSupportedBagSlotFromOwner(tt)
+  if type(tt.GetOwner) ~= "function" then
+    return nil, nil
+  end
+  local okO, owner = pcall(tt.GetOwner, tt)
+  if not okO or type(owner) ~= "table" or isSecretValue(owner) then
+    return nil, nil
+  end
+  if type(owner.IsForbidden) == "function" then
+    local okF, forbidden = pcall(owner.IsForbidden, owner)
+    if not okF or forbidden == true then
+      return nil, nil
+    end
+  end
+  if type(owner.GetBagID) == "function" and type(owner.GetID) == "function" then
+    local okB, rawBag = pcall(owner.GetBagID, owner)
+    local okS, rawSlot = pcall(owner.GetID, owner)
+    if okB and okS then
+      local bagID = extractPublicNonNegInt(rawBag)
+      local slotID = extractPublicPositiveInt(rawSlot)
+      if bagID ~= nil and slotID ~= nil then
+        return bagID, slotID
+      end
+    end
+  end
+  return nil, nil
+end
+
+local function readBagStackCountSafe(tooltip)
+  local bagID, slotID = nil, nil
+  if tooltip.__fhSourceKind == "bag" and tooltip.__fhBagID ~= nil and tooltip.__fhSlotID ~= nil then
+    bagID, slotID = tooltip.__fhBagID, tooltip.__fhSlotID
+  else
+    bagID, slotID = resolveSupportedBagSlotFromOwner(tooltip)
+  end
+  if bagID == nil or slotID == nil then
+    return 1
+  end
+  if C_Container and type(C_Container.GetContainerItemInfo) == "function" then
+    local okC, info = pcall(C_Container.GetContainerItemInfo, bagID, slotID)
+    if okC and type(info) == "table" and not isSecretValue(info.stackCount) then
+      local sc = extractPublicPositiveInt(tonumber(info.stackCount))
+      if sc then
+        return sc
+      end
+    end
+  end
+  if type(GetContainerItemInfo) == "function" then
+    local okL, _, itemCount = pcall(GetContainerItemInfo, bagID, slotID)
+    if okL and not isSecretValue(itemCount) then
+      local sc = extractPublicPositiveInt(tonumber(itemCount))
+      if sc then
+        return sc
+      end
+    end
+  end
+  return 1
+end
+
+local function computeVerifiedCommissionCopper(grossCopper, feeRule)
+  if type(feeRule) ~= "table" or feeRule.verified ~= true or feeRule.venueVerified ~= true then
+    return nil
+  end
+  local num = tonumber(feeRule.commissionNumerator)
+  local den = tonumber(feeRule.commissionDenominator)
+  local mode = tostring(feeRule.roundingMode or "")
+  if not num or not den or num < 0 or den <= 0 then
+    return nil
+  end
+  if type(feeRule.clientBuild) == "string" and feeRule.clientBuild ~= "" and type(GetBuildInfo) == "function" then
+    local okB, verStr, buildStr = pcall(GetBuildInfo)
+    if okB and type(buildStr) == "string" and buildStr ~= "" then
+      local fullBuild = (type(verStr) == "string" and verStr ~= "") and (verStr .. "." .. buildStr) or buildStr
+      if feeRule.clientBuild ~= buildStr and feeRule.clientBuild ~= fullBuild then
+        return nil
+      end
+    end
+  end
+  local prod = grossCopper * num
+  if mode == "floor" then
+    return math.floor(prod / den)
+  elseif mode == "half_up" then
+    return math.floor((prod * 2 + den) / (2 * den))
+  end
+  return nil
+end
+
+local function resolveObservedAhUnitAsk(itemID)
+  local auc = ns.Providers and ns.Providers.Auctionator
+  local lots = nil
+  if auc and type(auc.GetObservedSessionLotsForItem) == "function" then
+    lots = auc.GetObservedSessionLotsForItem(itemID)
+  elseif ns.State and type(ns.State.sessionObservedAuctionLotsByItemID) == "table" then
+    lots = ns.State.sessionObservedAuctionLotsByItemID[itemID]
+  end
+  if type(lots) == "table" and #lots > 0 then
+    local minUnit = nil
+    local newestObs = nil
+    for _, lot in ipairs(lots) do
+      local ss = tonumber(lot.stackSize) or 0
+      local bo = tonumber(lot.buyoutCopper) or 0
+      if ss >= 1 and bo > 0 then
+        local u = math.floor(bo / ss)
+        if u > 0 and (minUnit == nil or u < minUnit) then
+          minUnit = u
+        end
+        local oa = tonumber(lot.observedAt)
+        if oa and (newestObs == nil or oa > newestObs) then
+          newestObs = oa
+        end
+      end
+    end
+    if minUnit then
+      local nowEpoch = (ns.Compat and ns.Compat.GetServerTimeSafe and tonumber((ns.Compat.GetServerTimeSafe() or {}).epochSec or ns.Compat.GetServerTimeSafe()))
+        or (type(time) == "function" and time())
+        or 0
+      local ageSec = (newestObs and nowEpoch >= newestObs) and math.floor(nowEpoch - newestObs) or 0
+      local ageLabel = (ageSec < 60) and string.format("%ds ago", ageSec) or string.format("%dm ago", math.floor(ageSec / 60))
+      return minUnit, ageLabel
+    end
+  end
+  if auc and type(auc.GetItemPriceInfo) == "function" then
+    local pInfo = auc.GetItemPriceInfo(itemID)
+    if type(pInfo) == "table" and type(pInfo.unitPrice) == "number" and pInfo.unitPrice > 0 then
+      local ageLabel = pInfo.isStale and "stale scan" or (pInfo.isUnknownAge and ">21d scan" or "cached scan")
+      return math.floor(pInfo.unitPrice), ageLabel
+    end
+  end
+  return nil, nil
+end
+
+local function computeUnreservedCraftUpliftNote(itemID, unitSellPrice)
+  if type(unitSellPrice) ~= "number" or unitSellPrice <= 0 then
+    return nil
+  end
+  local profSnap = ns.State and ns.State.GetProfessionSnapshot and ns.State.GetProfessionSnapshot() or nil
+  if type(profSnap) ~= "table" or (profSnap.snapshotStatus or profSnap.status) ~= "COMPLETE" or type(profSnap.baseRanks) ~= "table" then
+    return nil
+  end
+  local recipes = ns.EconomyData and ns.EconomyData.craftToVendorRecipes
+  if type(recipes) ~= "table" or type(GetItemInfo) ~= "function" then
+    return nil
+  end
+  for _, rec in ipairs(recipes) do
+    local pKey = tostring(rec.professionKey or "")
+    local minRank = tonumber(rec.minSkillRank) or 1
+    if (tonumber(profSnap.baseRanks[pKey]) or 0) >= minRank then
+      local usesItem = false
+      local reagentVendorTotal = 0
+      local allReagentsKnown = true
+      for _, inp in ipairs(rec.inputs or {}) do
+        if inp.itemID == itemID then
+          usesItem = true
+        end
+        local okI, iName, _, _, _, _, _, _, _, _, _, iSell = pcall(GetItemInfo, inp.itemID)
+        if not okI or type(iName) ~= "string" or iName == "" or type(iSell) ~= "number" then
+          allReagentsKnown = false
+          break
+        end
+        reagentVendorTotal = reagentVendorTotal + (math.floor(iSell) * (tonumber(inp.quantity) or 1))
+      end
+      if usesItem and allReagentsKnown and rec.outputItemID then
+        local okO, oName, _, _, _, _, _, _, _, _, _, oSell = pcall(GetItemInfo, rec.outputItemID)
+        local outQty = tonumber(rec.outputQuantity) or 1
+        if okO and type(oName) == "string" and oName ~= "" and type(oSell) == "number" then
+          local outVendor = math.floor(oSell) * outQty
+          if outVendor > reagentVendorTotal then
+            -- Ensure material is not fully reserved:
+            local rStat = ns.Domain and ns.Domain.Reservations and ns.Domain.Reservations.GetMaterialStatus and ns.Domain.Reservations.GetMaterialStatus(itemID)
+            if not rStat or (tonumber(rStat.freeBags) or 0) > 0 then
+              return string.format("Craft uplift: %s yields %s vendor vs %s inputs (/fh advisor)", oName, ns.Compat.FormatCopper(outVendor), ns.Compat.FormatCopper(reagentVendorTotal))
+            end
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+local function resolveExactTooltipItemKey(itemID, itemLink)
+  local baseKey = string.format("i1:base:%d", itemID)
+  if type(itemLink) == "string" and itemLink ~= "" and ns.Domain and ns.Domain.MarketIdentity and type(ns.Domain.MarketIdentity.ClassifyItemIdentity) == "function" then
+    local okK, cls = pcall(ns.Domain.MarketIdentity.ClassifyItemIdentity, {
+      itemID = itemID,
+      itemLink = itemLink,
+      verifiedBaseSet = { [itemID] = true },
+    })
+    if okK and type(cls) == "table" and type(cls.itemKey) == "string" and cls.itemKey ~= "" then
+      return cls.itemKey, (cls.itemKey == baseKey)
+    end
+  end
+  return baseKey, true
+end
+
+local function evaluateCachedEconomicFacts(itemID, itemLink, invRev, resRev, priceRev)
+  local exactItemKey, isBaseKey = resolveExactTooltipItemKey(itemID, itemLink)
+  local feeRule = (ns.State and type(ns.State.GetActiveVerifiedCommissionRuleForTooltip) == "function")
+    and ns.State.GetActiveVerifiedCommissionRuleForTooltip()
+    or (ns.State and ns.State.activeVerifiedFeeRule)
+    or nil
+  local feeRuleRev = (type(feeRule) == "table" and tonumber(feeRule.revision)) or 0
+  local venueKey = (type(feeRule) == "table" and tostring(feeRule.venueKey or feeRule.venueIdentity or "")) or "none"
+  local ahSess = ns.State and ns.State.currentAhSession
+  local ahSelRev = (type(ahSess) == "table" and ahSess.open == true and tonumber(ahSess.selectionRevision)) or 0
+  local ahScope = (type(ahSess) == "table" and ahSess.open == true and tostring(ahSess.venueSessionScope or "")) or "closed"
+  local vendorMetaRev = Tooltips._vendorMetadataRev or 1
+
+  local depRec = nil
+  if ns.State and type(ns.State.ResolveTooltipOpenAhDepositQuote) == "function" then
+    depRec = ns.State.ResolveTooltipOpenAhDepositQuote({
+      itemID = itemID,
+      itemKey = exactItemKey,
+      stackSize = 1,
+      allowBaseTestFallback = isBaseKey,
+    })
+  end
+  local depCopper = (type(depRec) == "table" and tonumber(depRec.depositCopper)) or 0
+  local nowBucket = math.floor(((type(time) == "function" and time()) or 0) / 30)
+
+  local cacheKey = string.format(
+    "%s:%d:%d:%d:%d:%s:%s:%d:%d:%d:%d",
+    exactItemKey,
+    invRev,
+    resRev,
+    priceRev,
+    feeRuleRev,
+    venueKey,
+    ahScope,
+    ahSelRev,
+    vendorMetaRev,
+    depCopper,
+    nowBucket
+  )
+
+  local hit = lruGet(cacheKey)
+  if hit then
+    return hit
+  end
+
+  Tooltips._econMisses = Tooltips._econMisses + 1
+  local vendorStatus = "loading"
+  local unitSellPrice = nil
+  if type(GetItemInfo) == "function" then
+    local okI, itemName, _, _, _, _, _, _, _, _, _, sellPrice = pcall(GetItemInfo, itemLink or itemID)
+    if okI and not isSecretValue(itemName) and type(itemName) == "string" and itemName ~= "" then
+      local sp = not isSecretValue(sellPrice) and tonumber(sellPrice) or nil
+      if sp ~= nil and sp >= 0 then
+        sp = math.floor(sp)
+        if sp == 0 then
+          vendorStatus = "zero"
+          unitSellPrice = 0
+        else
+          vendorStatus = "priced"
+          unitSellPrice = sp
+        end
+      end
+    end
+  end
+
+  local observedAhUnit, observedAhAgeLabel = resolveObservedAhUnitAsk(itemID)
+  local commissionBelowVendor = false
+  local openAhDepositLockCopper = nil
+
+  if vendorStatus == "priced" and unitSellPrice and unitSellPrice > 0 and observedAhUnit and observedAhUnit > 0 then
+    local comm = computeVerifiedCommissionCopper(observedAhUnit, feeRule)
+    if comm ~= nil then
+      -- Astra P0.2: Successful-sale proceeds = Gross - Commission (NEVER deduct refundable deposit!).
+      local proceedsAfterCommission = observedAhUnit - comm
+      if proceedsAfterCommission < unitSellPrice then
+        commissionBelowVendor = true
+        if depCopper and depCopper > 0 then
+          local depVenueOk = true
+          if type(depRec) == "table" and depRec.venueKey and venueKey ~= "none" and tostring(depRec.venueKey) ~= venueKey then
+            depVenueOk = false
+          end
+          if depVenueOk then
+            openAhDepositLockCopper = math.floor(depCopper)
+          end
+        end
+      end
+    end
+  end
+
+  local craftUpliftNote = computeUnreservedCraftUpliftNote(itemID, unitSellPrice)
+
+  return lruPut(cacheKey, {
+    vendorStatus = vendorStatus,
+    unitSellPrice = unitSellPrice,
+    observedAhUnitCopper = observedAhUnit,
+    observedAhAgeLabel = observedAhAgeLabel,
+    commissionBelowVendor = commissionBelowVendor,
+    openAhDepositLockCopper = openAhDepositLockCopper,
+    craftUpliftNote = craftUpliftNote,
+  })
+end
+
+local function appendGeneralEconomicTooltip(tooltip, itemID, itemLink, invRev, resRev, priceRev, includeObservedAhLine)
+  local facts = evaluateCachedEconomicFacts(itemID, itemLink, invRev, resRev, priceRev)
+  if facts.vendorStatus == "loading" then
+    Tooltips.QueueDeferredItemLoad(itemID)
+  end
+
+  local secR, secG, secB = unpackRGB("text.secondary", 0.74, 0.77, 0.80)
+  local mutR, mutG, mutB = unpackRGB("text.muted", 0.57, 0.62, 0.66)
+  local wrnR, wrnG, wrnB = unpackRGB("status.warning", 0.95, 0.77, 0.38)
+  local gldR, gldG, gldB = unpackRGB("accent.gold", 0.95, 0.82, 0.55)
+
+  local stackCount = readBagStackCountSafe(tooltip)
+  if facts.vendorStatus == "loading" then
+    tooltip:AddLine(
+      string.format("%s Client vendor value: Loading / unknown", col("accent.gold", "ForeverHub:")),
+      mutR, mutG, mutB, true
+    )
+  elseif facts.vendorStatus == "zero" then
+    tooltip:AddLine(
+      string.format("%s Client vendor value: No vendor sell price (0c)", col("accent.gold", "ForeverHub:")),
+      mutR, mutG, mutB, true
+    )
+  elseif facts.vendorStatus == "priced" and facts.unitSellPrice then
+    local unitFmt = ns.Compat.FormatCopper(facts.unitSellPrice)
+    local vendorLine
+    if stackCount > 1 then
+      vendorLine = string.format(
+        "%s Client vendor value: %s/ea · %dx = %s",
+        col("accent.gold", "ForeverHub:"),
+        unitFmt,
+        stackCount,
+        ns.Compat.FormatCopper(facts.unitSellPrice * stackCount)
+      )
+    else
+      vendorLine = string.format("%s Client vendor value: %s/ea", col("accent.gold", "ForeverHub:"), unitFmt)
+    end
+    tooltip:AddLine(vendorLine, secR, secG, secB, true)
+  end
+
+  if includeObservedAhLine and facts.observedAhUnitCopper then
+    tooltip:AddLine(
+      string.format(
+        "Observed AH ask: %s/ea (%s)",
+        ns.Compat.FormatCopper(facts.observedAhUnitCopper),
+        tostring(facts.observedAhAgeLabel or "recent")
+      ),
+      secR, secG, secB, true
+    )
+  end
+
+  if facts.commissionBelowVendor then
+    tooltip:AddLine(
+      col("status.warning", "Observed ask after commission is below client vendor value."),
+      wrnR, wrnG, wrnB, true
+    )
+    if facts.openAhDepositLockCopper and facts.openAhDepositLockCopper > 0 then
+      tooltip:AddLine(
+        col(
+          "text.muted",
+          string.format(
+            "Posting locks %s; this is lost if the listing expires.",
+            ns.Compat.FormatCopper(facts.openAhDepositLockCopper)
+          )
+        ),
+        mutR, mutG, mutB, true
+      )
+    end
+  end
+
+  if facts.craftUpliftNote then
+    tooltip:AddLine(facts.craftUpliftNote, gldR, gldG, gldB, true)
+  end
+  return true
+end
+
 function Tooltips.OnTooltipSetItem(tooltip, explicitItemID)
   if not isTooltipSafeToAccess(tooltip) then
     return
@@ -353,7 +814,14 @@ function Tooltips.OnTooltipSetItem(tooltip, explicitItemID)
     invRev, resRev, priceRev = ns.State.GetRevisions()
   end
   local acqMode = (ns.State and ns.State.GetAcquisitionMode and ns.State.GetAcquisitionMode()) or "after_bank"
-  local renderKey = string.format("%d:%s:%d:%d:%d:%s", itemID, shiftState, invRev, resRev, priceRev, acqMode)
+  local activeRule = (ns.State and type(ns.State.GetActiveVerifiedCommissionRuleForTooltip) == "function")
+    and ns.State.GetActiveVerifiedCommissionRuleForTooltip()
+    or (ns.State and ns.State.activeVerifiedFeeRule)
+    or nil
+  local feeRuleRev = (type(activeRule) == "table" and tonumber(activeRule.revision)) or 0
+  local ahSelRev = (ns.State and type(ns.State.currentAhSession) == "table" and ns.State.currentAhSession.open == true and tonumber(ns.State.currentAhSession.selectionRevision)) or 0
+  local vendorMetaRev = Tooltips._vendorMetadataRev or 1
+  local renderKey = string.format("%d:%s:%s:%d:%d:%d:%s:%d:%d:%d", itemID, tostring(itemLink or ""), shiftState, invRev, resRev, priceRev, acqMode, feeRuleRev, ahSelRev, vendorMetaRev)
   if tooltip.__fhLastRenderKey == renderKey then
     return
   end
@@ -374,12 +842,15 @@ function Tooltips.OnTooltipSetItem(tooltip, explicitItemID)
   elseif writs and writs[itemID] then
     appendTargetTooltip(tooltip, "writ", writs[itemID])
     appended = true
-  elseif mats and mats[itemID] then
-    appendMaterialTooltip(tooltip, itemID, mats[itemID])
-    appended = true
   elseif sealedCrates and sealedCrates[itemID] then
     appendSealedCrateTooltip(tooltip, sealedCrates[itemID])
     appended = true
+  elseif mats and mats[itemID] then
+    appendMaterialTooltip(tooltip, itemID, mats[itemID])
+    appendGeneralEconomicTooltip(tooltip, itemID, itemLink, invRev, resRev, priceRev, false)
+    appended = true
+  else
+    appended = appendGeneralEconomicTooltip(tooltip, itemID, itemLink, invRev, resRev, priceRev, true)
   end
   if appended then
     local afterCount = getTooltipLineCount(tooltip)
@@ -388,34 +859,6 @@ function Tooltips.OnTooltipSetItem(tooltip, explicitItemID)
       pcall(tooltip.Show, tooltip)
     end
   end
-end
-
-local function resolveSupportedBagSlotFromOwner(tt)
-  if type(tt.GetOwner) ~= "function" then
-    return nil, nil
-  end
-  local okO, owner = pcall(tt.GetOwner, tt)
-  if not okO or type(owner) ~= "table" or isSecretValue(owner) then
-    return nil, nil
-  end
-  if type(owner.IsForbidden) == "function" then
-    local okF, forbidden = pcall(owner.IsForbidden, owner)
-    if not okF or forbidden == true then
-      return nil, nil
-    end
-  end
-  if type(owner.GetBagID) == "function" and type(owner.GetID) == "function" then
-    local okB, rawBag = pcall(owner.GetBagID, owner)
-    local okS, rawSlot = pcall(owner.GetID, owner)
-    if okB and okS then
-      local bagID = extractPublicNonNegInt(rawBag)
-      local slotID = extractPublicPositiveInt(rawSlot)
-      if bagID ~= nil and slotID ~= nil then
-        return bagID, slotID
-      end
-    end
-  end
-  return nil, nil
 end
 
 local function refreshSingleTooltip(tt)
@@ -455,6 +898,35 @@ end
 function Tooltips.RefreshActiveTooltips()
   refreshSingleTooltip(_G.GameTooltip)
   refreshSingleTooltip(_G.ItemRefTooltip)
+end
+
+function Tooltips.BuildCompactDisenchantTooltipLines(itemSpec, opts)
+  if not (ns.Domain and ns.Domain.DisenchantEv and type(ns.Domain.DisenchantEv.EvaluateItemDisenchant) == "function") then
+    return nil
+  end
+  local eval = ns.Domain.DisenchantEv.EvaluateItemDisenchant(itemSpec, opts)
+  if not eval then
+    return nil
+  end
+  local fmt = (ns.Compat and ns.Compat.FormatCopper) or function(c) return tostring(c) .. "c" end
+  if not eval.eligible then
+    return {
+      status = eval.status,
+      headlineLine = string.format("ForeverHub DE: %s (%s)", tostring(eval.status), tostring(eval.reason or "unverified")),
+      detailLine = nil,
+    }
+  end
+  return {
+    status = eval.status,
+    headlineLine = string.format(
+      "ForeverHub DE vs Vendor (%s): 1.00x %s · 1.05x %s · 1.10x %s",
+      fmt(eval.vendorSellCopper),
+      fmt(eval.baseExpectedNetCopper),
+      fmt(eval.salvager105ExpectedNetCopper),
+      fmt(eval.salvager110ExpectedNetCopper)
+    ),
+    detailLine = string.format("Floor: %s · %s", fmt(eval.conservativeFloorCopper), tostring(eval.status)),
+  }
 end
 
 local function safeHookScript(frame, scriptName, handler)

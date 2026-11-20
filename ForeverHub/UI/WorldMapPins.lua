@@ -22,6 +22,7 @@ local RIVERGLADES_MAP_ID = 2548
 -- Clustering distance in zoomed WorldMap canvas UI units (`canvasWidth * canvasScale`).
 local DEFAULT_CLUSTER_RADIUS_UI_UNITS = 22
 local PIN_FRAME_LEVEL_OFFSET = 2550
+local PIN_SERVICE_LEVEL_OFFSET = 2590
 local PIN_TARGET_LEVEL_OFFSET = 2620
 
 local atlasSupportCache = {}
@@ -188,278 +189,310 @@ function WorldMapPins.ProjectCoordinates(sourceMapID, targetMapID, x01, y01)
   return nil, nil
 end
 
--- Pure data collector: builds all currently relevant quest markers for `targetMapID`.
--- Never emits completed quests, ineligible steps, locked follow-ups, or intro travel checks.
-function WorldMapPins.CollectPinEntries(targetMapID, route, progress, settings, ctx, playerPos)
+-- Pure data collector: builds active Gold Farm & Spawn Radar markers for `targetMapID`
+-- (Riverglades quest pins are retired now that RestedXP includes Riverglades natively).
+function WorldMapPins.CollectPinEntries(targetMapID, _route, _progress, settings, _ctx, _playerPos)
   local dstMapID = tonumber(targetMapID)
   local emptySummary = { objectives = 0, turnins = 0, available = 0, total = 0 }
-  if not dstMapID then
+  if not dstMapID or dstMapID == RIVERGLADES_MAP_ID then
+    WorldMapPins.lastSelectedQuestNotice = nil
     return {}, emptySummary
   end
 
-  local RoutePlanner = ns.Domain and ns.Domain.RoutePlanner
-  if not RoutePlanner then
-    return {}, emptySummary
-  end
-
-  route = route or (ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute())
-  progress = progress or (ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress())
   settings = settings or (ns.State and ns.State.GetWorldMapPinSettings and ns.State.GetWorldMapPinSettings()) or {
     enabled = true,
     showObjectives = true,
     showTurnIns = true,
     showAvailable = true,
   }
-  if type(route) ~= "table" then
-    return {}, emptySummary
+  WorldMapPins.lastSelectedQuestNotice = nil
+  local gfEntries, gfCounts = WorldMapPins.CollectGoldFarmPinEntries(dstMapID, settings)
+  if #gfEntries > 0 then
+    return gfEntries, gfCounts
+  end
+  return {}, emptySummary
+end
+
+-- Pre-indexes compiled gold farms and steps by `[uiMapID]` and `[farmID][uiMapID]` once per catalog hash (`Astra P2-2`),
+-- so `CollectGoldFarmPinEntries(dstMapID)` runs in `O(|map_step_nodes|)` without scanning unrelated zones/routes.
+function WorldMapPins.EnsureGoldFarmMapIndex(catalog)
+  catalog = catalog or (ns.State and ns.State.GetCompiledGoldFarms and ns.State.GetCompiledGoldFarms())
+  if type(catalog) ~= "table" then
+    return nil
+  end
+  local cacheKey = (type(catalog.meta) == "table" and catalog.meta.compiledContentSha256) or catalog
+  if WorldMapPins._goldFarmMapIndex and WorldMapPins._goldFarmMapIndex.cacheKey == cacheKey then
+    return WorldMapPins._goldFarmMapIndex
   end
 
-  ctx = ctx or RoutePlanner.BuildDefaultContext()
-  playerPos = playerPos or (ns.Compat and ns.Compat.GetPlayerPosition01 and ns.Compat.GetPlayerPosition01()) or nil
-  local eval = RoutePlanner.EvaluateRoute(route, progress, ctx, playerPos)
-  if not eval or not eval.valid then
-    return {}, emptySummary
-  end
+  local byMapID = {}
+  local byFarmAndMap = {}
+  local arcaneFarmsOnMap = {}
+  local experimentalFarmsOnMap = {}
+  local indexedFarmIDs = {}
 
-  local activeActionID = nil
-  local activeSubID = nil
-  local activeArrowQuestTitle = nil
-  if progress and progress.mode == "standalone" and eval.nextAction then
-    activeActionID = eval.nextAction.actionID
-    local arrowMeta = lookupQuestMeta(route, eval.nextAction)
-    activeArrowQuestTitle = (arrowMeta and (arrowMeta.name or arrowMeta.title)) or eval.nextAction.title or nil
-    if RoutePlanner.ResolveActiveActionTarget then
-      local _, _, sub = RoutePlanner.ResolveActiveActionTarget(eval.nextAction, progress, ctx, playerPos)
-      activeSubID = sub and sub.subID or activeActionID
-    else
-      activeSubID = activeActionID
+  local function indexFarmList(list, bucketKind)
+    for _, f in ipairs(type(list) == "table" and list or {}) do
+      local fid = type(f) == "table" and f.farmID or nil
+      if fid and not indexedFarmIDs[fid] then
+        indexedFarmIDs[fid] = true
+        byFarmAndMap[fid] = {}
+        local seenMapsForFarm = {}
+        for sIdx, st in ipairs(f.travelSteps or {}) do
+          local mID = st and st.destination and tonumber(st.destination.uiMapID)
+          if mID and mID > 0 and mID ~= RIVERGLADES_MAP_ID then
+            mID = math.floor(mID)
+            local rec = byFarmAndMap[fid][mID]
+            if not rec then
+              rec = {
+                farm = f,
+                farmID = fid,
+                uiMapID = mID,
+                stepsOnMap = {},
+              }
+              byFarmAndMap[fid][mID] = rec
+              byMapID[mID] = byMapID[mID] or {}
+              table.insert(byMapID[mID], rec)
+              if not seenMapsForFarm[mID] then
+                seenMapsForFarm[mID] = true
+                if bucketKind == "arcane_primary" then
+                  arcaneFarmsOnMap[mID] = arcaneFarmsOnMap[mID] or {}
+                  table.insert(arcaneFarmsOnMap[mID], rec)
+                elseif bucketKind == "arcane_experimental" then
+                  experimentalFarmsOnMap[mID] = experimentalFarmsOnMap[mID] or {}
+                  table.insert(experimentalFarmsOnMap[mID], rec)
+                end
+              end
+            end
+            table.insert(rec.stepsOnMap, { stepIndex = sIdx, step = st })
+          end
+        end
+      end
     end
   end
 
-  local selectedQuest = (ns.Compat and ns.Compat.GetSelectedQuestInfo and ns.Compat.GetSelectedQuestInfo())
-    or { available = false }
-  local selectedQuestID = selectedQuest.available and tonumber(selectedQuest.questID) or nil
-  local selectedNormTitle = selectedQuest.available and selectedQuest.normTitle or nil
+  indexFarmList(catalog.farms, "mount")
+  indexFarmList(catalog.expandedRoutes, "expanded")
+  indexFarmList(catalog.arcaneGrindFarms, "arcane_primary")
+  indexFarmList(catalog.experimentalArcaneFarms, "arcane_experimental")
 
-  local entries = {}
-  local seenKeys = {}
-  local rawCounts = {
-    objectives = 0,
-    turnins = 0,
-    available = 0,
-    total = 0,
-    unresolvedTitlePickups = tonumber(eval.counts and eval.counts.blockedUnresolvedHistory) or 0,
-    selectedQuestNotice = nil,
+  local built = {
+    cacheKey = cacheKey,
+    byMapID = byMapID,
+    byFarmAndMap = byFarmAndMap,
+    arcaneFarmsOnMap = arcaneFarmsOnMap,
+    experimentalFarmsOnMap = experimentalFarmsOnMap,
+  }
+  WorldMapPins._goldFarmMapIndex = built
+  return built
+end
+
+function WorldMapPins.CollectGoldFarmPinEntries(targetMapID, settings)
+  local dstMapID = tonumber(targetMapID)
+  local emptySummary = { objectives = 0, turnins = 0, available = 0, total = 0 }
+  if not dstMapID or dstMapID == RIVERGLADES_MAP_ID then
+    return {}, emptySummary
+  end
+  dstMapID = math.floor(dstMapID)
+
+  local GoldFarms = ns.Domain and ns.Domain.GoldFarms
+  local SpawnRadar = ns.Domain and ns.Domain.SpawnRadar
+  if not GoldFarms or not SpawnRadar then
+    return {}, emptySummary
+  end
+
+  local catalog = ns.State and ns.State.GetCompiledGoldFarms and ns.State.GetCompiledGoldFarms()
+  if type(catalog) ~= "table" then
+    return {}, emptySummary
+  end
+
+  local mapIndex = WorldMapPins.EnsureGoldFarmMapIndex(catalog)
+  if not mapIndex or not mapIndex.byMapID[dstMapID] then
+    return {}, emptySummary
+  end
+
+  settings = settings or (ns.State and ns.State.GetWorldMapPinSettings and ns.State.GetWorldMapPinSettings()) or {
+    enabled = true,
+    showObjectives = true,
+    showTurnIns = true,
+    showAvailable = true,
   }
 
-  for _, ev in ipairs(eval.evaluations or {}) do
-    local act = ev.action
-    local kind = act and act.kind
-    if act and (kind == "turnin" or kind == "objective" or kind == "accept") then
-      local include = false
-      local isQuestLogFull = false
-      local isSkipped = false
+  local gProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
+  local uiState = ns.State and ns.State.GetWorkspaceUIState and ns.State.GetWorkspaceUIState()
+  local goldView = (type(uiState) == "table" and type(uiState.goldView) == "table") and uiState.goldView or {}
 
-      if ev.state == "available" then
-        include = true
-      elseif kind == "accept" and ev.state == "blocked_quest_log_full" then
-        include = true
-        isQuestLogFull = true
-      elseif (kind == "objective" or kind == "turnin") and ev.state == "skipped" then
-        -- Still show active incomplete Quest Log objectives / ready turn-ins on the map even if skipped in HUD!
-        local eligOk = RoutePlanner.EvaluateEligibility(act, progress, ctx, route) == true
-        local reqOk = RoutePlanner.EvaluatePredicate(act.requires, progress, ctx, route) == true
-        if eligOk and reqOk then
-          include = true
-          isSkipped = true
-        end
-      elseif kind == "objective" and ev.state == "ineligible" and ev.reason == "optional_elite_bounty_disabled" then
-        -- Always display accepted Elite quest objectives on the World Map even when Elites: OFF!
-        local reqOk = RoutePlanner.EvaluatePredicate(act.requires, progress, ctx, route) == true
-        if reqOk then
-          include = true
+  local activeFarmID = (gProg and gProg.mode ~= "paused" and gProg.selectedFarmID) or nil
+  local activeEval = (activeFarmID and GoldFarms.Evaluate) and GoldFarms.Evaluate(catalog, gProg) or nil
+  local activeStepID = (activeEval and activeEval.activeStep and activeEval.activeStep.stepID) or nil
+
+  local function lookupMapRecForFarm(fid)
+    if not fid then
+      return nil
+    end
+    local fm = mapIndex.byFarmAndMap[fid]
+    return fm and fm[dstMapID] or nil
+  end
+
+  local matchedRec = lookupMapRecForFarm(activeFarmID)
+    or lookupMapRecForFarm(goldView.focusedFarmID)
+    or (gProg and lookupMapRecForFarm(gProg.selectedFarmID))
+
+  if not matchedRec and GoldFarms.GetEffectiveTrack and GoldFarms.GetEffectiveTrack(uiState) == "arcane_lvl47_st" then
+    if goldView.subFilter == "experimental" then
+      local expOnMap = mapIndex.experimentalFarmsOnMap[dstMapID]
+      matchedRec = (expOnMap and expOnMap[1]) or nil
+    end
+    if not matchedRec then
+      local arcOnMap = mapIndex.arcaneFarmsOnMap[dstMapID]
+      matchedRec = (arcOnMap and arcOnMap[1]) or nil
+    end
+  end
+
+  if not matchedRec then
+    return {}, emptySummary
+  end
+
+  local matchedFarm = matchedRec.farm
+  local entries = {}
+  local rawCounts = { objectives = 0, turnins = 0, available = 0, total = 0 }
+  local isActiveFarm = (activeFarmID == matchedFarm.farmID)
+  local orderCounter = 0
+
+  local spawnPinMode = (gProg and (gProg.spawnPinMode == "all" or gProg.spawnPinMode == "off"))
+    and gProg.spawnPinMode
+    or "active"
+
+  -- Resolve the single active/default grind step on `dstMapID` for `spawnPinMode == "active"` (Astra P2-1):
+  local targetGrindStepID = nil
+  if isActiveFarm and activeEval and activeEval.activeStep and activeEval.activeStep.kind == "grind" then
+    local actDest = activeEval.activeStep.destination
+    if actDest and tonumber(actDest.uiMapID) == dstMapID then
+      targetGrindStepID = activeEval.activeStep.stepID
+    end
+  end
+  if not targetGrindStepID then
+    for _, sm in ipairs(matchedRec.stepsOnMap) do
+      local st = sm.step
+      if st.kind == "grind" then
+        local stepNodes = SpawnRadar.GetStepNodes and SpawnRadar.GetStepNodes(st, gProg) or (st.spawnNodes or {})
+        if #stepNodes >= 2 then
+          targetGrindStepID = st.stepID
+          break
         end
       end
+    end
+  end
 
-      if include then
-        local qMeta = lookupQuestMeta(route, act)
-        local questIdentity = tostring(act.questKey or act.questID or act.actionID)
-        local questTitle = (qMeta and (qMeta.name or qMeta.title)) or act.title or questIdentity
-        local questLevel = qMeta and tonumber(qMeta.questLevel) or nil
-        local isElite = (act.isEliteBounty == true)
-          or (qMeta and (qMeta.isEliteBounty == true or qMeta.isElite == true))
-          or false
-        local qref = (type(act.questKey) == "string" and act.questKey ~= "" and act.questKey) or act.questID
-
-        local bankHint = nil
-        if qMeta and qMeta.supplyItemID and ns.State and ns.State.GetBankItemCount then
-          local bankQty = ns.State.GetBankItemCount(qMeta.supplyItemID)
-          if bankQty and bankQty > 0 then
-            bankHint = string.format("(%d in bank!)", bankQty)
-          end
-        end
-
-        local overallProgressText = nil
-        if kind == "objective" and qref and ctx and type(ctx.getQuestObjectives) == "function" then
-          local objRes = ctx.getQuestObjectives(qref)
-          if type(objRes) == "table" and objRes.status == "ok" and type(objRes.summaryText) == "string" and objRes.summaryText ~= "" then
-            overallProgressText = objRes.summaryText
-          end
-        end
-
-        local spots = nil
-        if kind == "objective" and type(act.subLocations) == "table" and #act.subLocations > 0 and RoutePlanner.ResolveActiveSubLocations then
-          spots = RoutePlanner.ResolveActiveSubLocations(act, ctx)
-        elseif type(act.destination) == "table" then
-          local resolvedDest, resolvedName = act.destination, act.npcName
-          if (kind == "turnin" or kind == "objective") and RoutePlanner.ResolveActiveActionTarget then
-            local rd, rn = RoutePlanner.ResolveActiveActionTarget(act, progress, ctx, nil, route)
-            if type(rd) == "table" then
-              resolvedDest = rd
-            end
-            if type(rn) == "string" and rn ~= "" then
-              resolvedName = rn
-            end
-          end
-          spots = {
-            {
-              subID = act.actionID,
-              label = act.title,
-              targetName = resolvedName,
-              destination = resolvedDest,
-              isPrimary = true,
-            },
-          }
-        end
-
-        for _, spot in ipairs(spots or {}) do
-          local sdest = spot.destination
-          if type(sdest) == "table" then
-            local projX, projY = WorldMapPins.ProjectCoordinates(sdest.uiMapID, dstMapID, sdest.x01, sdest.y01)
+  for _, sm in ipairs(matchedRec.stepsOnMap) do
+    local sIdx = sm.stepIndex
+    local st = sm.step
+    if st.destination and tonumber(st.destination.uiMapID) == dstMapID then
+      if st.kind == "grind" then
+        local includeGrindStep = (spawnPinMode == "all")
+          or (spawnPinMode == "active" and st.stepID == targetGrindStepID)
+        if includeGrindStep then
+          local nodeStates = SpawnRadar.GetNodeStatesForStep(matchedFarm, st, nil, gProg)
+          for _, nsNode in ipairs(nodeStates) do
+            local projX, projY = WorldMapPins.ProjectCoordinates(dstMapID, dstMapID, nsNode.x01, nsNode.y01)
             if projX and projY then
-              local subKey = tostring(spot.subID or act.actionID)
-              local dedupeKey = kind .. "|" .. questIdentity .. "|" .. subKey
-              if not seenKeys[dedupeKey] then
-                seenKeys[dedupeKey] = true
-
-                if kind == "objective" then
-                  rawCounts.objectives = rawCounts.objectives + 1
-                elseif kind == "turnin" then
-                  rawCounts.turnins = rawCounts.turnins + 1
-                elseif kind == "accept" then
-                  rawCounts.available = rawCounts.available + 1
+              rawCounts.objectives = rawCounts.objectives + 1
+              rawCounts.total = rawCounts.total + 1
+              if settings.enabled ~= false and settings.showObjectives ~= false then
+                orderCounter = orderCounter + 1
+                local isCooling = (nsNode.status == "cooldown")
+                local isLocked = (isActiveFarm and activeStepID == st.stepID and nsNode.isLockedTarget == true)
+                local mobTitle = string.format("%s #%d", tostring(nsNode.npcName or st.npcName or "Mob"), nsNode.nodeIndex)
+                local progTxt
+                if nsNode.observationState == "manually_skipped" then
+                  progTxt = string.format("Skipped (~%ds revisit est.)", tonumber(nsNode.remainingSeconds) or 0)
+                elseif nsNode.observationState == "estimated_recent_kill" or isCooling then
+                  progTxt = string.format("Est. recent kill (~%ds revisit)", tonumber(nsNode.remainingSeconds) or 0)
+                else
+                  progTxt = "Recorded spawn point (unvisited)"
                 end
-                rawCounts.total = rawCounts.total + 1
-
-                local passFilter = (settings.enabled ~= false) and (
-                  (kind == "objective" and settings.showObjectives ~= false)
-                  or (kind == "turnin" and settings.showTurnIns ~= false)
-                  or (kind == "accept" and settings.showAvailable ~= false)
-                )
-
-                if passFilter then
-                  local isCurrentTarget = (activeActionID ~= nil and act.actionID == activeActionID)
-                    and (activeSubID == nil or activeSubID == subKey or spot.isPrimary == true)
-                  local isPinned = (progress ~= nil and progress.pinnedActionID == act.actionID)
-                    and (progress.pinnedSubLocationID == nil or progress.pinnedSubLocationID == subKey)
-                  local entryKnownQid = tonumber(act.questID) or (qMeta and tonumber(qMeta.knownQuestID)) or nil
-                  local entryNormTitle = ns.Compat and ns.Compat.NormalizeQuestTitle and ns.Compat.NormalizeQuestTitle(questTitle) or nil
-                  local isSelectedQuest = false
-                  if selectedQuest.available then
-                    if selectedQuestID and entryKnownQid and selectedQuestID == entryKnownQid then
-                      isSelectedQuest = true
-                    elseif selectedNormTitle and entryNormTitle and selectedNormTitle == entryNormTitle then
-                      isSelectedQuest = true
-                    end
-                  end
-
-                  local basePriority = (kind == "turnin" and 30) or (kind == "objective" and 20) or 10
-                  if isCurrentTarget then
-                    basePriority = 45
-                  elseif isSelectedQuest then
-                    basePriority = basePriority + 8
-                  elseif isPinned then
-                    basePriority = basePriority + 5
-                  end
-
-                  local progLine = spot.progressText or overallProgressText
-                  if bankHint then
-                    progLine = progLine and (progLine .. " " .. bankHint) or bankHint
-                  end
-
-                  table.insert(entries, {
-                    actionID = act.actionID,
-                    subID = (not spot.isPrimary) and spot.subID or nil,
-                    kind = kind,
-                    questIdentity = questIdentity,
-                    questID = act.questID,
-                    questKey = act.questKey,
-                    questTitle = questTitle,
-                    questLevel = questLevel,
-                    actionTitle = act.title,
-                    spotLabel = (not spot.isPrimary) and spot.label or nil,
-                    targetName = spot.targetName or act.npcName,
-                    progressText = progLine,
-                    note = act.note,
-                    isElite = isElite,
-                    isSupply = (act.isSupplyObjective == true),
-                    objectiveStyle = (kind == "objective") and classifyObjectiveStyle(act, qMeta, spot.label) or nil,
-                    questLogFull = isQuestLogFull,
-                    isSkipped = isSkipped,
-                    isCurrentTarget = isCurrentTarget,
-                    isSelectedQuest = isSelectedQuest,
-                    isPinned = isPinned,
-                    reviewStatus = act.reviewStatus,
-                    coordConfidence = sdest.coordConfidence or "artifact_verified",
-                    sourceMapID = tonumber(sdest.uiMapID),
-                    sourceX01 = tonumber(sdest.x01),
-                    sourceY01 = tonumber(sdest.y01),
-                    x01 = projX,
-                    y01 = projY,
-                    priority = basePriority,
-                    orderIndex = tonumber(ev.orderIndex) or 9999,
-                  })
-                end
+                table.insert(entries, {
+                  isGoldFarmPin = true,
+                  isSpawnNodePin = true,
+                  isCoolingDown = isCooling,
+                  observationState = nsNode.observationState or "unobserved",
+                  locationID = nsNode.locationID,
+                  remainingSeconds = tonumber(nsNode.remainingSeconds) or 0,
+                  farmID = matchedFarm.farmID,
+                  stepID = st.stepID,
+                  stepIndex = sIdx,
+                  nodeIndex = nsNode.nodeIndex,
+                  actionID = string.format("%s:%s:%d", tostring(matchedFarm.farmID), tostring(st.stepID), nsNode.nodeIndex),
+                  kind = "objective",
+                  objectiveStyle = isCooling and "loot" or "slay",
+                  questIdentity = tostring(matchedFarm.farmID),
+                  questTitle = mobTitle,
+                  spotLabel = string.format("%s — %s", tostring(matchedFarm.shortLabel or matchedFarm.title), tostring(st.title or "Camp")),
+                  targetName = nsNode.npcName or st.npcName,
+                  progressText = progTxt,
+                  isCurrentTarget = isLocked,
+                  isSelectedQuest = false,
+                  isPinned = false,
+                  coordConfidence = "artifact_verified",
+                  sourceMapID = dstMapID,
+                  sourceX01 = tonumber(nsNode.x01),
+                  sourceY01 = tonumber(nsNode.y01),
+                  x01 = projX,
+                  y01 = projY,
+                  priority = isLocked and 50 or (isCooling and 12 or 22),
+                  orderIndex = orderCounter,
+                })
               end
             end
           end
         end
+      else
+        local projX, projY = WorldMapPins.ProjectCoordinates(dstMapID, dstMapID, st.destination.x01, st.destination.y01)
+        if projX and projY then
+          local pinKind = (st.kind == "vendor") and "turnin" or "accept"
+          if pinKind == "turnin" then
+            rawCounts.turnins = rawCounts.turnins + 1
+          else
+            rawCounts.available = rawCounts.available + 1
+          end
+          rawCounts.total = rawCounts.total + 1
+          local pass = (settings.enabled ~= false) and (
+            (pinKind == "turnin" and settings.showTurnIns ~= false)
+            or (pinKind == "accept" and settings.showAvailable ~= false)
+          )
+          if pass then
+            orderCounter = orderCounter + 1
+            local isCurHop = (isActiveFarm and activeStepID == st.stepID)
+            table.insert(entries, {
+              isGoldFarmPin = true,
+              isSpawnNodePin = false,
+              farmID = matchedFarm.farmID,
+              stepID = st.stepID,
+              stepIndex = sIdx,
+              actionID = string.format("%s:%s", tostring(matchedFarm.farmID), tostring(st.stepID)),
+              kind = pinKind,
+              questIdentity = tostring(matchedFarm.farmID),
+              questTitle = tostring(st.title or matchedFarm.shortLabel or "Route Hop"),
+              spotLabel = tostring(matchedFarm.title or matchedFarm.shortLabel or "Gold Farm"),
+              targetName = st.npcName,
+              progressText = st.note,
+              isCurrentTarget = isCurHop,
+              isSelectedQuest = false,
+              isPinned = false,
+              coordConfidence = "artifact_verified",
+              sourceMapID = dstMapID,
+              sourceX01 = tonumber(st.destination.x01),
+              sourceY01 = tonumber(st.destination.y01),
+              x01 = projX,
+              y01 = projY,
+              priority = isCurHop and 48 or (pinKind == "turnin" and 38 or 30),
+              orderIndex = orderCounter,
+            })
+          end
+        end
       end
     end
   end
-
-  if tonumber(dstMapID) == RIVERGLADES_MAP_ID and selectedQuest.available and RoutePlanner.InspectQuestCoverage then
-    local cov = RoutePlanner.InspectQuestCoverage(
-      selectedQuest.questID,
-      selectedQuest.title,
-      route,
-      eval,
-      ctx,
-      progress
-    )
-    if cov and (cov.status == "quarantined_objective" or cov.status == "unmapped") then
-      local qLvl = tonumber(cov.questLevel) or tonumber(selectedQuest.level)
-      local lvlTag = qLvl and qLvl > 0 and string.format("[%d%s] ", qLvl, cov.isElite and "+" or "") or ""
-      local selName = tostring(cov.questTitle or selectedQuest.title or "Selected Quest")
-      local statusLabel = (cov.status == "quarantined_objective")
-        and "Location unverified (no FH pin)"
-        or "Not in Riverglades route (no FH pin)"
-      local arrowPart = ""
-      if activeArrowQuestTitle and activeArrowQuestTitle ~= "" then
-        arrowPart = " · Arrow: " .. tostring(activeArrowQuestTitle)
-      end
-      rawCounts.selectedQuestNotice = {
-        questID = cov.questID or selectedQuest.questID,
-        questTitle = selName,
-        questLevel = qLvl,
-        status = cov.status,
-        reason = cov.quarantinedReason,
-        arrowQuestTitle = activeArrowQuestTitle,
-        bannerText = string.format("Selected: %s%s — %s%s", lvlTag, selName, statusLabel, arrowPart),
-      }
-    end
-  end
-  WorldMapPins.lastSelectedQuestNotice = rawCounts.selectedQuestNotice
 
   return entries, rawCounts
 end
@@ -492,12 +525,15 @@ function WorldMapPins.BuildClusters(entries, canvasWidth, canvasHeight, canvasSc
     local matchedCluster = nil
     local bestDistSq = limitSq
     for _, cl in ipairs(clusters) do
-      local dx = (entry.x01 - cl.x01) * effW
-      local dy = (entry.y01 - cl.y01) * effH
-      local dSq = dx * dx + dy * dy
-      if dSq <= bestDistSq then
-        matchedCluster = cl
-        bestDistSq = dSq
+      local sameSpawnRole = ((entry.isSpawnNodePin == true) == (cl.primary and cl.primary.isSpawnNodePin == true))
+      if sameSpawnRole then
+        local dx = (entry.x01 - cl.x01) * effW
+        local dy = (entry.y01 - cl.y01) * effH
+        local dSq = dx * dx + dy * dy
+        if dSq <= bestDistSq then
+          matchedCluster = cl
+          bestDistSq = dSq
+        end
       end
     end
 
@@ -600,6 +636,17 @@ local function formatKindTag(entry)
     end
     return txt
   end
+  if entry.isGoldFarmPin then
+    if entry.isSpawnNodePin then
+      if entry.isCoolingDown then
+        return col("status.warning", string.format("Respawning (~%ds)", tonumber(entry.remainingSeconds) or 0))
+      end
+      return col("status.ready", "Mob Spawn (Ready)")
+    elseif entry.kind == "turnin" then
+      return col("status.ready", "Vendor & Repair")
+    end
+    return col("accent.gold", "Route Hop")
+  end
   if entry.kind == "turnin" then
     return col("status.ready", "Turn-in (?)")
   elseif entry.kind == "objective" then
@@ -653,7 +700,13 @@ local function showPinTooltip(pin)
   local wrnR, wrnG, wrnB = unpackCol("status.warning", 0.95, 0.77, 0.38)
 
   local primary = cluster.primary
-  local xPct, yPct = ns.Domain.RoutePlanner.NormalizedToPercent(primary.sourceX01, primary.sourceY01)
+  local xPct, yPct
+  if ns.Domain and ns.Domain.GoldFarms and ns.Domain.GoldFarms.NormalizedToPercent then
+    xPct, yPct = ns.Domain.GoldFarms.NormalizedToPercent(primary.sourceX01, primary.sourceY01)
+  else
+    xPct = (tonumber(primary.sourceX01) or 0) * 100
+    yPct = (tonumber(primary.sourceY01) or 0) * 100
+  end
 
   if cluster.count == 1 then
     local titleStr = formatEntryLevelPrefix(primary) .. tostring(primary.questTitle)
@@ -702,7 +755,7 @@ local function showPinTooltip(pin)
     end
   else
     local header = string.format(
-      "ForeverHub · %d Quests Here (%.1f, %.1f)",
+      "ForeverHub · %d Farm Points Here (%.1f, %.1f)",
       cluster.count,
       xPct or 0,
       yPct or 0
@@ -749,24 +802,11 @@ local function showPinTooltip(pin)
   end
 
   if type(tip.AddLine) == "function" then
-    local prog = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-    local rxpOwnsNav = (prog and prog.mode == "rxp")
-      or (
-        ns.Bridges
-        and ns.Bridges.RXPBridge
-        and ns.Bridges.RXPBridge.IsRivergladesGuideSelected
-        and ns.Bridges.RXPBridge.IsRivergladesGuideSelected()
-      )
     tip:AddLine(" ", 1, 1, 1)
-    if rxpOwnsNav then
-      tip:AddLine("Left-Click: Save ForeverHub focus (RXP controls active arrow)", wrnR, wrnG, wrnB)
-    elseif cluster.count > 1 then
-      tip:AddLine("Left-Click: Focus or cycle quests here", mutR, mutG, mutB)
+    if cluster.count > 1 then
+      tip:AddLine("Left-Click: Navigate or cycle farm points here", mutR, mutG, mutB)
     else
       tip:AddLine("Left-Click: Navigate here", mutR, mutG, mutB)
-    end
-    if prog and prog.pinnedActionID then
-      tip:AddLine("Right-Click: Clear manual pin", mutR, mutG, mutB)
     end
   end
 
@@ -781,16 +821,6 @@ function WorldMapPins.HandleClusterClick(cluster, mouseButton)
   end
 
   if mouseButton == "RightButton" then
-    local prog = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-    if prog and prog.pinnedActionID and ns.Domain and ns.Domain.RouteProgress then
-      local ok, eval = ns.Domain.RouteProgress.ClearPinnedFocus(nil, prog)
-      if ok and prog.mode ~= "paused" and ns.UI and ns.UI.Navigation then
-        ns.UI.Navigation.SyncFromEvaluation(eval, prog)
-      end
-      ns.Compat.Print("Cleared manual map focus — resumed automatic Riverglades routing.")
-      WorldMapPins.RefreshNow()
-      return true
-    end
     return false
   end
 
@@ -805,59 +835,17 @@ function WorldMapPins.HandleClusterClick(cluster, mouseButton)
     return false
   end
 
-  if chosen.kind == "accept" and chosen.questLogFull then
-    ns.Compat.Print(
-      string.format(
-        "Quest Log is full (40/40) — turn in a completed quest before accepting '%s'.",
-        tostring(chosen.questTitle)
-      )
-    )
-    return false
-  end
-
-  if ns.Domain and ns.Domain.RouteProgress and ns.Domain.RouteProgress.FocusActionFromMapPin then
-    local ok, evalOrErr = ns.Domain.RouteProgress.FocusActionFromMapPin(chosen.actionID, chosen.subID)
-    if ok then
-      local prog = ns.State.GetRouteProgress()
-      local navSt = nil
-      if ns.UI and ns.UI.Navigation then
-        navSt = ns.UI.Navigation.SyncFromEvaluation(evalOrErr, prog)
-      end
-      local xPct, yPct = ns.Domain.RoutePlanner.NormalizedToPercent(chosen.sourceX01, chosen.sourceY01)
-      local subSuffix = chosen.spotLabel and (" [" .. tostring(chosen.spotLabel) .. "]") or ""
-      local rxpActive = (prog and prog.mode == "rxp")
-        or (navSt and navSt.activeProvider == "rxp")
-        or (
-          ns.Bridges
-          and ns.Bridges.RXPBridge
-          and ns.Bridges.RXPBridge.IsRivergladesGuideSelected
-          and ns.Bridges.RXPBridge.IsRivergladesGuideSelected()
-        )
-      if rxpActive then
-        ns.Compat.Print(
-          string.format(
-            "Saved ForeverHub map focus -> %s%s (%.1f, %.1f). RXPGuides currently owns the active arrow; deselect the RXP guide or run '/fh rg start' to use ForeverHub's arrow.",
-            tostring(chosen.questTitle),
-            subSuffix,
-            xPct or 0,
-            yPct or 0
-          )
-        )
-      else
-        ns.Compat.Print(
-          string.format(
-            "Focused ForeverHub Arrow -> %s%s (%.1f, %.1f). Right-click pin or click [Unpin ×] on map to unpin.",
-            tostring(chosen.questTitle),
-            subSuffix,
-            xPct or 0,
-            yPct or 0
-          )
-        )
+  if chosen.isGoldFarmPin and chosen.farmID then
+    if ns.Events and ns.Events.HandleGoldSubcommand then
+      ns.Events.HandleGoldSubcommand("start " .. tostring(chosen.farmID))
+      local gProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
+      if gProg and chosen.stepID and gProg.currentStepID ~= chosen.stepID then
+        gProg.currentStepID = chosen.stepID
+        if ns.UI and ns.UI.Navigation and ns.UI.Navigation.SyncFromGoldFarmEvaluation then
+          ns.UI.Navigation.SyncFromGoldFarmEvaluation(nil, gProg)
+        end
       end
       WorldMapPins.RefreshNow()
-      if WorldMapPins.hoveredPin and WorldMapPins.hoveredPin.cluster then
-        showPinTooltip(WorldMapPins.hoveredPin)
-      end
       return true
     end
   end
@@ -887,9 +875,11 @@ local function stylePinVisuals(pin, cluster, canvasScale)
   local primary = cluster.primary
   local invScale = 1.0 / math.max(0.15, tonumber(canvasScale) or 1.0)
 
-  -- Hit target >= 24 screen-space units; 28 when focused/active target (never call pin:SetScale).
-  local baseSize = cluster.hasCurrentTarget and 28 or 24
-  local visualDiscSize = cluster.hasCurrentTarget and 26 or (primary.kind == "turnin" and 24 or 22)
+  -- Hit target >= 24 screen-space units for quest/service pins; compact dots (18/26) for non-service spawn points (never call pin:SetScale).
+  local isSpawnDot = (primary and primary.isSpawnNodePin == true)
+  local baseSize = isSpawnDot and (cluster.hasCurrentTarget and 26 or 18) or (cluster.hasCurrentTarget and 28 or 24)
+  local visualDiscSize = isSpawnDot and (cluster.hasCurrentTarget and 24 or 15)
+    or (cluster.hasCurrentTarget and 26 or (primary.kind == "turnin" and 24 or 22))
 
   local btnSize = baseSize * invScale
   local ringSize = visualDiscSize * invScale
@@ -950,6 +940,11 @@ local function stylePinVisuals(pin, cluster, canvasScale)
     end
   end
 
+  if primary.isCoolingDown then
+    glyphToken = "text.muted"
+    ringToken = "border.subtle"
+  end
+
   if cluster.hasCurrentTarget then
     ringToken = "accent.gold"
   elseif cluster.hasSelectedQuest or primary.isPinned then
@@ -973,7 +968,8 @@ local function stylePinVisuals(pin, cluster, canvasScale)
     if type(pin.ring.SetVertexColor) == "function" then
       if Theme and Theme.UnpackRGBA then
         local r, g, b = Theme.UnpackRGBA(ringToken)
-        local alpha = (primary.kind == "accept" and primary.questLogFull) and 0.72 or 0.98
+        local alpha = (primary.isCoolingDown and not cluster.hasCurrentTarget) and 0.50
+          or ((primary.kind == "accept" and primary.questLogFull) and 0.72 or 0.98)
         pin.ring:SetVertexColor(r, g, b, alpha)
       else
         pin.ring:SetVertexColor(0.85, 0.71, 0.42, 0.98)
@@ -1349,11 +1345,6 @@ local function ensureFilterBar(mapFrame)
   end)
 
   bar.eliteBtn = createPillButton(bar, 80, function()
-    local prog = ns.State.GetRouteProgress()
-    prog.includeEliteBounties = not prog.includeEliteBounties
-    if ns.Events and ns.Events.FlushRouteReconcileNow then
-      ns.Events.FlushRouteReconcileNow()
-    end
     WorldMapPins.lastLayoutKey = nil
     WorldMapPins.RefreshNow()
   end)
@@ -1414,138 +1405,12 @@ local function ensureFilterBar(mapFrame)
   return bar
 end
 
-local function updateFilterBarPresentation(mapFrame, mapID, rawCounts)
-  local bar = ensureFilterBar(mapFrame)
-  if not bar then
-    return
-  end
-  if tonumber(mapID) ~= RIVERGLADES_MAP_ID then
-    if bar.selectionNoticeFrame then
-      bar.selectionNoticeFrame:Hide()
+local function updateFilterBarPresentation(_mapFrame, _mapID, _rawCounts)
+  if WorldMapPins.filterBar then
+    if WorldMapPins.filterBar.selectionNoticeFrame then
+      WorldMapPins.filterBar.selectionNoticeFrame:Hide()
     end
-    bar:Hide()
-    return
-  end
-
-  local Theme = ns.UI and ns.UI.Theme
-  local s = ns.State.GetWorldMapPinSettings()
-  local prog = ns.State.GetRouteProgress()
-  local counts = rawCounts or { objectives = 0, turnins = 0, available = 0 }
-
-  local corner = s.pillCorner or "BOTTOMLEFT"
-  if bar.__appliedCorner ~= corner then
-    applyFilterBarCornerAnchor(bar, corner)
-  end
-
-  local function setPillState(btn, text, active, accentMode)
-    if not btn or not btn.label then
-      return
-    end
-    btn.label:SetText(text)
-    if type(btn.label.SetTextColor) == "function" then
-      if Theme and Theme.UnpackRGBA then
-        local tok = "text.muted"
-        if accentMode == "gold" and active then
-          tok = "accent.gold"
-        elseif accentMode == "warning" and active then
-          tok = "status.warning"
-        elseif active then
-          tok = "text.primary"
-        end
-        local r, g, b = Theme.UnpackRGBA(tok)
-        btn.label:SetTextColor(r, g, b, 1.0)
-      else
-        if active then
-          btn.label:SetTextColor(0.93, 0.91, 0.86, 1.0)
-        else
-          btn.label:SetTextColor(0.57, 0.62, 0.66, 1.0)
-        end
-      end
-    end
-    if btn.bg and type(btn.bg.SetColorTexture) == "function" then
-      if Theme and Theme.UnpackRGBA then
-        local bgTok = active and (accentMode == "gold" and "surface.selected" or "surface.elevated") or "surface.card"
-        local r, g, b = Theme.UnpackRGBA(bgTok)
-        btn.bg:SetColorTexture(r, g, b, active and 0.96 or 0.78)
-      else
-        if active then
-          btn.bg:SetColorTexture(0.16, 0.21, 0.25, 0.96)
-        else
-          btn.bg:SetColorTexture(0.09, 0.11, 0.13, 0.78)
-        end
-      end
-    end
-  end
-
-  local hostW = (bar.host and type(bar.host.GetWidth) == "function" and tonumber(bar.host:GetWidth())) or 0
-  if hostW <= 1 then
-    local cv = getWorldMapCanvas(mapFrame)
-    hostW = (cv and type(cv.GetWidth) == "function" and tonumber(cv:GetWidth())) or 1002
-  end
-  bar.__isAutoNarrow = (hostW > 1 and hostW < 680)
-  local collapsed = (s.filtersCollapsed == true) or (bar.__isAutoNarrow and not bar.__forceExpandedNarrow)
-
-  setPillState(bar.masterBtn, s.enabled and "FH Pins: ON" or "FH Pins: OFF", s.enabled == true, "gold")
-  setPillState(bar.objBtn, string.format("Objectives (%d)", counts.objectives or 0), s.enabled and s.showObjectives)
-  setPillState(bar.turnInBtn, string.format("Turn-ins (%d)", counts.turnins or 0), s.enabled and s.showTurnIns)
-  setPillState(bar.availBtn, string.format("Available (%d)", counts.available or 0), s.enabled and s.showAvailable)
-  setPillState(bar.eliteBtn, prog.includeEliteBounties and "Elites: ON" or "Elites: OFF", prog.includeEliteBounties == true)
-  setPillState(bar.collapseBtn, collapsed and "Filters ▾" or "Filters ▴", not collapsed)
-  setPillState(bar.cornerBtn, PILL_CORNER_LABELS[corner] or "⌞", false)
-
-  local xCursor = 4
-  local function placeBtn(btn, w)
-    if type(btn.ClearAllPoints) == "function" then
-      btn:ClearAllPoints()
-    end
-    btn:SetSize(w, 22)
-    btn:SetPoint("LEFT", bar, "LEFT", xCursor, 0)
-    btn:Show()
-    xCursor = xCursor + w + 4
-  end
-
-  placeBtn(bar.masterBtn, 88)
-  if collapsed then
-    placeBtn(bar.collapseBtn, 78)
-    bar.objBtn:Hide()
-    bar.turnInBtn:Hide()
-    bar.availBtn:Hide()
-    bar.eliteBtn:Hide()
-  else
-    if bar.__isAutoNarrow or s.filtersCollapsed == true then
-      placeBtn(bar.collapseBtn, 78)
-    else
-      bar.collapseBtn:Hide()
-    end
-    placeBtn(bar.objBtn, 98)
-    placeBtn(bar.turnInBtn, 92)
-    placeBtn(bar.availBtn, 94)
-    placeBtn(bar.eliteBtn, 80)
-  end
-
-  if prog and prog.pinnedActionID then
-    setPillState(bar.unpinBtn, "Unpin ×", true, "warning")
-    placeBtn(bar.unpinBtn, 66)
-  else
-    bar.unpinBtn:Hide()
-  end
-
-  placeBtn(bar.cornerBtn, 24)
-  bar:SetSize(xCursor, 28)
-  bar:Show()
-
-  if bar.selectionNoticeFrame then
-    local notice = (counts and counts.selectedQuestNotice) or WorldMapPins.lastSelectedQuestNotice
-    if notice and type(notice.bannerText) == "string" and notice.bannerText ~= "" then
-      if bar.selectionNoticeFrame.label then
-        bar.selectionNoticeFrame.label:SetText(notice.bannerText)
-      end
-      local bannerW = math.max(xCursor, math.min(math.max(360, hostW - 24), math.max(420, #notice.bannerText * 6 + 24)))
-      bar.selectionNoticeFrame:SetSize(bannerW, 24)
-      bar.selectionNoticeFrame:Show()
-    else
-      bar.selectionNoticeFrame:Hide()
-    end
+    WorldMapPins.filterBar:Hide()
   end
 end
 
@@ -1574,6 +1439,7 @@ function WorldMapPins.RequestRefresh()
     WorldMapPins.RefreshNow()
   end
 end
+WorldMapPins.Refresh = WorldMapPins.RequestRefresh
 
 function WorldMapPins.RefreshNow()
   WorldMapPins.EnsureHooksInstalled()
@@ -1598,8 +1464,7 @@ function WorldMapPins.RefreshNow()
   end
 
   local settings = ns.State.GetWorldMapPinSettings()
-  local progress = ns.State.GetRouteProgress()
-  local entries, rawCounts = WorldMapPins.CollectPinEntries(mapID, nil, progress, settings)
+  local entries, rawCounts = WorldMapPins.CollectPinEntries(mapID, nil, nil, settings)
   WorldMapPins.lastEntries = entries
   WorldMapPins.lastSummaryCounts = rawCounts
   WorldMapPins.dirty = false
@@ -1634,7 +1499,10 @@ function WorldMapPins.RefreshNow()
         pin:SetParent(canvas)
       end
       pin.cluster = cluster
-      local lvl = baseCanvasLevel + (cluster.hasCurrentTarget and PIN_TARGET_LEVEL_OFFSET or PIN_FRAME_LEVEL_OFFSET)
+      local isGoldServicePin = (cluster.primary and cluster.primary.isGoldFarmPin == true and cluster.primary.isSpawnNodePin ~= true)
+      local lvlOffset = cluster.hasCurrentTarget and PIN_TARGET_LEVEL_OFFSET
+        or (isGoldServicePin and PIN_SERVICE_LEVEL_OFFSET or PIN_FRAME_LEVEL_OFFSET)
+      local lvl = baseCanvasLevel + lvlOffset
       if type(pin.SetFrameLevel) == "function" then
         pin:SetFrameLevel(lvl)
       end
@@ -1729,22 +1597,14 @@ function WorldMapPins.EnsureHooksInstalled()
             local canvas = getWorldMapCanvas(mapFrame)
             local sc = canvas and type(canvas.GetScale) == "function" and canvas:GetScale() or nil
             local cw = canvas and type(canvas.GetWidth) == "function" and canvas:GetWidth() or nil
-            local sel = (mID == RIVERGLADES_MAP_ID and ns.Compat and ns.Compat.GetSelectedQuestInfo)
-                and ns.Compat.GetSelectedQuestInfo()
-              or nil
-            local selKey = (sel and sel.available)
-                and (tostring(sel.questID or "") .. "|" .. tostring(sel.normTitle or ""))
-              or ""
             if WorldMapPins.dirty
               or mID ~= lastObsMap
               or (sc and lastObsScale and math.abs(sc - lastObsScale) > 0.001)
               or (cw and cw ~= lastObsW)
-              or (selKey ~= lastObsSelKey)
             then
               lastObsMap = mID
               lastObsScale = sc
               lastObsW = cw
-              lastObsSelKey = selKey
               WorldMapPins.RefreshNow()
             end
           end,

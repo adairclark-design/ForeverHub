@@ -341,16 +341,36 @@ function CratesUI.ExportShoppingList(mode)
 
   local suffix = (mode == "bags_only") and "Bags Only" or nil
   local listName = ns.Providers.Auctionator.GetDefaultShoppingListName(suffix)
-  local ok, countOrErr, createdName = ns.Providers.Auctionator.CreateShoppingList(listName, toBuy)
+  local ok, countOrErr, createdName, details = ns.Providers.Auctionator.CreateShoppingList(
+    listName,
+    toBuy,
+    { userInitiated = true, returnDetails = true }
+  )
   if ok then
-    ns.Compat.Print(
-      string.format(
-        "Exported %d material(s) to Auctionator shopping list '%s' (Retrieve from bank: %d).",
-        countOrErr,
-        tostring(createdName or listName),
-        totalRetrieve
+    local pendingCount = details and details.pending and #details.pending or 0
+    local excludedCount = details and details.excluded and #details.excluded or 0
+    if details and not details.isComplete then
+      ns.Compat.Print(
+        string.format(
+          "Exported %d of %d material(s) to Auctionator discovery list '%s' (%d pending client cache — retry in a moment; %d skipped; Retrieve from bank: %d).",
+          countOrErr,
+          countOrErr + pendingCount + excludedCount,
+          tostring(createdName or listName),
+          pendingCount,
+          excludedCount,
+          totalRetrieve
+        )
       )
-    )
+    else
+      ns.Compat.Print(
+        string.format(
+          "Exported %d material(s) to Auctionator discovery list '%s' (Retrieve from bank: %d; verify stack buyouts before buying).",
+          countOrErr,
+          tostring(createdName or listName),
+          totalRetrieve
+        )
+      )
+    end
   else
     ns.Compat.Print("Could not create Auctionator shopping list: " .. tostring(countOrErr))
   end
@@ -1565,6 +1585,9 @@ function CratesUI.RenderViewModel(viewModel, contentWidth, contentHeight, isComp
               optVM.estCostFormatted,
               optVM.replacementFormatted
             )
+            if optVM.isSelected and type(optVM.selectedRowOpportunityDetailText) == "string" and optVM.selectedRowOpportunityDetailText ~= "" then
+              footerSummaryStr = footerSummaryStr .. "\n" .. optVM.selectedRowOpportunityDetailText
+            end
 
             local footerH = Theme.METRICS.optionFooterHeight
             local controlsReport = {}
@@ -1576,13 +1599,13 @@ function CratesUI.RenderViewModel(viewModel, contentWidth, contentHeight, isComp
 
             if not optCols.isCompact then
               -- Standard Layout (>=900): QuantityEditor sits in `plan` column in ingredient band;
-              -- Primary `Reserve` / `Choose` sits in `plan` column in the 32-unit footer band!
+              -- Primary `Reserve` / `Choose` sits in `plan` column in the footer band!
               local footerTextRightLimit = optCols.plan.x - 8
               local availFooterTextW = math.max(120, footerTextRightLimit - badgeX)
               local ftY = badgeY + 1
               local ftX = badgeX
-              if availFooterTextW < 180 and badgeX > optCols.mat.x then
-                -- Drop summary cleanly onto a second sub-line inside footer if multiple badges are active
+              if (availFooterTextW < 180 or optVM.isSelected) and badgeX > optCols.mat.x then
+                -- Drop summary cleanly onto a second sub-line inside footer if badges are active or selected details are shown
                 ftX = optCols.mat.x
                 ftY = badgeY + 22
                 availFooterTextW = math.max(180, footerTextRightLimit - ftX)
@@ -1593,7 +1616,8 @@ function CratesUI.RenderViewModel(viewModel, contentWidth, contentHeight, isComp
                 Theme.ApplyFont(optW.footerText, "dense", "text.secondary")
               end
               local ftH = Theme.MeasureWrappedHeight(optW.footerText, footerSummaryStr, availFooterTextW, "dense", 18, 0)
-              footerH = math.max(Theme.METRICS.optionFooterHeight, (ftY - ingredientsBottomY) + ftH + 6)
+              local extraBottomClearance = (optVM.isSelected and cardVM.isReserved and optVM.isReserved) and 30 or 6
+              footerH = math.max(Theme.METRICS.optionFooterHeight, (ftY - ingredientsBottomY) + ftH + extraBottomClearance)
 
               if optVM.isSelected then
                 if optW.chooseBtn then Widgets.SafeShow(optW.chooseBtn, false) end

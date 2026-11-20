@@ -38,10 +38,12 @@ local function ensureTabRendererInitialized(tabKey)
   end
   if tabKey == "crates" and ns.UI and ns.UI.Crates and type(ns.UI.Crates.EnsureInitialized) == "function" then
     ns.UI.Crates.EnsureInitialized()
-  elseif tabKey == "riverglades" and ns.UI and ns.UI.Riverglades and type(ns.UI.Riverglades.EnsureHost) == "function" then
-    ns.UI.Riverglades.EnsureHost()
   elseif tabKey == "gold" and ns.UI and ns.UI.GoldFarms and type(ns.UI.GoldFarms.EnsureHost) == "function" then
     ns.UI.GoldFarms.EnsureHost()
+  elseif tabKey == "advisor" and ns.UI and ns.UI.CommandDeck and type(ns.UI.CommandDeck.EnsureHost) == "function" then
+    ns.UI.CommandDeck.EnsureHost()
+  elseif tabKey == "research" and ns.UI and ns.UI.ResearchView and type(ns.UI.ResearchView.EnsureHost) == "function" then
+    ns.UI.ResearchView.EnsureHost()
   end
   return Workspace.tabRenderers[tabKey]
 end
@@ -232,7 +234,7 @@ local function createDiagnosticsDrawer(parent)
         end
       end
       if ns.Compat and type(ns.Compat.Print) == "function" then
-        ns.Compat.Print(string.format("Installed: v%s — Check website for updates: %s", tostring(ns.version or "0.8.8"), UPDATE_PORTAL_URL))
+        ns.Compat.Print(string.format("Installed: v%s — Check website for updates: %s", tostring(ns.version or "0.8.9"), UPDATE_PORTAL_URL))
       end
     end)
     drawer.updateCheckBtn = updateCheckBtn
@@ -244,8 +246,8 @@ local function createDiagnosticsDrawer(parent)
     end
     Theme.ApplyFont(self.body, "dense", "text.secondary")
     local meta = (ns.Data and ns.Data.meta) or {}
-    local rgMeta = (ns.RivergladesData and ns.RivergladesData.meta) or {}
-    local buildVer, buildNum, _, tocNum = "1.60.1", "70862", "", "16001"
+    local gfMeta = (ns.GoldFarmsData and ns.GoldFarmsData.meta) or {}
+    local buildVer, buildNum, _, tocNum = "1.60.1", "70938", "", "16001"
     if type(_G.GetBuildInfo) == "function" then
       local v, b, _, t = _G.GetBuildInfo()
       buildVer = tostring(v or buildVer)
@@ -254,17 +256,23 @@ local function createDiagnosticsDrawer(parent)
     end
     local hasAuc = (ns.Providers and ns.Providers.Auctionator and ns.Providers.Auctionator.IsAvailable and ns.Providers.Auctionator.IsAvailable()) or false
     local invName = (ns.Providers and ns.Providers.Syndicator and ns.Providers.Syndicator.GetActiveBackendName and ns.Providers.Syndicator.GetActiveBackendName()) or "None"
-    local curVer = tostring(ns.version or "0.8.8")
+    local curVer = tostring(ns.version or "0.8.9")
     local lines = {
       string.format("Installed: v%s  ·  Client %s (Build %s, TOC %s)", curVer, buildVer, buildNum, tocNum),
-      string.format("Crates: %s (%s) · Riverglades Rev %s (%s)", tostring(meta.corpusRevisionID or "unknown"), string.sub(tostring(meta.compiledContentSha256 or "unknown"), 1, 8), tostring(rgMeta.datasetRevision or "?"), string.sub(tostring(rgMeta.compiledContentSha256 or "unknown"), 1, 8)),
+      string.format(
+        "Crates: %s (%s) · Gold & Grind Rev %s (%s)",
+        tostring(meta.corpusRevisionID or "unknown"),
+        string.sub(tostring(meta.compiledContentSha256 or "unknown"), 1, 8),
+        tostring(gfMeta.revision or "?"),
+        string.sub(tostring(gfMeta.compiledContentSha256 or "unknown"), 1, 8)
+      ),
       string.format("Providers: Auctionator=%s · AccountInv=%s", hasAuc and "OK" or "Missing", tostring(invName)),
       "",
       string.format("Changelog (v%s):", curVer),
-      "• Compact 240x48 Tracker HUD (Arrow, Quest Name, Distance/Status, ...)",
-      "• Mapped all 124 playable Riverglades & Krol'dok quests (330 steps)",
-      "• Fixed Snargl's Snout & accepted Elite quest pins on World Map",
-      "• Added Search Area badges + live auto-snap for unpinned spawns",
+      "• Portfolio Triage Engine (6-bucket holdings actions + Top-20 raid watchlist)",
+      "• 3-tier Profession Roadmap + optional read-only Blackthornes snapshot bridge",
+      "• Custom Forever Alchemy, Smelting & Legionite spreads + Dec 9, 2026 raid clock",
+      "• Lv 46–60 Arcane ST Grind Catalog (19 primary subcamps + 7 experimental)",
     }
     self.body:SetText(table.concat(lines, "\n"))
     if self.updateUrlBox and type(self.updateUrlBox.SetText) == "function" then
@@ -392,7 +400,7 @@ function Workspace.EnsureCreated()
   if subtitleText then
     Widgets.SafeSetPoint(subtitleText, "LEFT", titleText or titleBar or f, "RIGHT", 10, -1)
     if type(subtitleText.SetText) == "function" then
-      subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.8")))
+      subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.9")))
     end
   end
   f.subtitleText = subtitleText
@@ -470,34 +478,46 @@ function Workspace.EnsureCreated()
   end
   f.scaleBtn = scaleBtn
 
-  -- 2. Tab Bar (Y = -44, H = 36) — Riverglades featured in primary Slot #1
+  -- 2. Tab Bar (Y = -44, H = 36) — Gold & Farms featured in primary Slot #1
   local tabBar = Widgets.CreateTabBar(f, {
     {
-      key = "riverglades",
-      label = "Riverglades",
+      key = "gold",
+      label = "Gold & Farms",
       width = 188,
       featured = true,
       iconGlyph = "travel",
       iconToken = "accent.gold",
-      tooltipTitle = "Riverglades Route (Primary Hub)",
+      tooltipTitle = "Gold Farms & Grind Radar (Primary Hub)",
       tooltipLines = {
-        "Inspect live Riverglades quest route progress, turn-ins, and map pin filters.",
-        "Opening this tab inspects your route safely without auto-starting navigation.",
+        "Click any Level 40 or Level 46–60 Arcane ST spot to navigate directly with Spawn Radar and FH_Target.",
+        "Opening this tab inspects spots safely without auto-starting navigation.",
       },
     },
     {
       key = "crates",
       label = "Crates & Writs",
-      width = 164,
+      width = 168,
       tooltipTitle = "Crates & Writs Planner",
       tooltipLines = { "Reservation-aware Waylaid Crate & Writ planning, bank withdrawal, and Auctionator shopping." },
     },
     {
-      key = "gold",
-      label = "Gold & Mount",
-      width = 152,
-      tooltipTitle = "Gold Farms & Mount Target",
-      tooltipLines = { "Inspect Level 40 riding target shortfall and verified gold farm candidates." },
+      key = "advisor",
+      label = "Advisor",
+      width = 148,
+      tooltipTitle = "Supported-Action Gold Advisor",
+      tooltipLines = {
+        "Best supported action available for this character, with costs, reserves, and limitations visible.",
+      },
+    },
+    {
+      key = "research",
+      label = "Research",
+      width = 148,
+      tooltipTitle = "Market Research Watchlist (RESEARCH_ONLY)",
+      tooltipLines = {
+        "Read-only Rung 2 conversion spreads and Rung 3 4-state supply-glut watchlist.",
+        "Never an automated buy recommendation or guaranteed return.",
+      },
     },
   }, function(selectedKey)
     Workspace.SetActiveTab(selectedKey)
@@ -510,7 +530,7 @@ function Workspace.EnsureCreated()
 
   -- 3. Tab Content Host Containers (Y = -80 .. Bottom)
   f.tabHosts = {}
-  for _, tabKey in ipairs({ "riverglades", "crates", "gold" }) do
+  for _, tabKey in ipairs({ "gold", "crates", "advisor", "research" }) do
     local okH, host = pcall(_G.CreateFrame, "Frame", nil, f)
     if okH and host then
       Widgets.SafeSetPoint(host, "TOPLEFT", f, "TOPLEFT", 0, -(Theme.METRICS.titleBarHeight + Theme.METRICS.tabBarHeight))
@@ -607,8 +627,8 @@ function Workspace.SetDimensions(width, height)
 end
 
 function Workspace.SetActiveTab(tabKey)
-  if tabKey ~= "crates" and tabKey ~= "riverglades" and tabKey ~= "gold" then
-    tabKey = "riverglades"
+  if tabKey ~= "crates" and tabKey ~= "gold" and tabKey ~= "advisor" and tabKey ~= "research" then
+    tabKey = "gold"
   end
   local st = ns.State and ns.State.GetWorkspaceUIState and ns.State.GetWorkspaceUIState()
   if st then
@@ -636,8 +656,11 @@ function Workspace.Refresh()
   end
 
   Theme.EnsureFontObjects()
-  local st = (ns.State and ns.State.GetWorkspaceUIState and ns.State.GetWorkspaceUIState()) or { activeTab = "riverglades", textScale = 1.0 }
-  local activeTab = st.activeTab or "riverglades"
+  local st = (ns.State and ns.State.GetWorkspaceUIState and ns.State.GetWorkspaceUIState()) or { activeTab = "gold", textScale = 1.0 }
+  local activeTab = st.activeTab
+  if activeTab ~= "crates" and activeTab ~= "gold" and activeTab ~= "advisor" and activeTab ~= "research" then
+    activeTab = "gold"
+  end
 
   if f.titleText then
     Theme.ApplyFont(f.titleText, "windowTitle", "text.primary")
@@ -645,7 +668,7 @@ function Workspace.Refresh()
   if f.subtitleText then
     Theme.ApplyFont(f.subtitleText, "dense", "text.muted")
     if type(f.subtitleText.SetText) == "function" then
-      f.subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.8")))
+      f.subtitleText:SetText(string.format("Economy & Grind Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.9")))
     end
   end
 
@@ -663,11 +686,26 @@ function Workspace.Refresh()
     f.compactBtn:RefreshVisualState()
   end
 
+  local w, h = Workspace.GetDimensions()
+
   -- Update tab count/status badges cleanly without mutating domain state
   if f.tabBar then
-    if ns.UI and ns.UI.RivergladesPresenter and type(ns.UI.RivergladesPresenter.ComputeTabBadge) == "function" then
-      local rgBadge, rgToken = ns.UI.RivergladesPresenter.ComputeTabBadge()
-      f.tabBar:SetTabCountBadge("riverglades", rgBadge, rgToken)
+    if type(f.tabBar.SetAvailableWidth) == "function" then
+      f.tabBar:SetAvailableWidth(w - 2)
+    end
+    local gfProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress() or nil
+    local goldBadge, goldToken = "19 spots", "accent.gold"
+    if gfProg and gfProg.mode ~= "paused" and gfProg.selectedFarmID then
+      goldBadge, goldToken = "Active", "status.ready"
+    end
+    f.tabBar:SetTabCountBadge("gold", goldBadge, goldToken)
+    if ns.UI and ns.UI.CommandDeckPresenter and type(ns.UI.CommandDeckPresenter.ComputeTabBadge) == "function" then
+      local advBadge, advToken = ns.UI.CommandDeckPresenter.ComputeTabBadge(nil, st)
+      f.tabBar:SetTabCountBadge("advisor", advBadge, advToken)
+    end
+    if ns.UI and ns.UI.ResearchView and type(ns.UI.ResearchView.ComputeTabBadge) == "function" then
+      local rBadge, rToken = ns.UI.ResearchView.ComputeTabBadge()
+      f.tabBar:SetTabCountBadge("research", rBadge, rToken)
     end
     local resCount = #(ns.State and ns.State.GetOrderedReservations and ns.State.GetOrderedReservations() or {})
     f.tabBar:SetTabCountBadge("crates", resCount > 0 and string.format("%d planned", resCount) or "", "status.reserved")
@@ -678,7 +716,6 @@ function Workspace.Refresh()
     Widgets.SafeShow(host, k == activeTab)
   end
 
-  local w, h = Workspace.GetDimensions()
   local contentW = w - (Theme.METRICS.workspacePadding * 2)
   local contentH = h - (Theme.METRICS.titleBarHeight + Theme.METRICS.tabBarHeight)
 

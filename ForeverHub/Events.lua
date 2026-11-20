@@ -24,25 +24,6 @@ function Events.RunSelfTestCommand()
     end
   end
 
-  if ns.Domain.SelfTest.RunRivergladesSuite then
-    local rgReport = ns.Domain.SelfTest.RunRivergladesSuite()
-    ns.Compat.Print(
-      string.format(
-        "=== ForeverHub v%s Riverglades & Advisor Self-Tests (%d/%d PASSED) ===",
-        tostring(ns.version or "0.7.1"),
-        rgReport.passed,
-        rgReport.total
-      )
-    )
-    for _, r in ipairs(rgReport.results or {}) do
-      if r.passed then
-        ns.Compat.Print(string.format("  |cff00ff00[PASS]|r %s", r.name))
-      else
-        ns.Compat.Print(string.format("  |cffff4444[FAIL]|r %s — %s", r.name, tostring(r.error)))
-      end
-    end
-  end
-
   if ns.Domain.SelfTest.RunGoldFarmsSuite then
     local gfReport = ns.Domain.SelfTest.RunGoldFarmsSuite()
     ns.Compat.Print(
@@ -66,7 +47,7 @@ function Events.RunSelfTestCommand()
     ns.Compat.Print(
       string.format(
         "=== ForeverHub v%s Workspace UI Self-Tests (%d/%d PASSED) ===",
-        tostring(ns.version or "0.8.0"),
+        tostring(ns.version or "0.8.9"),
         uiReport.passed,
         uiReport.total
       )
@@ -79,6 +60,310 @@ function Events.RunSelfTestCommand()
       end
     end
   end
+  if ns.Domain.SelfTest.RunPhase0MarketSuite then
+    local mkReport = ns.Domain.SelfTest.RunPhase0MarketSuite()
+    ns.Compat.Print(
+      string.format(
+        "=== ForeverHub v%s Phase 0 Market Self-Tests (%d/%d PASSED) ===",
+        tostring(ns.version or "0.8.9"),
+        mkReport.passed,
+        mkReport.total
+      )
+    )
+    for _, r in ipairs(mkReport.results or {}) do
+      if r.passed then
+        ns.Compat.Print(string.format("  |cff00ff00[PASS]|r %s", r.name))
+      else
+        ns.Compat.Print(string.format("  |cffff4444[FAIL]|r %s — %s", r.name, tostring(r.error)))
+      end
+    end
+  end
+  if ns.Domain.SelfTest.RunSpawnRadarSuite then
+    local srReport = ns.Domain.SelfTest.RunSpawnRadarSuite()
+    ns.Compat.Print(
+      string.format(
+        "=== ForeverHub v%s Arcane Grind & Spawn Radar Self-Tests (%d/%d PASSED) ===",
+        tostring(ns.version or "0.8.9"),
+        srReport.passed,
+        srReport.total
+      )
+    )
+    for _, r in ipairs(srReport.results or {}) do
+      if r.passed then
+        ns.Compat.Print(string.format("  |cff00ff00[PASS]|r %s", r.name))
+      else
+        ns.Compat.Print(string.format("  |cffff4444[FAIL]|r %s — %s", r.name, tostring(r.error)))
+      end
+    end
+  end
+  if ns.Domain.SelfTest.RunSunkenTempleCoachSuite then
+    local stReport = ns.Domain.SelfTest.RunSunkenTempleCoachSuite()
+    ns.Compat.Print(
+      string.format(
+        "=== ForeverHub v%s Sunken Temple Coach RC1 Self-Tests (%d/%d PASSED) ===",
+        tostring(ns.version or "0.8.9"),
+        stReport.passed,
+        stReport.total
+      )
+    )
+    for _, r in ipairs(stReport.results or {}) do
+      if r.passed then
+        ns.Compat.Print(string.format("  |cff00ff00[PASS]|r %s", r.name))
+      else
+        ns.Compat.Print(string.format("  |cffff4444[FAIL]|r %s — %s", r.name, tostring(r.error)))
+      end
+    end
+  end
+end
+
+function Events.FormatMarketDataDoctorSummary(explicitNowEpochSec, expectedMarketKey)
+  local ma = ns.Domain and ns.Domain.MarketAccounting
+  if not ma or type(ma.GetSiblingMarketDataStatus) ~= "function" then
+    return "MarketData: Unavailable"
+  end
+  local st = ma.GetSiblingMarketDataStatus(explicitNowEpochSec, expectedMarketKey)
+  if not st or st.status == "missing" then
+    return "MarketData: Missing (ForeverHub_MarketData not loaded)"
+  elseif st.status == "active" then
+    local obsAge = st.newestObservationAgeSec ~= nil and (tostring(st.newestObservationAgeSec) .. "s") or "unknown"
+    local pubAge = st.publishedAgeSec ~= nil and (tostring(st.publishedAgeSec) .. "s") or "unknown"
+    local expStr = st.expiresInSec ~= nil and (tostring(st.expiresInSec) .. "s") or tostring(st.validUntilEpoch or "?")
+    return string.format(
+      "MarketData: Active | Revision=%s | Market=%s | ObservedAge=%s | PublishedAge=%s | ExpiresIn=%s | Items=%d | Basis=%s",
+      tostring(st.contentRevision or "?"),
+      tostring(st.marketKey or "?"),
+      obsAge,
+      pubAge,
+      expStr,
+      tonumber(st.itemCount) or 0,
+      tostring(st.basis or "USER_REPORTED")
+    )
+  elseif st.status == "expired" then
+    return string.format(
+      "MarketData: Expired | Revision=%s | Market=%s | ValidUntil=%s",
+      tostring(st.contentRevision or "?"),
+      tostring(st.marketKey or "?"),
+      tostring(st.validUntilEpoch or "?")
+    )
+  elseif st.status == "wrong_market" then
+    return string.format(
+      "MarketData: WrongMarket | Loaded=%s | Expected=%s",
+      tostring(st.marketKey or "?"),
+      tostring(st.expectedMarketKey or "?")
+    )
+  end
+  return string.format("MarketData: InvalidSchema (%s)", tostring(st.reason or "unknown"))
+end
+
+function Events.RunProbeCommand(subArg)
+  local trimmedSubArg = string.lower(string.gsub(tostring(subArg or ""), "^%s*(.-)%s*$", "%1"))
+  local firstProbeWord, probeTail = string.match(trimmedSubArg, "^(%S+)%s*(.-)$")
+  if firstProbeWord == "st" or firstProbeWord == "sunkentemple" then
+    return Events.HandleSunkenTempleSubcommand("probe " .. tostring(probeTail or ""))
+  end
+  if not (ns.Compat and type(ns.Compat.ProbeEconomyRuntimeCapabilities) == "function") then
+    ns.Compat.Print("Economy runtime capability probe is unavailable.")
+    return nil
+  end
+  local cap = ns.Compat.ProbeEconomyRuntimeCapabilities()
+  if ns.Domain and ns.Domain.MarketAccounting and ns.Domain.MarketAccounting.EnsureMarketExportInitialized then
+    local me = ns.Domain.MarketAccounting.EnsureMarketExportInitialized()
+    me.capabilityMatrix = cap
+  end
+  local cli = cap.client or {}
+  local auc = cap.auctions or {}
+  local prof = cap.professions or {}
+  local mail = cap.mail or {}
+  local loot = cap.loot or {}
+  ns.Compat.Print(
+    string.format(
+      "=== ForeverHub Economy Runtime Probe (%s Build %s, Interface %s) ===",
+      tostring(cli.version or "unknown"),
+      tostring(cli.build or "unknown"),
+      tostring(cli.tocVersion or 0)
+    )
+  )
+  ns.Compat.Print(
+    string.format(
+      "  Client Guards: issecretvalue=%s | NativeCBOR=%s",
+      tostring(cli.hasSecretValueGuard == true),
+      tostring(cli.hasNativeCBOR == true)
+    )
+  )
+  ns.Compat.Print(
+    string.format(
+      "  Auctions: family=%s | legacyQuery=%s | legacyDeposit=%s | modernNS=%s",
+      tostring(auc.detectedFamily or "unavailable"),
+      tostring(auc.hasLegacyQuery == true),
+      tostring(auc.hasLegacyDepositCalc == true),
+      tostring(auc.hasModernNamespace == true)
+    )
+  )
+  ns.Compat.Print(
+    string.format(
+      "  Professions: family=%s | TradeSkill=%s | Craft=%s | ModernTS=%s",
+      tostring(prof.detectedFamily or "unavailable"),
+      tostring(prof.hasClassicTradeSkill == true),
+      tostring(prof.hasClassicCraft == true),
+      tostring(prof.hasModernTradeSkillUI == true)
+    )
+  )
+  ns.Compat.Print(
+    string.format(
+      "  Mail & Loot: inboxHeader=%s | inboxInvoice=%s | lootSlots=%s | lootLinks=%s",
+      tostring(mail.hasInboxHeader == true),
+      tostring(mail.hasInboxInvoice == true),
+      tostring(loot.hasLootSlotInfo == true),
+      tostring(loot.hasLootSlotLink == true)
+    )
+  )
+  local merch = cap.merchant or {}
+  local itemInsp = cap.itemInspection or {}
+  ns.Compat.Print(
+    string.format(
+      "  Merchant & ItemCache: locale=%s | merchantAPI=%s | costInfo=%s | requestLoad=%s | tooltipInfo=%s",
+      tostring(cli.clientLocale or "unknown"),
+      tostring(merch.hasMerchantAPI == true),
+      tostring(merch.hasMerchantCostInfo == true),
+      tostring(itemInsp.hasRequestLoadItemDataByID == true),
+      tostring(itemInsp.hasCTooltipInfo == true)
+    )
+  )
+  if ns.Compat and type(ns.Compat.CaptureRedactedContractFixture) == "function" then
+    local fix = ns.Compat.CaptureRedactedContractFixture()
+    cap.redactedContractFixture = fix
+    local ahP = fix.ahPostProbe or {}
+    local mailP = fix.mailPostageAndCodProbe or {}
+    ns.Compat.Print(
+      string.format(
+        "  Contract Fixture (7A.1): schema=%s | piiRedacted=%s | ahRows=%d | profStatus=%s | mailItems=%d",
+        tostring(fix.schema or "unknown"),
+        tostring(fix.piiRedacted == true),
+        tonumber(fix.auctionPage and fix.auctionPage.inspectedCount) or 0,
+        tostring(fix.professionSnapshot and fix.professionSnapshot.status or "PENDING"),
+        tonumber(fix.mailInbox and fix.mailInbox.numItems) or 0
+      )
+    )
+    ns.Compat.Print(
+      string.format(
+        "  7A.1 Sell & Mail Probes: ahOpen=%s | slotted=%s | venue=%s | sendMailPrice=%s | codSampled=%d",
+        tostring(ns.State and ns.State.ahOpen == true),
+        tostring(ahP.slottedSellItem and ahP.slottedSellItem.slotted == true),
+        tostring(ahP.auctioneerNpc and ahP.auctioneerNpc.status or "UNKNOWN"),
+        tostring(mailP.sendMailPriceCopper or "nil"),
+        tonumber(mailP.inboxSummary and mailP.inboxSummary.codRowCount) or 0
+      )
+    )
+  end
+  return cap
+end
+
+function Events.HandleDiscoverySubcommand(rest)
+  if not (ns.State and ns.State.EnsureDiscoveryCollectorInitialized) then
+    ns.Compat.Print("Discovery collector is unavailable.")
+    return
+  end
+  local sub = string.lower(string.gsub(tostring(rest or ""), "^%s*(.-)%s*$", "%1"))
+  if sub == "on" or sub == "enable" then
+    ns.State.SetDiscoveryOptIn(true)
+    ns.Compat.Print("ForeverHub Discovery Collector: OPTED IN (candidate-only; never auto-promotes executable or compiler truth).")
+    return
+  elseif sub == "off" or sub == "disable" then
+    ns.State.SetDiscoveryOptIn(false)
+    ns.Compat.Print("ForeverHub Discovery Collector: OPTED OUT (default).")
+    return
+  end
+  local dc = ns.State.EnsureDiscoveryCollectorInitialized()
+  local st = dc.stats or {}
+  ns.Compat.Print(
+    string.format(
+      "Discovery Collector: %s | offers=%d/%d | recipes=%d/%d | bytes=%d/%d | droppedCap=%d | droppedBytes=%d",
+      dc.optInEnabled and "OPTED_IN" or "OPTED_OUT",
+      #(dc.merchantOffers or {}),
+      tonumber(ns.State.DISCOVERY_MAX_OFFERS) or 64,
+      #(dc.recipes or {}),
+      tonumber(ns.State.DISCOVERY_MAX_RECIPES) or 64,
+      tonumber(dc.estimatedBytes) or 0,
+      tonumber(ns.State.DISCOVERY_MAX_SERIALIZED_BYTES) or 65536,
+      tonumber(st.droppedByCapCount) or 0,
+      tonumber(st.droppedByByteBudgetCount) or 0
+    )
+  )
+  ns.Compat.Print("Usage: /fh discovery [status | on | off]")
+end
+
+Events.deckRefreshPending = false
+
+function Events.ScheduleCoalescedDeckRefresh()
+  if Events.deckRefreshPending then
+    return
+  end
+  local function flushDeck()
+    Events.deckRefreshPending = false
+    if ns.UI and ns.UI.CommandDeck and ns.UI.CommandDeck.RefreshIfShown then
+      pcall(ns.UI.CommandDeck.RefreshIfShown)
+    end
+  end
+  if C_Timer and type(C_Timer.After) == "function" then
+    Events.deckRefreshPending = true
+    local ok = pcall(C_Timer.After, 0.15, flushDeck)
+    if not ok then
+      flushDeck()
+    end
+  else
+    flushDeck()
+  end
+end
+
+function Events.HandleMarketSubcommand(rest)
+  local ma = ns.Domain and ns.Domain.MarketAccounting
+  if not ma then
+    ns.Compat.Print("MarketAccounting module is unavailable.")
+    return
+  end
+  local trimmed = string.gsub(tostring(rest or ""), "^%s*(.-)%s*$", "%1")
+  local sub, tail = string.match(trimmed, "^(%S+)%s*(.-)$")
+  sub = string.lower(sub or "status")
+  if sub == "" or sub == "status" then
+    ns.Compat.Print(Events.FormatMarketDataDoctorSummary())
+    local me = ma.EnsureMarketExportInitialized()
+    ns.Compat.Print(
+      string.format(
+        "MarketExport Queue: seq=%d | observations=%d | depositQuotes=%d | mailOutcomes=%d",
+        tonumber(me.installationSeq) or 0,
+        #(me.observations or {}),
+        #(me.depositQuotes or {}),
+        #(me.mailOutcomes or {})
+      )
+    )
+    return
+  elseif sub == "export" then
+    local idStr, poolStr = string.match(tail or "", "^(%d+)%s*(%S*)$")
+    local itemID = tonumber(idStr)
+    if not itemID then
+      ns.Compat.Print("Usage: /fh market export <itemID> [alliance|horde|neutral]")
+      return
+    end
+    local pool = (poolStr and poolStr ~= "") and poolStr or nil
+    local obs, err = ma.ExportProviderMaterialSlice(itemID, pool)
+    if not obs then
+      ns.Compat.Print("Market slice export failed: " .. tostring(err))
+      return
+    end
+    ns.Compat.Print(
+      string.format(
+        "Exported %s (%s) @ %dc | market=%s | observedAt=%s | coarseAgeDays=%s (run /reload to flush SavedVariables)",
+        tostring(obs.observationId),
+        tostring(obs.itemKey),
+        tonumber(obs.unitPriceCopper) or 0,
+        tostring(obs.marketKey),
+        tostring(obs.observedAt),
+        tostring(obs.ageDaysCoarse)
+      )
+    )
+    return
+  end
+  ns.Compat.Print("Usage: /fh market [status | export <itemID> [pool]]")
 end
 
 function Events.RunDoctor()
@@ -143,14 +428,6 @@ function Events.RunDoctor()
   end
 
   local rgSelfTestSuffix = ""
-  if ns.Domain and ns.Domain.SelfTest and ns.Domain.SelfTest.RunRivergladesSuite then
-    local rgSum = ns.Domain.SelfTest.GetDoctorSuiteSummary
-      and ns.Domain.SelfTest.GetDoctorSuiteSummary("riverglades")
-      or nil
-    if rgSum then
-      rgSelfTestSuffix = " | RG-v0.4.0: " .. rgSum
-    end
-  end
   if ns.Domain and ns.Domain.SelfTest and ns.Domain.SelfTest.RunGoldFarmsSuite then
     local gfSum = ns.Domain.SelfTest.GetDoctorSuiteSummary
       and ns.Domain.SelfTest.GetDoctorSuiteSummary("gold_farms")
@@ -165,6 +442,30 @@ function Events.RunDoctor()
       or nil
     if uiSum then
       rgSelfTestSuffix = rgSelfTestSuffix .. " | UI-v0.8.0: " .. uiSum
+    end
+  end
+  if ns.Domain and ns.Domain.SelfTest and ns.Domain.SelfTest.RunPhase0MarketSuite then
+    local mkSum = ns.Domain.SelfTest.GetDoctorSuiteSummary
+      and ns.Domain.SelfTest.GetDoctorSuiteSummary("phase0_market")
+      or nil
+    if mkSum then
+      rgSelfTestSuffix = rgSelfTestSuffix .. " | MK-v0.9.0: " .. mkSum
+    end
+  end
+  if ns.Domain and ns.Domain.SelfTest and ns.Domain.SelfTest.RunSpawnRadarSuite then
+    local srSum = ns.Domain.SelfTest.GetDoctorSuiteSummary
+      and ns.Domain.SelfTest.GetDoctorSuiteSummary("spawn_radar")
+      or nil
+    if srSum then
+      rgSelfTestSuffix = rgSelfTestSuffix .. " | SR-v0.9.1: " .. srSum
+    end
+  end
+  if ns.Domain and ns.Domain.SelfTest and ns.Domain.SelfTest.RunSunkenTempleCoachSuite then
+    local stSum = ns.Domain.SelfTest.GetDoctorSuiteSummary
+      and ns.Domain.SelfTest.GetDoctorSuiteSummary("sunken_temple_rc1")
+      or nil
+    if stSum then
+      rgSelfTestSuffix = rgSelfTestSuffix .. " | ST-RC1: " .. stSum
     end
   end
 
@@ -206,6 +507,7 @@ function Events.RunDoctor()
       tostring(bankMeta and bankMeta.complete or false)
     )
   )
+  ns.Compat.Print(Events.FormatMarketDataDoctorSummary())
   ns.Compat.Print(
     string.format(
       "Character %s-%s: %d Unopened Crate(s) across %d type(s) | %d Sealed Crate(s) | %d Writ(s) | %d Active Goal(s) | SelfTests: %s%s",
@@ -237,251 +539,25 @@ Events.objectiveVerifySeq = 0
 
 function Events.FlushRouteReconcileNow()
   Events.reconcilePending = false
-  if not (ns.Domain and ns.Domain.RouteProgress) then
-    return nil
-  end
-  if ns.Compat and ns.Compat.InvalidateQuestStateCaches then
-    ns.Compat.InvalidateQuestStateCaches()
-  end
-  local progress = ns.State.GetRouteProgress()
-  local eval = ns.Domain.RouteProgress.Reconcile(nil, progress)
-  if progress and progress.mode ~= "paused" and ns.UI and ns.UI.Navigation then
-    pcall(ns.UI.Navigation.SyncFromEvaluation, eval, progress)
-  end
   if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
     pcall(ns.UI.WorldMapPins.RequestRefresh)
   end
   if ns.UI and ns.UI.Workspace and ns.UI.Workspace.RefreshIfShown then
     pcall(ns.UI.Workspace.RefreshIfShown)
   end
-  return eval
+  return nil
 end
 
 function Events.ScheduleRouteReconcile()
-  if Events.reconcilePending then
-    return
-  end
-  if C_Timer and type(C_Timer.After) == "function" then
-    Events.reconcilePending = true
-    local ok = pcall(C_Timer.After, 0.12, function()
-      Events.FlushRouteReconcileNow()
-    end)
-    if not ok then
-      Events.FlushRouteReconcileNow()
-    end
-  else
-    Events.FlushRouteReconcileNow()
-  end
+  Events.FlushRouteReconcileNow()
 end
 
 function Events.ScheduleObjectiveVerificationReconciles()
-  Events.ScheduleRouteReconcile()
-  if not (C_Timer and type(C_Timer.After) == "function") then
-    return
-  end
-  local progress = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-  if not progress or progress.mode == "paused" then
-    return
-  end
-  Events.objectiveVerifySeq = (Events.objectiveVerifySeq or 0) + 1
-  local seq = Events.objectiveVerifySeq
-  for _, delaySec in ipairs({ 0.60, 1.40 }) do
-    pcall(C_Timer.After, delaySec, function()
-      if seq ~= Events.objectiveVerifySeq then
-        return
-      end
-      local curProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-      if curProg and curProg.mode ~= "paused" then
-        Events.CaptureQuestFieldTelemetry("objective_scan")
-        Events.FlushRouteReconcileNow()
-      end
-    end)
-  end
+  return
 end
 
 function Events.ScheduleVerificationReconciles()
-  Events.ScheduleRouteReconcile()
-  if not (C_Timer and type(C_Timer.After) == "function") then
-    return
-  end
-  local progress = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-  if not progress or progress.mode == "paused" then
-    return
-  end
-  for _, delaySec in ipairs({ 0.85, 2.20 }) do
-    pcall(C_Timer.After, delaySec, function()
-      local curProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-      if curProg and curProg.mode ~= "paused" then
-        Events.FlushRouteReconcileNow()
-      end
-    end)
-  end
-end
-
-local function formatRouteStepSummary(act)
-  if not act then
-    return "None (all eligible steps completed or skipped)"
-  end
-  local dest = act.destination
-  local npcName = act.npcName
-  if ns.Domain and ns.Domain.RoutePlanner and ns.Domain.RoutePlanner.ResolveActiveActionTarget then
-    local rd, rn = ns.Domain.RoutePlanner.ResolveActiveActionTarget(act, ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress() or nil)
-    if type(rd) == "table" then
-      dest = rd
-    end
-    if type(rn) == "string" and rn ~= "" then
-      npcName = rn
-    end
-  end
-  if dest then
-    local xPct, yPct = ns.Domain.RoutePlanner.NormalizedToPercent(dest.x01, dest.y01)
-    local npcSuffix = (type(npcName) == "string" and npcName ~= "") and (" — " .. npcName) or ""
-    return string.format("[%s] %s @ (%.1f, %.1f)%s", tostring(act.actionID), tostring(act.title), xPct or 0, yPct or 0, npcSuffix)
-  end
-  return string.format("[%s] %s (Manual pin)", tostring(act.actionID), tostring(act.title))
-end
-
-function Events.RunRivergladesDoctor()
-  local rgMeta = (ns.RivergladesData and ns.RivergladesData.meta) or {}
-  local route = ns.State.GetCompiledRivergladesRoute()
-  local progress = ns.State.GetRouteProgress()
-  local eval = (ns.Domain.RouteProgress.Evaluate and ns.Domain.RouteProgress.Evaluate(route, progress))
-    or ns.Domain.RouteProgress.Reconcile(route, progress)
-
-  local mapValid = ns.Compat.ValidateUiMap(2548)
-  local canWp = ns.Compat.CanSetNativeWaypoint(2548)
-  local rxpAvail = ns.Bridges.RXPBridge and ns.Bridges.RXPBridge.IsAvailable() or false
-  local rxpSel = ns.Bridges.RXPBridge and ns.Bridges.RXPBridge.IsRivergladesGuideSelected() or false
-  local ttAvail = (type(_G.TomTom) == "table" and type(_G.TomTom.AddWaypoint) == "function")
-  local qAudit = ns.Providers.Questie and ns.Providers.Questie.AuditManifestAgainstLiveQuestie(route)
-    or { available = false, status = { reason = "unavailable" }, mismatches = {} }
-
-  local rgTestSummary = "N/A"
-  if ns.Domain.SelfTest and ns.Domain.SelfTest.GetDoctorSuiteSummary then
-    rgTestSummary = ns.Domain.SelfTest.GetDoctorSuiteSummary("riverglades")
-  end
-
-  ns.Compat.Print(string.format("=== ForeverHub Riverglades Doctor (v%s) ===", tostring(ns.version or "0.7.1")))
-  ns.Compat.Print(
-    string.format(
-      "Route: %s (dataset=%s, rev=%s, faction=%s) | Content SHA: %s | Manifest SHA: %s",
-      tostring(route and route.routeID or "missing"),
-      tostring(rgMeta.datasetVersion or route and route.datasetVersion or "?"),
-      tostring(rgMeta.datasetRevision or route and route.revision or "?"),
-      tostring(route and route.faction or "?"),
-      string.sub(tostring(rgMeta.compiledContentSha256 or "unknown"), 1, 16),
-      string.sub(tostring(rgMeta.sourceManifestHash or "unknown"), 1, 16)
-    )
-  )
-  ns.Compat.Print(
-    string.format(
-      "Map 2548: valid=%s (%s) | CanSetUserWaypoint=%s (%s) | TomTom=%s | RXP=%s (selected=%s) | FieldCaptures=%d",
-      tostring(mapValid.value),
-      tostring(mapValid.status),
-      tostring(canWp.value),
-      tostring(canWp.status),
-      ttAvail and "OK" or "Missing",
-      rxpAvail and "OK" or "Missing",
-      tostring(rxpSel),
-      #(ns.State.GetFieldCaptures and ns.State.GetFieldCaptures() or {})
-    )
-  )
-  if qAudit.available then
-    ns.Compat.Print(
-      string.format(
-        "Questie Adapter: READY (Questie=%s, QuestieDB=%s) | Manifest NPCs=%d/%d | Quests in DB=%d/%d | Mismatches=%d",
-        tostring(qAudit.status.questieVersion or "unknown"),
-        tostring(qAudit.status.questieDBVersion or "unknown"),
-        qAudit.npcMatched or 0,
-        qAudit.npcTotal or 0,
-        qAudit.questPresent or 0,
-        qAudit.questTotal or 0,
-        #(qAudit.mismatches or {})
-      )
-    )
-    for _, m in ipairs(qAudit.mismatches or {}) do
-      ns.Compat.Print("  |cffffcc00[Mismatch]|r " .. tostring(m))
-    end
-  else
-    ns.Compat.Print(
-      string.format(
-        "Questie Adapter: Not Active (%s) — using pinned offline dataset.",
-        tostring(qAudit.status and qAudit.status.reason or "not_loaded")
-      )
-    )
-  end
-  local counts = (eval and eval.counts) or {}
-  local navStatus = ns.UI.Navigation and ns.UI.Navigation.lastStatus or {}
-  local arrowSnap = ns.UI.Navigation and ns.UI.Navigation.GetLiveArrowSnapshot and ns.UI.Navigation.GetLiveArrowSnapshot() or nil
-  ns.Compat.Print(
-    string.format(
-      "Progress: mode=%s | nav=%s | arrow=%s%s | %d/%d completed, %d skipped, %d available, %d unresolved-title, %d quarantined | RG SelfTests: %s",
-      tostring(progress and progress.mode or "paused"),
-      tostring(navStatus.activeProvider or "none"),
-      tostring(arrowSnap and arrowSnap.status or "idle"),
-      (arrowSnap and type(arrowSnap.yards) == "number") and string.format("(%.0fyd)", arrowSnap.yards) or "",
-      counts.completed or 0,
-      counts.total or 0,
-      counts.skipped or 0,
-      counts.available or 0,
-      counts.blockedUnresolvedHistory or 0,
-      tonumber(rgMeta.quarantinedActionCount) or 0,
-      rgTestSummary
-    )
-  )
-  if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.CollectPinEntries then
-    local pinSettings = ns.State.GetWorldMapPinSettings()
-    local entries2548, raw2548 = ns.UI.WorldMapPins.CollectPinEntries(2548, route, progress, pinSettings)
-    local snap = ns.UI.WorldMapPins.GetLiveSnapshot and ns.UI.WorldMapPins.GetLiveSnapshot() or {}
-    ns.Compat.Print(
-      string.format(
-        "World Map Pins: %s (Obj=%s, TurnIn=%s, Avail=%s) | Map 2548 pins=%d (obj=%d, turnin=%d, avail=%d) | Active canvas clusters=%d",
-        pinSettings.enabled ~= false and "ON" or "OFF",
-        pinSettings.showObjectives ~= false and "ON" or "OFF",
-        pinSettings.showTurnIns ~= false and "ON" or "OFF",
-        pinSettings.showAvailable ~= false and "ON" or "OFF",
-        #(entries2548 or {}),
-        raw2548 and raw2548.objectives or 0,
-        raw2548 and raw2548.turnins or 0,
-        raw2548 and raw2548.available or 0,
-        snap.activePinCount or 0
-      )
-    )
-  end
-  local driftList = {}
-  if ns.Compat and type(ns.Compat.liveQuestTargetDrifts) == "table" then
-    for _, ov in pairs(ns.Compat.liveQuestTargetDrifts) do
-      if type(ov) == "table" and type(ov.destination) == "table" then
-        table.insert(driftList, ov)
-      end
-    end
-    table.sort(driftList, function(a, b)
-      return tostring(a.actionID) < tostring(b.actionID)
-    end)
-  end
-  ns.Compat.Print(
-    string.format(
-      "Live Self-Healing: %d quest target override(s) active",
-      #driftList
-    )
-  )
-  for _, ov in ipairs(driftList) do
-    local hx, hy = ns.Domain.RoutePlanner.NormalizedToPercent(ov.destination.x01, ov.destination.y01)
-    ns.Compat.Print(
-      string.format(
-        "  |cff5cc98a[Healed]|r [%s] q=%s via %s (~%d yds): %s -> %s @ (%.1f, %.1f)",
-        tostring(ov.actionID),
-        tostring(ov.questID),
-        tostring(ov.source),
-        tonumber(ov.deltaYards) or 0,
-        tostring(ov.staticNpcName or "?"),
-        tostring(ov.targetName or "?"),
-        hx or 0,
-        hy or 0
-      )
-    )
-  end
-  ns.Compat.Print("Current Step: " .. formatRouteStepSummary(eval and eval.nextAction))
+  return
 end
 
 local function refreshWorldMapPinsIfLoaded()
@@ -490,381 +566,227 @@ local function refreshWorldMapPinsIfLoaded()
   end
 end
 
-local function printWorldMapPinsStatus(prefix)
-  local pinSettings = ns.State.GetWorldMapPinSettings()
-  local progress = ns.State.GetRouteProgress()
-  local entries2548, raw2548 = {}, {}
-  if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.CollectPinEntries then
-    entries2548, raw2548 = ns.UI.WorldMapPins.CollectPinEntries(2548, nil, progress, pinSettings)
+local resyncActiveNavigationContext
+
+function Events.HandleRivergladesSubcommand(_subRaw)
+  ns.Compat.Print("The Riverglades quest helper has been retired (RestedXP now includes Riverglades natively). Use /fh gold or /fh crates.")
+end
+
+local function printSunkenTempleAutopsy(aut)
+  if not aut then
+    ns.Compat.Print("Sunken Temple Pull Autopsy: No closed attempt recorded in this session yet.")
+    return
   end
   ns.Compat.Print(
     string.format(
-      "%sWorld Map Pins: %s | Obj=%s (%d) | TurnIn=%s (%d) | Avail!=%s (%d) | Elites=%s | Visible on Riverglades=%d",
-      prefix and (prefix .. " — ") or "",
-      pinSettings.enabled ~= false and "ON" or "OFF",
-      pinSettings.showObjectives ~= false and "ON" or "OFF",
-      raw2548 and raw2548.objectives or 0,
-      pinSettings.showTurnIns ~= false and "ON" or "OFF",
-      raw2548 and raw2548.turnins or 0,
-      pinSettings.showAvailable ~= false and "ON" or "OFF",
-      raw2548 and raw2548.available or 0,
-      progress.includeEliteBounties and "ON" or "OFF",
-      #(entries2548 or {})
+      "=== ST Pull Autopsy (Attempt #%d · Outcome: %s · %.1fs · Phase: %s · Events: %d%s) ===",
+      tonumber(aut.attemptID) or 1,
+      tostring(aut.outcome or "?"),
+      tonumber(aut.durationSec) or 0,
+      tostring(aut.terminalPhaseTitle or "?"),
+      tonumber(aut.totalObservedEvents) or 0,
+      aut.overflowed and " [64-event ring rotated; header preserved]" or ""
     )
   )
+  for _, c in ipairs(aut.confirmed or {}) do
+    ns.Compat.Print(string.format("  |cff00ff88[CONFIRMED]|r %s (%s)", tostring(c.summary), tostring(c.evidence)))
+  end
+  for _, h in ipairs(aut.likelyHeuristics or {}) do
+    ns.Compat.Print(
+      string.format(
+        "  |cffffcc00[LIKELY_HEURISTIC]|r %s | Missing link: %s",
+        tostring(h.summary),
+        tostring(h.missingLink or "unverified")
+      )
+    )
+  end
+  for _, u in ipairs(aut.unobservable or {}) do
+    ns.Compat.Print(string.format("  |cff88aacc[UNOBSERVABLE_IN_16001]|r %s", tostring(u.summary)))
+  end
 end
 
-local resyncActiveNavigationContext
-
-function Events.HandleRivergladesSubcommand(subRaw)
-  local cleaned = string.gsub(tostring(subRaw or ""), "^%s*(.-)%s*$", "%1")
-  local sub, argRaw = string.match(cleaned, "^(%S*)%s*(.-)$")
+function Events.HandleSunkenTempleSubcommand(restRaw)
+  local coach = ns.Domain and ns.Domain.SunkenTempleCoach
+  if not coach then
+    ns.Compat.Print("SunkenTempleCoach module is not loaded.")
+    return nil
+  end
+  local cleaned = string.gsub(tostring(restRaw or ""), "^%s*(.-)%s*$", "%1")
+  local sub, tail = string.match(cleaned, "^(%S*)%s*(.-)$")
   sub = string.lower(sub or "")
-  argRaw = string.gsub(tostring(argRaw or ""), "^%s*(.-)%s*$", "%1")
-  local arg = string.lower(argRaw)
 
-  local function refreshRivergladesUIIfShown()
-    if ns.UI and ns.UI.Riverglades and ns.UI.Riverglades.RefreshIfShown then
-      ns.UI.Riverglades.RefreshIfShown()
-    elseif ns.UI and ns.UI.Workspace and ns.UI.Workspace.RefreshIfShown then
-      ns.UI.Workspace.RefreshIfShown()
-    end
-  end
-
-  if sub == "ui" then
-    if ns.UI and ns.UI.Riverglades and ns.UI.Riverglades.Toggle then
-      ns.UI.Riverglades.Toggle()
-    end
-    return
-  elseif sub == "hud" then
-    local arrowSettings = ns.State.GetArrowSettings()
-    local hudSub, hudVal = string.match(arg, "^(%S*)%s*(.-)$")
-    hudSub = string.lower(hudSub or "")
-    if hudSub == "hide" or hudSub == "off" then
-      arrowSettings.hudHidden = true
-      resyncActiveNavigationContext()
-      ns.Compat.Print("Hid ForeverHub Tracker HUD (active navigation remains running; '/fh rg hud show' to restore).")
-    elseif hudSub == "show" or hudSub == "on" then
-      arrowSettings.hudHidden = false
-      resyncActiveNavigationContext()
-      ns.Compat.Print("Restored ForeverHub Tracker HUD.")
-    elseif hudSub == "lock" then
-      arrowSettings.hudLocked = true
-      resyncActiveNavigationContext()
-      ns.Compat.Print("Locked ForeverHub Tracker HUD position.")
-    elseif hudSub == "unlock" then
-      arrowSettings.hudLocked = false
-      resyncActiveNavigationContext()
-      ns.Compat.Print("Unlocked ForeverHub Tracker HUD (left-drag tracker to reposition).")
-    elseif hudSub == "width" then
-      local wNum = tonumber(hudVal)
-      if not wNum or wNum < 200 or wNum > 440 then
-        ns.Compat.Print("Usage: /fh rg hud width <200-440>")
-        return
-      end
-      arrowSettings.hudWidth = math.floor(wNum + 0.5)
-      resyncActiveNavigationContext()
-      ns.Compat.Print(string.format("Set ForeverHub Tracker HUD width to %d.", arrowSettings.hudWidth))
-    else
-      arrowSettings.hudHidden = not (arrowSettings.hudHidden == true)
-      resyncActiveNavigationContext()
-      ns.Compat.Print("ForeverHub Tracker HUD: " .. (arrowSettings.hudHidden and "Hidden" or "Visible"))
-    end
-    return
-  elseif sub == "" or sub == "status" then
-    if sub == "" and ns.UI and ns.UI.Riverglades and ns.UI.Riverglades.Toggle then
-      ns.UI.Riverglades.Toggle()
-    end
-    local progress = ns.State.GetRouteProgress()
-    local eval = (ns.Domain.RouteProgress.Evaluate and ns.Domain.RouteProgress.Evaluate(nil, progress))
-      or ns.Domain.RouteProgress.Reconcile(nil, progress)
-    local counts = eval.counts or {}
-    local navLabel = (ns.UI.Navigation and ns.UI.Navigation.lastStatus and ns.UI.Navigation.lastStatus.navigationLabel) or "Paused"
-    local unresSuffix = (counts.blockedUnresolvedHistory and counts.blockedUnresolvedHistory > 0)
-        and string.format(", %d unresolved-title", counts.blockedUnresolvedHistory)
-      or ""
+  if sub == "probe" then
+    local snap = coach.RunOptInProbe(tail)
+    local cli = snap.client or {}
+    local inst = snap.instance or {}
+    local sig = snap.signals or {}
     ns.Compat.Print(
       string.format(
-        "Riverglades Route (%s | Nav: %s | %d/%d done, %d skipped%s): %s",
-        tostring(progress.mode),
-        tostring(navLabel),
-        counts.completed or 0,
-        counts.total or 0,
-        counts.skipped or 0,
-        unresSuffix,
-        formatRouteStepSummary(eval.nextAction)
+        "=== ForeverHub ST Live Capability Probe [%s] (Read-Only · ProvesRouteReadiness=false) ===",
+        tostring(snap.contextLabel or "probe")
       )
     )
-    if counts.blockedUnresolvedHistory and counts.blockedUnresolvedHistory > 0 then
-      ns.Compat.Print("Note: Unconfirmed pre-install custom title pickups are held back for safety ('/fh rg unresolved' or '/fh rg confirm all').")
-    end
-    if progress.mode == "paused" then
-      ns.Compat.Print("Use '/fh rg start' to begin standalone navigation, or '/fh rg export rxp' to export to RXPGuides.")
-    end
-    return
+    ns.Compat.Print(
+      string.format(
+        "  Client: %s Build %s (Interface %s, locale=%s[%s], issecretvalue=%s, inCombat=%s)",
+        tostring(cli.version),
+        tostring(cli.build),
+        tostring(cli.interfaceVersion),
+        tostring(cli.locale or "nil"),
+        tostring(cli.localeStatus),
+        tostring(cli.hasSecretValueDetector == true),
+        tostring(cli.inCombatLockdown == true)
+      )
+    )
+    ns.Compat.Print(
+      string.format(
+        "  Instance Gate: %s (verifiedST=%s) | inInstance=%s(%s) | types=%s/%s | r8_instanceID=%s(%s) | r9_groupSize=%s(%s) | name=%s",
+        tostring(inst.classification),
+        tostring(inst.verifiedSunkenTemple == true),
+        tostring(inst.inInstance),
+        tostring(inst.inInstanceStatus),
+        tostring(inst.isInTypeStatus),
+        tostring(inst.infoTypeStatus),
+        tostring(inst.return8_instanceID_value or "nil"),
+        tostring(inst.return8_instanceID_status),
+        tostring(inst.return9_groupSize_value or "nil"),
+        tostring(inst.return9_groupSize_status),
+        tostring(inst.nameStatus)
+      )
+    )
+    ns.Compat.Print(
+      string.format(
+        "  Signals: Spellcast=%s(reg=%s) | C_UnitAuras(spell=%s, idx=%s) | UnitBuff=%s | Health=%s/%s | SubZone=%s/%s | Yell=%s | Emote=%s | Target(guid=%s, name=%s) | Plates(list=%s, tok=%s, guid=%s) | CLEU=%s",
+        tostring(sig.unitSpellcastSucceeded and sig.unitSpellcastSucceeded.status),
+        tostring(sig.unitSpellcastSucceeded and sig.unitSpellcastSucceeded.registration),
+        tostring(sig.cUnitAuras and sig.cUnitAuras.bySpellIDStatus),
+        tostring(sig.cUnitAuras and sig.cUnitAuras.byIndexStatus),
+        tostring(sig.legacyUnitBuff and sig.legacyUnitBuff.nameStatus),
+        tostring(sig.unitHealth and sig.unitHealth.healthStatus),
+        tostring(sig.unitHealth and sig.unitHealth.maxHealthStatus),
+        tostring(sig.subZone and sig.subZone.subZoneStatus),
+        tostring(sig.subZone and sig.subZone.minimapZoneStatus),
+        tostring(sig.monsterYell and sig.monsterYell.status),
+        tostring(sig.monsterEmote and sig.monsterEmote.status),
+        tostring(sig.target and sig.target.guidStatus),
+        tostring(sig.target and sig.target.nameStatus),
+        tostring(sig.namePlates and sig.namePlates.listStatus),
+        tostring(sig.namePlates and sig.namePlates.firstTokenStatus),
+        tostring(sig.namePlates and sig.namePlates.firstGuidStatus),
+        tostring(sig.cleuPolicy)
+      )
+    )
+    return snap
   elseif sub == "start" then
-    local ok, evalOrErr = ns.Domain.RouteProgress.Start()
-    if not ok then
-      ns.Compat.Print("Riverglades start failed: " .. tostring(evalOrErr))
-      return
-    end
-    local arrowSettings = ns.State.GetArrowSettings()
-    arrowSettings.hudHidden = false
-    local navSt = ns.UI.Navigation.SyncFromEvaluation(evalOrErr)
-    refreshWorldMapPinsIfLoaded()
-    refreshRivergladesUIIfShown()
-    ns.Compat.Print(
-      string.format(
-        "Started Riverglades route (Nav: %s) -> %s",
-        tostring(navSt.navigationLabel),
-        formatRouteStepSummary(evalOrErr.nextAction)
-      )
-    )
-    return
-  elseif sub == "pause" then
-    local _, eval = ns.Domain.RouteProgress.Pause()
-    ns.UI.Navigation.SyncFromEvaluation(eval)
-    refreshWorldMapPinsIfLoaded()
-    refreshRivergladesUIIfShown()
-    ns.Compat.Print("Paused Riverglades route (owned waypoint cleared; progress preserved).")
-    return
-  elseif sub == "stop" then
-    local resetSkips = (arg == "reset")
-    local _, eval = ns.Domain.RouteProgress.Stop(nil, nil, nil, resetSkips)
-    ns.UI.Navigation.SyncFromEvaluation(eval)
-    refreshWorldMapPinsIfLoaded()
-    refreshRivergladesUIIfShown()
-    ns.Compat.Print(
-      resetSkips and "Stopped Riverglades route and cleared manual skips."
-        or "Stopped Riverglades route (use '/fh rg stop reset' to also clear manual skips)."
-    )
-    return
-  elseif sub == "next" or sub == "skip" then
-    local ok, resOrErr = ns.Domain.RouteProgress.SkipCurrentAction()
-    if not ok then
-      ns.Compat.Print("Riverglades next: " .. tostring(resOrErr))
-      return
-    end
-    local progress = ns.State.GetRouteProgress()
-    if progress.mode ~= "paused" then
-      ns.UI.Navigation.SyncFromEvaluation(resOrErr.evaluation, progress)
-    end
-    refreshWorldMapPinsIfLoaded()
-    refreshRivergladesUIIfShown()
-    ns.Compat.Print(
-      string.format(
-        "Skipped step [%s]: %s (recorded explicit skip; quest NOT marked complete). Next -> %s",
-        tostring(resOrErr.skippedActionID),
-        tostring(resOrErr.skippedAction and resOrErr.skippedAction.title or ""),
-        formatRouteStepSummary(resOrErr.nextAction)
-      )
-    )
-    return
-  elseif sub == "prev" or sub == "back" then
-    local ok, resOrErr = ns.Domain.RouteProgress.StepPreviousAction()
-    if not ok then
-      ns.Compat.Print("Riverglades prev: " .. tostring(resOrErr))
-      return
-    end
-    local progress = ns.State.GetRouteProgress()
-    if progress.mode ~= "paused" then
-      ns.UI.Navigation.SyncFromEvaluation(resOrErr.evaluation, progress)
-    end
-    refreshWorldMapPinsIfLoaded()
-    refreshRivergladesUIIfShown()
-    ns.Compat.Print("Stepped back to -> " .. formatRouteStepSummary(resOrErr.nextAction))
-    return
-  elseif sub == "group" then
-    local progress = ns.State.GetRouteProgress()
-    if arg == "off" or arg == "solo" then
-      progress.includeGroupBranch = false
-    elseif arg == "on" then
-      progress.includeGroupBranch = true
+    local ok, res = coach.StartAttempt()
+    if ok then
+      ns.Compat.Print("Sunken Temple Coach: Started Attempt #" .. tostring(res.attemptID) .. " at Phase 1/6 (Entrance Run to Reset Ledge #1).")
     else
-      progress.includeGroupBranch = not progress.includeGroupBranch
+      ns.Compat.Print("Sunken Temple Coach cannot start: " .. tostring(res))
     end
-    local eval = Events.FlushRouteReconcileNow()
-    ns.Compat.Print(
-      string.format(
-        "Optional Krol'dok group dungeon branch: %s. Current -> %s",
-        progress.includeGroupBranch and "ENABLED" or "DISABLED (strict solo)",
-        formatRouteStepSummary(eval and eval.nextAction)
-      )
-    )
-    return
-  elseif sub == "elites" or sub == "elite" then
-    local progress = ns.State.GetRouteProgress()
-    if arg == "off" or arg == "solo" then
-      progress.includeEliteBounties = false
-    elseif arg == "on" then
-      progress.includeEliteBounties = true
-    else
-      progress.includeEliteBounties = not progress.includeEliteBounties
-    end
-    local eval = Events.FlushRouteReconcileNow()
-    ns.Compat.Print(
-      string.format(
-        "Optional [42+] Elite bounties (Ghostmaw, Old Rot-Chum, Blademaster Kaijo): %s. Current -> %s",
-        progress.includeEliteBounties and "ENABLED" or "DISABLED (solo-safe; ready turn-ins still shown)",
-        formatRouteStepSummary(eval and eval.nextAction)
-      )
-    )
-    return
-  elseif sub == "pins" or sub == "map" then
-    local pinSettings = ns.State.GetWorldMapPinSettings()
-    if arg == "" or arg == "status" then
-      printWorldMapPinsStatus(nil)
-    elseif arg == "on" then
-      pinSettings.enabled = true
-      refreshWorldMapPinsIfLoaded()
-      printWorldMapPinsStatus("Enabled")
-    elseif arg == "off" then
-      pinSettings.enabled = false
-      refreshWorldMapPinsIfLoaded()
-      printWorldMapPinsStatus("Disabled")
-    elseif arg == "available" or arg == "avail" then
-      pinSettings.showAvailable = not (pinSettings.showAvailable ~= false)
-      refreshWorldMapPinsIfLoaded()
-      printWorldMapPinsStatus("Toggled Available (!)")
-    elseif arg == "objectives" or arg == "obj" then
-      pinSettings.showObjectives = not (pinSettings.showObjectives ~= false)
-      refreshWorldMapPinsIfLoaded()
-      printWorldMapPinsStatus("Toggled Objectives")
-    elseif arg == "turnins" or arg == "turnin" then
-      pinSettings.showTurnIns = not (pinSettings.showTurnIns ~= false)
-      refreshWorldMapPinsIfLoaded()
-      printWorldMapPinsStatus("Toggled Turn-Ins (?)")
-    elseif arg == "reset" then
-      ns.State.ResetWorldMapPinSettings()
-      local progress = ns.State.GetRouteProgress()
-      if ns.Domain.RouteProgress.ClearPinnedFocus then
-        ns.Domain.RouteProgress.ClearPinnedFocus(nil, progress)
-      end
-      if progress.mode ~= "paused" and ns.UI and ns.UI.Navigation then
-        local eval = ns.Domain.RouteProgress.Reconcile(nil, progress)
-        ns.UI.Navigation.SyncFromEvaluation(eval, progress)
-      end
-      refreshWorldMapPinsIfLoaded()
-      printWorldMapPinsStatus("Reset filters & cleared pinned focus")
-    else
-      ns.Compat.Print("Usage: /fh rg pins [status|on|off|available|objectives|turnins|reset]")
-    end
-    return
-  elseif sub == "unresolved" then
-    local route = ns.State.GetCompiledRivergladesRoute()
-    local progress = ns.State.GetRouteProgress()
-    local eval = ns.Domain.RouteProgress.Evaluate(route, progress)
-    local list = ns.Domain.RoutePlanner.ListUnresolvedTitlePickups(eval, route)
-    if #list == 0 then
-      ns.Compat.Print("No unresolved pre-install custom title quests are currently blocking Riverglades pickups.")
-      return
-    end
-    ns.Compat.Print(
-      string.format(
-        "=== Unresolved Custom Title Quests (%d) — pre-install completion cannot be queried without a numeric ID ===",
-        #list
-      )
-    )
-    for _, item in ipairs(list) do
-      local xPct, yPct = 0, 0
-      if item.destination then
-        xPct, yPct = ns.Domain.RoutePlanner.NormalizedToPercent(item.destination.x01, item.destination.y01)
-      end
-      ns.Compat.Print(
-        string.format(
-          "  • %s (%s @ %.1f, %.1f) -> '/fh rg confirm %s'",
-          tostring(item.questTitle),
-          tostring(item.npcName or "Quest Giver"),
-          xPct or 0,
-          yPct or 0,
-          tostring(string.gsub(tostring(item.questKey or ""), "^title:", ""))
-        )
-      )
-    end
-    ns.Compat.Print("If you have NOT completed these pre-install, run '/fh rg confirm <title>' or '/fh rg confirm all' to unlock pickup pins & routing.")
-    return
+    return ok
   elseif sub == "confirm" then
-    local route = ns.State.GetCompiledRivergladesRoute()
-    local progress = ns.State.GetRouteProgress()
-    if arg == "" then
-      ns.Compat.Print("Usage: /fh rg confirm <quest title> | /fh rg confirm all (run '/fh rg unresolved' to inspect)")
-      return
-    end
-    local confirmedTitles = {}
-    local byTitleKey = (route and route.questsByTitleKey) or {}
-    if arg == "all" then
-      for qKey, qMeta in pairs(byTitleKey) do
-        local compRes = ns.Compat.IsQuestCompletedResult(qKey)
-        if type(compRes) == "table" and compRes.reason == "title_history_unresolved" then
-          ns.State.ConfirmUnresolvedQuestIncomplete(qKey, progress)
-          table.insert(confirmedTitles, tostring((qMeta and (qMeta.name or qMeta.title)) or qKey))
-        end
+    local ok, res = coach.ConfirmPhaseLiveWalk(tail)
+    if ok then
+      if res == "cleared" then
+        ns.Compat.Print("Sunken Temple Coach: Cleared in-session live-walk confirmations (returned to Broog video-candidate gate).")
+      elseif res == "all" then
+        ns.Compat.Print("Sunken Temple Coach: Confirmed all 6 phases live on this character for the current session.")
+      else
+        ns.Compat.Print("Sunken Temple Coach: Confirmed Phase " .. tostring(res) .. "/6 live on this character for the current session.")
       end
     else
-      local needle = ns.Compat.NormalizeQuestTitle(arg) or arg
-      for qKey, qMeta in pairs(byTitleKey) do
-        local qTitle = tostring((qMeta and (qMeta.name or qMeta.title)) or qKey)
-        local normQ = ns.Compat.NormalizeQuestTitle(qKey) or string.lower(qTitle)
-        if qKey == arg or normQ == needle or string.find(normQ, needle, 1, true) then
-          ns.State.ConfirmUnresolvedQuestIncomplete(qKey, progress)
-          table.insert(confirmedTitles, qTitle)
-        end
-      end
+      ns.Compat.Print("Usage: /fh st confirm [1-6 | all | reset] (" .. tostring(res) .. ")")
     end
-    if #confirmedTitles == 0 then
-      ns.Compat.Print("No unresolved custom title quest matched '" .. tostring(arg) .. "'. Run '/fh rg unresolved' to list candidates.")
-      return
-    end
-    table.sort(confirmedTitles)
-    local eval = Events.FlushRouteReconcileNow()
-    ns.Compat.Print(
-      string.format(
-        "Confirmed incomplete (%d): %s. Current -> %s",
-        #confirmedTitles,
-        table.concat(confirmedTitles, ", "),
-        formatRouteStepSummary(eval and eval.nextAction)
-      )
-    )
-    return
-  elseif sub == "export" then
-    if arg == "" or arg == "rxp" then
-      local ok, status = ns.Bridges.RXPBridge.RegisterRivergladesGuide(true)
-      if ok and status == "selected" then
-        Events.FlushRouteReconcileNow()
-      end
+    return ok
+  elseif sub == "rearm" then
+    local ok, res = coach.RearmCoach()
+    if ok then
+      ns.Compat.Print("Sunken Temple Coach: Rearmed to READY.")
     else
-      ns.Compat.Print("Usage: /fh rg export rxp")
+      ns.Compat.Print("Sunken Temple Coach cannot rearm: " .. tostring(res))
     end
-    return
-  elseif sub == "mark" or sub == "capture" then
-    local okCap, recOrErr = Events.CaptureQuestFieldTelemetry("manual_mark", nil, argRaw)
-    if not okCap then
-      ns.Compat.Print("Field capture failed (" .. tostring(recOrErr) .. ") — ensure player map coordinates are available.")
-      return
+    return ok
+  elseif sub == "next" then
+    local ok, res = coach.NextPhase()
+    if ok then
+      local pDef = coach.GetPhaseDefinition(res)
+      ns.Compat.Print("Sunken Temple Coach -> " .. tostring(pDef and pDef.title or res))
+    else
+      ns.Compat.Print("Sunken Temple Coach Next unavailable: " .. tostring(res))
     end
-    local allCaps = ns.State.GetFieldCaptures and ns.State.GetFieldCaptures() or {}
-    local qDesc = recOrErr.questTitle
-      or (recOrErr.questID and ("Quest #" .. tostring(recOrErr.questID)))
-      or "Unselected Quest"
-    local noteSuffix = recOrErr.note and (" [" .. tostring(recOrErr.note) .. "]") or ""
+    return ok
+  elseif sub == "prev" or sub == "back" then
+    local ok, res = coach.PrevPhase()
+    if ok then
+      local pDef = coach.GetPhaseDefinition(res)
+      ns.Compat.Print("Sunken Temple Coach <- " .. tostring(pDef and pDef.title or res))
+    else
+      ns.Compat.Print("Sunken Temple Coach Prev unavailable: " .. tostring(res))
+    end
+    return ok
+  elseif sub == "finish" or sub == "complete" then
+    local ok, aut = coach.FinishAttempt()
+    if ok then
+      printSunkenTempleAutopsy(aut)
+    else
+      ns.Compat.Print("Sunken Temple Coach Finish unavailable: " .. tostring(aut))
+    end
+    return ok
+  elseif sub == "abort" then
+    local ok, aut = coach.AbortAttempt(tail)
+    if ok then
+      printSunkenTempleAutopsy(aut)
+    else
+      ns.Compat.Print("Sunken Temple Coach Abort unavailable: " .. tostring(aut))
+    end
+    return ok
+  elseif sub == "reset" then
+    local _, newState = coach.ResetCoachProgress()
+    ns.Compat.Print("Sunken Temple Coach progress reset (coach state -> " .. tostring(newState) .. "; InstanceLedger untouched).")
+    return true
+  elseif sub == "autopsy" then
+    printSunkenTempleAutopsy(coach.state.lastAutopsy)
+    return coach.state.lastAutopsy
+  elseif sub == "show" then
+    coach.SetHudCardHidden(false)
+    ns.Compat.Print("Sunken Temple Maneuver Card enabled (shows automatically inside verified Sunken Temple).")
+    return true
+  elseif sub == "hide" then
+    coach.SetHudCardHidden(true)
+    ns.Compat.Print("Sunken Temple Maneuver Card hidden.")
+    return true
+  elseif sub == "card" then
+    local nextHidden = not (coach.state and coach.state.hudCardHidden == true)
+    coach.SetHudCardHidden(nextHidden)
+    ns.Compat.Print(nextHidden and "Sunken Temple Maneuver Card hidden." or "Sunken Temple Maneuver Card enabled.")
+    return true
+  elseif sub == "ui" then
+    if ns.UI and ns.UI.Workspace and ns.UI.GoldFarms then
+      ns.UI.GoldFarms.EnsureHost()
+      ns.UI.Workspace.Toggle("gold")
+      ns.UI.GoldFarms.Dispatch("SET_SUBVIEW", { subView = "dungeons" })
+    end
+    return true
+  elseif sub == "" or sub == "status" then
+    local vm = coach.GetViewModel()
     ns.Compat.Print(
       string.format(
-        "Recorded field capture #%d [manual_mark] for %s at uiMapID=%d (%.2f, %.2f)%s -> ForeverHubDB.fieldCaptures.",
-        #allCaps,
-        tostring(qDesc),
-        tonumber(recOrErr.uiMapID) or 0,
-        (tonumber(recOrErr.x01) or 0) * 100.0,
-        (tonumber(recOrErr.y01) or 0) * 100.0,
-        noteSuffix
+        "=== ForeverHub Sunken Temple Coach (RC1) | State: %s | Gate: %s | Phase: %d/%d ===",
+        tostring(vm.sessionState),
+        tostring(vm.instanceClassification),
+        tonumber(vm.phaseIndex) or 0,
+        tonumber(vm.totalPhases) or 6
       )
     )
-    return
-  elseif sub == "doctor" then
-    Events.RunRivergladesDoctor()
-    return
-  else
-    ns.Compat.Print("Riverglades commands: /fh rg | /fh rg start | /fh rg pause | /fh rg next | /fh rg prev | /fh rg stop [reset] | /fh rg mark [note] | /fh rg unresolved | /fh rg confirm <quest|all> | /fh rg pins [on|off|available|reset] | /fh rg elites [on|off] | /fh rg group [on|off] | /fh rg export rxp | /fh rg doctor")
+    ns.Compat.Print("  " .. tostring(vm.landmarkLine))
+    ns.Compat.Print("  " .. tostring(vm.instructionLine))
+    ns.Compat.Print("  Commands: /fh st [status | ui | card | probe [ctx] | start | confirm [1-6|all|reset] | rearm | next | prev | finish | abort | reset | autopsy | show | hide]")
+    return vm
   end
+
+  ns.Compat.Print("Usage: /fh st [status | ui | card | probe [ctx] | start | confirm [1-6|all|reset] | rearm | next | prev | finish | abort | reset | autopsy | show | hide]")
+  return false
 end
 
 function Events.HandleMountCommand(restRaw)
@@ -1178,13 +1100,215 @@ function Events.PrintGoldFarmsList()
     end
   end
 
+  if type(catalog.arcaneGrindFarms) == "table" and #catalog.arcaneGrindFarms > 0 then
+    ns.Compat.Print("=== ForeverHub Level 46-60 Arcane ST Mage Grind Candidates (Source-Verified Coords; Unverified Performance) ===")
+    for _, farm in ipairs(catalog.arcaneGrindFarms) do
+      local gphMeta = farm.gphMeta or {}
+      local xpMeta = farm.xpMeta or {}
+      local spawnTotal = 0
+      for _, st in ipairs(farm.travelSteps or {}) do
+        if st.kind == "grind" and type(st.spawnNodes) == "table" then
+          spawnTotal = spawnTotal + #st.spawnNodes
+        end
+      end
+      local purseDesc
+      if gphMeta.vendorFloorStatus == "unmeasured_until_sampled" and gphMeta.lowGold == nil then
+        purseDesc = "Purse floor: Unmeasured until sampled in-client"
+      else
+        purseDesc = string.format(
+          "Est. vendor liq.: %d-%dg/hr (unverified) | Predicted total: %d-%dg/hr (unverified)",
+          tonumber(gphMeta.lowGold) or 0,
+          tonumber(gphMeta.highGold) or 0,
+          tonumber(gphMeta.predictedTotalLowGold or gphMeta.lowGold) or 0,
+          tonumber(gphMeta.predictedTotalHighGold or gphMeta.highGold) or 0
+        )
+      end
+      ns.Compat.Print(
+        string.format(
+          "Candidate %d [%s] %s (Lv %s) — ~%d-%d XP/mob (~%dk-%dk XP/hr @ 90 kills/hr scenario) | %s (%d recorded spawn pts)",
+          tonumber(farm.candidateOrder or farm.rank) or 0,
+          tostring(farm.farmID),
+          tostring(farm.title),
+          tostring(farm.recommendedLevelRange or "46-60"),
+          tonumber(xpMeta.xpPerMobLow) or 0,
+          tonumber(xpMeta.xpPerMobHigh) or 0,
+          math.floor(((tonumber(xpMeta.xpPerHourLow) or 0) + 500) / 1000),
+          math.floor(((tonumber(xpMeta.xpPerHourHigh) or 0) + 500) / 1000),
+          purseDesc,
+          spawnTotal
+        )
+      )
+      ns.Compat.Print("  How to Get There: " .. tostring(farm.howToGetThereSummary or ""))
+      local warnings = ns.Domain.GoldFarms.GetReservationWarningsForFarm(farm)
+      for _, w in ipairs(warnings) do
+        ns.Compat.Print("  |cffffaa00" .. tostring(w.message) .. "|r")
+      end
+    end
+  end
+
   if type(catalog.quarantinedFarms) == "table" and #catalog.quarantinedFarms > 0 then
-    ns.Compat.Print("--- Quarantined 2019 Classic Trap Farms (Do NOT Run at Lv 40 in Forever) ---")
+    ns.Compat.Print("--- Quarantined / Excluded Trap Farms (Do NOT Solo Grind) ---")
     for _, qf in ipairs(catalog.quarantinedFarms) do
       ns.Compat.Print(string.format("  [SKIP] %s — %s", tostring(qf.title), tostring(qf.reason)))
     end
   end
-  ns.Compat.Print("Start navigation + Net Purse Change / Active Hr meter with '/fh gold start <1-5>', or '/fh gold' to open window.")
+  ns.Compat.Print("Start navigation + Net Purse Change / Active Hr meter with '/fh gold start <id>', '/fh gold arcane <id>', or '/fh gold' to open window.")
+end
+
+local function resolveActiveGoldFarmStep()
+  local gProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
+  local GF = ns.Domain and ns.Domain.GoldFarms
+  if not gProg or not GF or not gProg.selectedFarmID then
+    return nil, nil, gProg
+  end
+  local eval = GF.Evaluate(nil, gProg)
+  return eval and eval.farm or nil, eval and eval.activeStep or nil, gProg
+end
+
+local function isFarmTargetIdentity(farm, step, npcID, npcName, gProg)
+  local SR = ns.Domain and ns.Domain.SpawnRadar
+  if SR and SR.GetTargetMatchSets and (farm or step) then
+    local idSet, nameSet = SR.GetTargetMatchSets(farm, step, gProg)
+    if (npcID and idSet[npcID] == true) or (npcName and nameSet[npcName] == true) then
+      return true
+    end
+  end
+  if type(farm) == "table" and type(farm.targets) == "table" and step == nil then
+    for _, t in ipairs(farm.targets) do
+      if (npcID and tonumber(t.npcID) == npcID) or (npcName and tostring(t.name or "") == npcName) then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+function Events.OnGoldFarmTargetOrCombatPull()
+  local SR = ns.Domain and ns.Domain.SpawnRadar
+  if not SR or not SR.RecordPullObservation then
+    return
+  end
+  local farm, step, gProg = resolveActiveGoldFarmStep()
+  if farm and step and gProg and gProg.mode == "standalone" and SR.IsActiveForStep(farm, step, gProg) then
+    SR.RecordPullObservation(farm, step, nil, nil, nil)
+  end
+end
+
+function Events.OnGoldFarmUnitDied(destGUID, destName)
+  if ns.Compat and ns.Compat.IsSecretOrRestrictedValue then
+    if ns.Compat.IsSecretOrRestrictedValue(destGUID) then
+      destGUID = nil
+    end
+    if ns.Compat.IsSecretOrRestrictedValue(destName) then
+      destName = nil
+    end
+  end
+  local cleanGUID = (type(destGUID) == "string" and destGUID ~= "") and destGUID or nil
+  local cleanName = (type(destName) == "string" and destName ~= "") and destName or nil
+  if not cleanGUID and not cleanName then
+    return
+  end
+
+  local npcID = (cleanGUID and ns.Compat and ns.Compat.ExtractCreatureNpcIDFromGUID)
+    and ns.Compat.ExtractCreatureNpcIDFromGUID(cleanGUID)
+    or nil
+  local farm, step, gProg = resolveActiveGoldFarmStep()
+  if not farm or not isFarmTargetIdentity(farm, step, npcID, cleanName, gProg) then
+    return
+  end
+
+  if ns.State and ns.State.RecordGoldFarmVerifiedCampKill then
+    ns.State.RecordGoldFarmVerifiedCampKill({
+      guid = cleanGUID,
+      npcID = npcID,
+      npcName = cleanName,
+    })
+  end
+
+  local SR = ns.Domain and ns.Domain.SpawnRadar
+  if SR and gProg and gProg.mode == "standalone" and step and step.kind == "grind" and SR.IsActiveForStep(farm, step, gProg) then
+    local killRes = SR.RecordVerifiedKillObservation(
+      farm,
+      step,
+      { guid = cleanGUID, npcID = npcID, npcName = cleanName },
+      nil,
+      nil,
+      gProg
+    )
+    if killRes and (tonumber(killRes.suppressed) or 0) > 0 then
+      if ns.UI and ns.UI.Navigation and ns.UI.Navigation.TickSpawnRadar then
+        ns.UI.Navigation.TickSpawnRadar(0, true)
+      end
+      if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+        ns.UI.WorldMapPins.RequestRefresh()
+      end
+    end
+  end
+
+  if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+    ns.UI.GoldFarms.RefreshIfShown()
+  end
+end
+
+function Events.OnGoldFarmCombatOrLootEvent(event, arg1)
+  if event ~= "CHAT_MSG_COMBAT_XP_GAIN" then
+    -- CRITICAL (Astra P1-1): LOOT_OPENED is NEVER an independent kill or radar suppression trigger!
+    return
+  end
+  if ns.Compat and ns.Compat.IsSecretOrRestrictedValue and ns.Compat.IsSecretOrRestrictedValue(arg1) then
+    return
+  end
+  if type(arg1) ~= "string" or arg1 == "" then
+    return
+  end
+
+  local mobName, xpStr = string.match(arg1, "^(.-)%s+dies,%s+you%s+gain%s+(%d+)%s+experience")
+  if type(mobName) ~= "string" or mobName == "" then
+    return
+  end
+  local parsedXP = tonumber(xpStr)
+  local farm, step, gProg = resolveActiveGoldFarmStep()
+  local matchesFarmTarget = farm and isFarmTargetIdentity(farm, step, nil, mobName, gProg) or false
+
+  if matchesFarmTarget then
+    local xpStateOk = false
+    if ns.Compat and type(ns.Compat.GetPlayerXPState) == "function" then
+      local xpSt = ns.Compat.GetPlayerXPState()
+      xpStateOk = (xpSt and (xpSt.status == "ok" or xpSt.status == "capped" or xpSt.status == "transitional_cap_zero"))
+    end
+    if xpStateOk and ns.State and ns.State.RecordGoldFarmVerifiedCampKill then
+      ns.State.RecordGoldFarmVerifiedCampKill({
+        npcName = mobName,
+        expectedXP = parsedXP,
+      })
+    elseif (not xpStateOk) and ns.State and ns.State.RecordGoldFarmXPGain then
+      ns.State.RecordGoldFarmXPGain(parsedXP, true)
+    end
+  end
+
+  local SR = ns.Domain and ns.Domain.SpawnRadar
+  if SR and farm and step and gProg and gProg.mode == "standalone" and step.kind == "grind" and SR.IsActiveForStep(farm, step, gProg) then
+    local killRes = SR.RecordVerifiedKillObservation(
+      farm,
+      step,
+      { npcName = mobName },
+      nil,
+      nil,
+      gProg
+    )
+    if killRes and (tonumber(killRes.suppressed) or 0) > 0 then
+      if ns.UI and ns.UI.Navigation and ns.UI.Navigation.TickSpawnRadar then
+        ns.UI.Navigation.TickSpawnRadar(0, true)
+      end
+      if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+        ns.UI.WorldMapPins.RequestRefresh()
+      end
+    end
+  end
+
+  if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+    ns.UI.GoldFarms.RefreshIfShown()
+  end
 end
 
 function Events.HandleGoldSubcommand(subRaw)
@@ -1207,7 +1331,7 @@ function Events.HandleGoldSubcommand(subRaw)
       if not toggled then
         Events.PrintGoldFarmsList()
       else
-        ns.Compat.Print("Opened ForeverHub Gold Farms advisor. Click 'Navigate (Arrow / Pin)' or run '/fh gold start 1'.")
+        ns.Compat.Print("Opened ForeverHub Gold Farms advisor. Click 'Navigate (Arrow / Pin)' or run '/fh gold start 1' / '/fh gold arcane 1'.")
       end
     else
       local navLabel = (ns.UI.Navigation and ns.UI.Navigation.lastStatus and ns.UI.Navigation.lastStatus.navigationLabel) or "Active"
@@ -1229,36 +1353,327 @@ function Events.HandleGoldSubcommand(subRaw)
     local eval = ns.Domain.GoldFarms.Evaluate(nil, progress)
     local sessSnap = ns.State.GetGoldFarmSessionSnapshot()
     local gphReport = ns.Domain.GoldFarms.EvaluateGPHAndMountETA(eval and eval.farm, sessSnap, ns.State.GetMountTracker())
+    local xpState = (ns.Compat and ns.Compat.GetPlayerXPState and ns.Compat.GetPlayerXPState()) or nil
+    local xpReport = ns.Domain.GoldFarms.EvaluateSessionXP and ns.Domain.GoldFarms.EvaluateSessionXP(eval and eval.farm, sessSnap, xpState) or nil
     local navLabel = (progress.mode ~= "paused"
       and ns.UI.Navigation
       and ns.UI.Navigation.activeContext == "gold_farm"
       and ns.UI.Navigation.lastStatus
       and ns.UI.Navigation.lastStatus.navigationLabel) or "Paused"
     if eval and eval.farm then
+      local xpSuffix = ""
+      if eval.farm.track == "arcane_lvl47_st" and xpReport then
+        xpSuffix = " | Session XP/hr: " .. tostring(xpReport.liveLabel)
+      end
       ns.Compat.Print(
         string.format(
-          "Gold Farm [Candidate %d %s] (%s | Nav: %s) | %s | Ref: %s | Net Purse Change / Active Hr: %s",
+          "Gold Farm [Candidate %d %s] (%s | Nav: %s) | %s | Ref: %s | Net Purse Change / Active Hr: %s%s",
           tonumber(eval.farm.candidateOrder or eval.farm.rank) or 1,
           tostring(eval.farm.shortLabel or eval.farm.farmID),
           tostring(progress.mode),
           tostring(navLabel),
           formatGoldHopSummary(eval),
           tostring(gphReport.communityLabel),
-          tostring(gphReport.liveLabel)
+          tostring(gphReport.liveLabel),
+          xpSuffix
         )
       )
     else
-      ns.Compat.Print("Gold Farm: Paused (no farm selected). Use '/fh gold list' or '/fh gold start 1'.")
+      ns.Compat.Print("Gold Farm: Paused (no farm selected). Use '/fh gold list', '/fh gold start 1', or '/fh gold arcane 1'.")
     end
     return
   elseif sub == "list" then
     Events.PrintGoldFarmsList()
     return
+  elseif sub == "arcane" then
+    local uiState = ns.State.GetWorkspaceUIState and ns.State.GetWorkspaceUIState()
+    if uiState and uiState.goldView then
+      uiState.goldView.selectedTrack = "arcane_lvl47_st"
+    end
+    local q = (arg ~= "") and arg or "arcane:1"
+    if tonumber(q) then
+      q = "arcane:" .. tostring(tonumber(q))
+    end
+    local ok, evalOrErr = ns.Domain.GoldFarms.Start(q, nil, nil, nil, "arcane_lvl47_st")
+    if not ok then
+      ns.Compat.Print("Arcane grind start failed: " .. tostring(evalOrErr))
+      return
+    end
+    if uiState and uiState.goldView and evalOrErr.farm then
+      uiState.goldView.focusedFarmID = evalOrErr.farm.farmID
+    end
+    local arrowSettings = ns.State.GetArrowSettings()
+    arrowSettings.hudHidden = false
+    local navSt = ns.UI.Navigation.SyncFromGoldFarmEvaluation(evalOrErr)
+    local farm = evalOrErr.farm
+    local gphMeta = farm and farm.gphMeta or {}
+    local xpMeta = farm and farm.xpMeta or {}
+    local purseShort = (gphMeta.vendorFloorStatus == "unmeasured_until_sampled" and gphMeta.lowGold == nil)
+      and "Purse: Unmeasured until sampled"
+      or string.format(
+        "Predicted total: %d-%dg/hr unverified",
+        tonumber(gphMeta.predictedTotalLowGold or gphMeta.lowGold) or 0,
+        tonumber(gphMeta.predictedTotalHighGold or gphMeta.highGold) or 0
+      )
+    ns.Compat.Print(
+      string.format(
+        "Started Lv 46-60 Arcane ST Grind Candidate %d: %s (Nav: %s | ~%d-%d XP/mob est. | %s)",
+        tonumber(farm and (farm.candidateOrder or farm.rank)) or 1,
+        tostring(farm and farm.title or ""),
+        tostring(navSt.navigationLabel),
+        tonumber(xpMeta.xpPerMobLow) or 0,
+        tonumber(xpMeta.xpPerMobHigh) or 0,
+        purseShort
+      )
+    )
+    ns.Compat.Print("  Current Hop -> " .. formatGoldHopSummary(evalOrErr))
+    local warnings = ns.Domain.GoldFarms.GetReservationWarningsForFarm(farm)
+    for _, w in ipairs(warnings) do
+      ns.Compat.Print("  |cffffaa00" .. tostring(w.message) .. "|r")
+    end
+    if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+      ns.UI.WorldMapPins.RequestRefresh()
+    end
+    if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+      ns.UI.GoldFarms.RefreshIfShown()
+    end
+    return
+  elseif sub == "track" then
+    local uiState = ns.State.GetWorkspaceUIState and ns.State.GetWorkspaceUIState()
+    local a = string.lower(arg or "")
+    local targetTrack = nil
+    if a == "arcane" or a == "47" or a == "st" or a == "arcane_lvl47_st" then
+      targetTrack = "arcane_lvl47_st"
+    elseif a == "mount" or a == "40" or a == "lvl40_mount" then
+      targetTrack = "lvl40_mount"
+    elseif a == "auto" or a == "" then
+      targetTrack = "auto"
+    end
+    if not targetTrack then
+      ns.Compat.Print("Usage: /fh gold track <arcane | mount | auto>")
+      return
+    end
+    if uiState and uiState.goldView then
+      uiState.goldView.selectedTrack = targetTrack
+      local eff = ns.Domain.GoldFarms.GetEffectiveTrack(uiState)
+      local list = ns.Domain.GoldFarms.GetFarmsForTrack(eff)
+      if list and list[1] then
+        uiState.goldView.focusedFarmID = list[1].farmID
+      end
+    end
+    local effNow = ns.Domain.GoldFarms.GetEffectiveTrack(uiState)
+    ns.Compat.Print(string.format("Gold Farms track set to '%s' (active view: %s).", targetTrack, effNow))
+    if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+      ns.UI.WorldMapPins.RequestRefresh()
+    end
+    if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+      ns.UI.GoldFarms.RefreshIfShown()
+    end
+    return
+  elseif sub == "radar" then
+    local gProg = ns.State.GetGoldFarmProgress()
+    local SR = ns.Domain and ns.Domain.SpawnRadar
+    local a = string.lower(arg or "")
+    if a == "on" or a == "off" or a == "auto" then
+      gProg.spawnRadarMode = a
+      if ns.UI and ns.UI.Navigation and ns.UI.Navigation.SyncFromGoldFarmEvaluation then
+        ns.UI.Navigation.SyncFromGoldFarmEvaluation(nil, gProg)
+      end
+      if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+        ns.UI.WorldMapPins.RequestRefresh()
+      end
+      if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+        ns.UI.GoldFarms.RefreshIfShown()
+      end
+      ns.Compat.Print("Spawn Radar mode set to: " .. string.upper(a))
+      return
+    elseif a == "reset" then
+      if SR and SR.BumpWorldSessionEpoch then
+        SR.BumpWorldSessionEpoch("manual_reset")
+      end
+      if ns.UI and ns.UI.Navigation and ns.UI.Navigation.TickSpawnRadar then
+        ns.UI.Navigation.TickSpawnRadar(0, true)
+      end
+      if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+        ns.UI.WorldMapPins.RequestRefresh()
+      end
+      if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+        ns.UI.GoldFarms.RefreshIfShown()
+      end
+      ns.Compat.Print("Spawn Radar revisit observations cleared (all candidate points reset to unvisited).")
+      return
+    else
+      local eval = ns.Domain.GoldFarms.Evaluate(nil, gProg)
+      local rawM, isAct = "auto", false
+      if SR and SR.GetEffectiveMode then
+        rawM, isAct = SR.GetEffectiveMode(eval and eval.farm, gProg)
+      end
+      local sum = SR and SR.state and SR.state.lastSummary
+      local nodeDesc = (sum and sum.npcName and string.format("%s (%d/%d active pool)", tostring(sum.npcName), tonumber(sum.unobservedCount or sum.readyCount) or 0, tonumber(sum.totalCount) or 0))
+        or "Idle"
+      ns.Compat.Print(string.format("Spawn Radar: mode=%s (active=%s) | Target=%s", string.upper(tostring(rawM)), tostring(isAct), nodeDesc))
+      return
+    end
+  elseif sub == "skip" then
+    local SR = ns.Domain and ns.Domain.SpawnRadar
+    local farm, step, gProg = resolveActiveGoldFarmStep()
+    if not SR or not farm or not step or step.kind ~= "grind" then
+      ns.Compat.Print("No active grind subcamp to skip a spawn point on. Start an Arcane ST grind first.")
+      return
+    end
+    local skipRes = SR.SkipCurrentLocation(farm, step, nil, gProg)
+    if skipRes and skipRes.ok then
+      if ns.UI and ns.UI.Navigation and ns.UI.Navigation.TickSpawnRadar then
+        ns.UI.Navigation.TickSpawnRadar(0, true)
+      end
+      if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+        ns.UI.WorldMapPins.RequestRefresh()
+      end
+      if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+        ns.UI.GoldFarms.RefreshIfShown()
+      end
+      ns.Compat.Print(
+        string.format(
+          "Skipped spawn point #%d (%s) for ~%ds revisit estimate.",
+          tonumber(skipRes.nodeIndex) or 1,
+          tostring(skipRes.npcName or "Target"),
+          tonumber(skipRes.revisitSeconds) or 120
+        )
+      )
+    else
+      ns.Compat.Print("Could not skip current spawn point (" .. tostring(skipRes and skipRes.reason or "unavailable") .. ").")
+    end
+    return
+  elseif sub == "pins" then
+    local gProg = ns.State.GetGoldFarmProgress()
+    local a = string.lower(arg or "")
+    if a == "" then
+      local cur = tostring(gProg.spawnPinMode or "active")
+      if cur == "active" then
+        a = "all"
+      elseif cur == "all" then
+        a = "off"
+      else
+        a = "active"
+      end
+    end
+    if a ~= "active" and a ~= "all" and a ~= "off" then
+      ns.Compat.Print("Usage: /fh gold pins <active | all | off>")
+      return
+    end
+    gProg.spawnPinMode = a
+    if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+      ns.UI.WorldMapPins.RequestRefresh()
+    end
+    if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+      ns.UI.GoldFarms.RefreshIfShown()
+    end
+    ns.Compat.Print("Gold Farm spawn pins mode set to: " .. string.upper(a))
+    return
+  elseif sub == "macro" then
+    local SR = ns.Domain and ns.Domain.SpawnRadar
+    if not SR then
+      ns.Compat.Print("SpawnRadar module unavailable.")
+      return
+    end
+    local allowAdopt = false
+    local perChar = false
+    local farmQueryParts = {}
+    for tok in string.gmatch(tostring(arg or ""), "%S+") do
+      local lowTok = string.lower(tok)
+      if lowTok == "adopt" or lowTok == "force" then
+        allowAdopt = true
+      elseif lowTok == "char" or lowTok == "character" then
+        perChar = true
+      else
+        table.insert(farmQueryParts, tok)
+      end
+    end
+    local farmQuery = table.concat(farmQueryParts, " ")
+    local uiState = ns.State.GetWorkspaceUIState and ns.State.GetWorkspaceUIState()
+    local gProg = ns.State.GetGoldFarmProgress()
+    local farm = nil
+    if farmQuery ~= "" then
+      local pref = (uiState and uiState.goldView and uiState.goldView.selectedTrack == "arcane_lvl47_st") and "arcane_lvl47_st" or nil
+      farm = ns.Domain.GoldFarms.ResolveFarm(farmQuery, nil, pref)
+    end
+    if not farm and gProg and gProg.selectedFarmID then
+      farm = ns.Domain.GoldFarms.LookupFarmByID(gProg.selectedFarmID)
+    end
+    if not farm and uiState and uiState.goldView and uiState.goldView.focusedFarmID then
+      farm = ns.Domain.GoldFarms.LookupFarmByID(uiState.goldView.focusedFarmID)
+    end
+    if not farm then
+      farm = ns.Domain.GoldFarms.LookupFarmByID("arcane_hinterlands_owlbeasts") or ns.Domain.GoldFarms.ResolveFarm("1")
+    end
+    if not farm then
+      ns.Compat.Print("Could not resolve a Gold Farm for target macro.")
+      return
+    end
+    local grindStep = nil
+    local eval = ns.Domain.GoldFarms.Evaluate(nil, gProg)
+    if eval and eval.farm and eval.farm.farmID == farm.farmID and eval.activeStep and eval.activeStep.kind == "grind" then
+      grindStep = eval.activeStep
+    else
+      for _, st in ipairs(farm.travelSteps or {}) do
+        if st.kind == "grind" then
+          grindStep = st
+          break
+        end
+      end
+    end
+    local res = SR.CreateOrAdoptTargetMacro(farm, grindStep, {
+      allowAdoptModified = allowAdopt,
+      perCharacter = perChar,
+    })
+    if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+      ns.UI.GoldFarms.RefreshIfShown()
+    end
+    if res and res.ok then
+      ns.Compat.Print(
+        string.format(
+          "Target macro '%s' %s (%dB, %s scope) for %s! Auto-sync enabled for owned unmodified body.",
+          tostring(res.macroName),
+          tostring(res.action),
+          tonumber(res.byteLength) or 0,
+          tostring(res.scope or "global"),
+          tostring((grindStep and grindStep.title) or farm.title)
+        )
+      )
+    elseif res and (res.reason == "combat_lockdown" or res.reason == "in_combat_lockdown" or res.reason == "lockdown_probe_unavailable") then
+      ns.Compat.Print("Cannot create/edit macro '" .. tostring(res.macroName or "FH_Target") .. "' (" .. tostring(res.status or res.reason) .. "). Retry out of combat.")
+    elseif res and res.reason == "duplicate_macro_scope_conflict" then
+      ns.Compat.Print("Macro '" .. tostring(res.macroName or "FH_Target") .. "' exists in both General and Character slots — delete one copy so ownership is unambiguous.")
+    elseif res and res.reason == "user_modified_requires_adopt" then
+      ns.Compat.Print("Macro '" .. tostring(res.macroName or "FH_Target") .. "' was modified outside ForeverHub (status: User modified). Run '/fh gold macro adopt' to re-adopt auto-sync.")
+    elseif res and res.reason == "macro_name_collision" then
+      ns.Compat.Print("Existing macro '" .. tostring(res.macroName or "FH_Target") .. "' was not created by ForeverHub; refusing to overwrite user macro (use '/fh gold macro adopt' only if you intend ForeverHub to own it).")
+    elseif res and res.reason == "macro_slots_full" then
+      ns.Compat.Print("Macro slots are full in the requested scope; free a macro slot before creating '" .. tostring(res.macroName or "FH_Target") .. "'.")
+    elseif res and res.reason == "macro_overflow" then
+      ns.Compat.Print("Blocked — localized macro exceeds 255 bytes (" .. tostring(res.byteLength) .. "B); refusing partial macro generation.")
+    else
+      ns.Compat.Print(
+        string.format(
+          "Target macro (%s / %s) for %s:\n%s",
+          tostring(res and res.status or "Unavailable"),
+          tostring(res and res.reason or "unavailable"),
+          tostring(farm.title),
+          tostring(res and res.body or "")
+        )
+      )
+    end
+    return
   elseif sub == "start" then
-    local ok, evalOrErr = ns.Domain.GoldFarms.Start(arg)
+    local uiState = ns.State.GetWorkspaceUIState and ns.State.GetWorkspaceUIState()
+    local prefTrack = (uiState and uiState.goldView and uiState.goldView.selectedTrack == "arcane_lvl47_st") and "arcane_lvl47_st" or nil
+    local ok, evalOrErr = ns.Domain.GoldFarms.Start(arg, nil, nil, nil, prefTrack)
     if not ok then
       ns.Compat.Print("Gold farm start failed: " .. tostring(evalOrErr))
       return
+    end
+    if uiState and uiState.goldView and evalOrErr.farm then
+      uiState.goldView.focusedFarmID = evalOrErr.farm.farmID
     end
     local arrowSettings = ns.State.GetArrowSettings()
     arrowSettings.hudHidden = false
@@ -1280,6 +1695,9 @@ function Events.HandleGoldSubcommand(subRaw)
     for _, w in ipairs(warnings) do
       ns.Compat.Print("  |cffffaa00" .. tostring(w.message) .. "|r")
     end
+    if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+      ns.UI.WorldMapPins.RequestRefresh()
+    end
     if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
       ns.UI.GoldFarms.RefreshIfShown()
     end
@@ -1295,6 +1713,9 @@ function Events.HandleGoldSubcommand(subRaw)
       ns.UI.Navigation.SyncFromGoldFarmEvaluation(evalOrErr, progress)
     end
     ns.Compat.Print("Gold Farm Next Hop -> " .. formatGoldHopSummary(evalOrErr))
+    if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+      ns.UI.WorldMapPins.RequestRefresh()
+    end
     if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
       ns.UI.GoldFarms.RefreshIfShown()
     end
@@ -1310,6 +1731,9 @@ function Events.HandleGoldSubcommand(subRaw)
       ns.UI.Navigation.SyncFromGoldFarmEvaluation(evalOrErr, progress)
     end
     ns.Compat.Print("Gold Farm Stepped Back -> " .. formatGoldHopSummary(evalOrErr))
+    if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+      ns.UI.WorldMapPins.RequestRefresh()
+    end
     if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
       ns.UI.GoldFarms.RefreshIfShown()
     end
@@ -1318,6 +1742,9 @@ function Events.HandleGoldSubcommand(subRaw)
     local _, eval = ns.Domain.GoldFarms.Pause()
     ns.UI.Navigation.SyncFromGoldFarmEvaluation(eval)
     ns.Compat.Print("Paused Gold Farm navigation & Net Purse Change / Active Hr timer.")
+    if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+      ns.UI.WorldMapPins.RequestRefresh()
+    end
     if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
       ns.UI.GoldFarms.RefreshIfShown()
     end
@@ -1330,6 +1757,9 @@ function Events.HandleGoldSubcommand(subRaw)
       resetAll and "Stopped Gold Farm navigation and reset travel hops + Net Purse Change / Active Hr meter."
         or "Stopped Gold Farm navigation (use '/fh gold reset' to zero the session cash-flow meter)."
     )
+    if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+      ns.UI.WorldMapPins.RequestRefresh()
+    end
     if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
       ns.UI.GoldFarms.RefreshIfShown()
     end
@@ -1345,6 +1775,9 @@ function Events.HandleGoldSubcommand(subRaw)
       ns.UI.Navigation.SyncFromGoldFarmEvaluation(evalOrErr, progress)
     end
     ns.Compat.Print("Recomputed Gold Farm entry from current zone -> " .. formatGoldHopSummary(evalOrErr))
+    if ns.UI and ns.UI.WorldMapPins and ns.UI.WorldMapPins.RequestRefresh then
+      ns.UI.WorldMapPins.RequestRefresh()
+    end
     if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
       ns.UI.GoldFarms.RefreshIfShown()
     end
@@ -1370,7 +1803,10 @@ function Events.HandleGoldSubcommand(subRaw)
     rxpSub = string.lower(rxpSub or "")
     farmArg = string.gsub(tostring(farmArg or ""), "^%s*(.-)%s*$", "%1")
     if rxpSub == "" or rxpSub == "rxp" then
-      if farmArg ~= "" and string.lower(farmArg) ~= "all" then
+      local lowArg = string.lower(farmArg)
+      if lowArg == "arcane" then
+        ns.Bridges.RXPBridge.RegisterAllGoldFarmGuides(true, nil, "arcane_lvl47_st")
+      elseif farmArg ~= "" and lowArg ~= "all" then
         local ok, status = ns.Bridges.RXPBridge.RegisterGoldFarmGuide(farmArg, true)
         if ok and status == "selected" then
           local progress = ns.State.GetGoldFarmProgress()
@@ -1382,20 +1818,22 @@ function Events.HandleGoldSubcommand(subRaw)
         ns.Bridges.RXPBridge.RegisterAllGoldFarmGuides(true)
       end
     else
-      ns.Compat.Print("Usage: /fh gold export rxp [1-5 | farmID | all]")
+      ns.Compat.Print("Usage: /fh gold export rxp [1-5 | arcane | farmID | all]")
     end
     return
   elseif sub == "doctor" then
     Events.RunGoldFarmsDoctor()
     return
   else
-    -- Convenience: allow `/fh gold 1` or `/fh gold badlands` directly!
-    local directFarm = ns.Domain.GoldFarms.ResolveFarm(cleaned)
+    -- Convenience: allow `/fh gold 1`, `/fh gold hinterlands`, or `/fh gold badlands` directly!
+    local uiState = ns.State.GetWorkspaceUIState and ns.State.GetWorkspaceUIState()
+    local prefTrack = (uiState and uiState.goldView and uiState.goldView.selectedTrack == "arcane_lvl47_st") and "arcane_lvl47_st" or nil
+    local directFarm = ns.Domain.GoldFarms.ResolveFarm(cleaned, nil, prefTrack)
     if directFarm then
       Events.HandleGoldSubcommand("start " .. directFarm.farmID)
       return
     end
-    ns.Compat.Print("Gold Farm commands: /fh gold | /fh gold list | /fh gold start <1-5|zone> | /fh gold reenter | /fh gold next | /fh gold prev | /fh gold pause | /fh gold stop [reset] | /fh gold reset | /fh gold export rxp [farm] | /fh gold doctor")
+    ns.Compat.Print("Gold Farm commands: /fh gold | /fh gold list | /fh gold start <1-19|zone> | /fh gold arcane <1-19> | /fh gold track <arcane|mount|auto> | /fh gold radar <auto|on|off|reset> | /fh gold skip | /fh gold pins <active|all|off> | /fh gold macro [adopt|char|<farm>] | /fh gold reenter | /fh gold next | /fh gold prev | /fh gold pause | /fh gold stop [reset] | /fh gold reset | /fh gold export rxp [farm|arcane] | /fh gold doctor")
   end
 end
 
@@ -1404,17 +1842,9 @@ resyncActiveNavigationContext = function()
     return
   end
   ns.UI.Navigation.RefreshArrowSettings()
-  local ctx = ns.UI.Navigation.activeContext
-  if ctx == "gold_farm" then
-    local gProg = ns.State.GetGoldFarmProgress()
-    if gProg and gProg.mode ~= "paused" then
-      ns.UI.Navigation.SyncFromGoldFarmEvaluation(nil, gProg)
-    end
-  else
-    local rProg = ns.State.GetRouteProgress()
-    if rProg and rProg.mode ~= "paused" then
-      ns.UI.Navigation.SyncFromEvaluation(nil, rProg)
-    end
+  local gProg = ns.State.GetGoldFarmProgress()
+  if gProg and gProg.mode ~= "paused" then
+    ns.UI.Navigation.SyncFromGoldFarmEvaluation(nil, gProg)
   end
 end
 
@@ -1577,28 +2007,6 @@ local function collectCandidateActiveQuestRefs()
       end
     end
   end
-  local route = ns.State and ns.State.GetCompiledRivergladesRoute and ns.State.GetCompiledRivergladesRoute() or nil
-  if type(route) == "table" and ns.Compat and ns.Compat.IsOnQuestResult then
-    for qid, meta in pairs(route.questsByID or {}) do
-      local nQid = tonumber(qid)
-      if nQid and not seen[tostring(nQid)] then
-        local onRes = ns.Compat.IsOnQuestResult(nQid)
-        if type(onRes) == "table" and onRes.status == "ok" and onRes.value == true then
-          addRef(nQid, meta and meta.name or nil)
-        end
-      end
-    end
-    for qKey, meta in pairs(route.questsByTitleKey or {}) do
-      local kQid = meta and tonumber(meta.knownQuestID) or nil
-      local effRef = kQid or qKey
-      if not seen[tostring(effRef)] then
-        local onRes = ns.Compat.IsOnQuestResult(qKey)
-        if type(onRes) == "table" and onRes.status == "ok" and onRes.value == true then
-          addRef(effRef, meta and meta.name or nil)
-        end
-      end
-    end
-  end
   return refs
 end
 
@@ -1651,22 +2059,6 @@ function Events.CaptureQuestFieldTelemetry(kind, explicitQuestID, noteText)
     local sel = ns.Compat.GetSelectedQuestInfo and ns.Compat.GetSelectedQuestInfo() or { available = false }
     local qid = sel.available and tonumber(sel.questID) or tonumber(explicitQuestID)
     local qTitle = sel.available and sel.title or nil
-    if not qid and not qTitle then
-      local progress = ns.State.GetRouteProgress and ns.State.GetRouteProgress() or nil
-      if progress and progress.mode == "standalone" and ns.Domain and ns.Domain.RouteProgress and ns.Domain.RouteProgress.Evaluate then
-        local eval = ns.Domain.RouteProgress.Evaluate(nil, progress)
-        local act = eval and eval.nextAction or nil
-        if act then
-          local meta = ns.Compat.LookupRouteQuestMeta and ns.Compat.LookupRouteQuestMeta(act.questKey or act.questID) or nil
-          qid = tonumber(act.questID) or (meta and tonumber(meta.knownQuestID)) or nil
-          qTitle = (meta and meta.name) or act.title
-        end
-      end
-    end
-    if qid and not qTitle and ns.Compat.LookupRouteQuestMeta then
-      local meta = ns.Compat.LookupRouteQuestMeta(qid)
-      qTitle = meta and meta.name or nil
-    end
     return ns.State.RecordFieldCapture({
       kind = "manual_mark",
       questID = qid,
@@ -1775,14 +2167,14 @@ local function handleSlashCommand(msg)
   local cmd, rest = string.match(raw, "^(%S+)%s*(.-)$")
   cmd = string.lower(cmd or "")
 
-  if cmd == "" or cmd == "crates" or cmd == "ui" then
+  if cmd == "" or cmd == "crates" or cmd == "ui" or cmd == "advisor" or cmd == "deck" then
     local tabArg = string.lower(string.gsub(tostring(rest or ""), "^%s*(.-)%s*$", "%1"))
-    if cmd == "ui" and (tabArg == "rg" or tabArg == "riverglades") and ns.UI and ns.UI.Workspace then
-      if ns.UI.Crates and ns.UI.Crates.EnsureInitialized then
-        ns.UI.Crates.EnsureInitialized()
+    if (cmd == "advisor" or cmd == "deck" or (cmd == "ui" and (tabArg == "advisor" or tabArg == "deck"))) and ns.UI and ns.UI.Workspace then
+      if ns.UI.CommandDeck and ns.UI.CommandDeck.EnsureHost then
+        ns.UI.CommandDeck.EnsureHost()
       end
-      ns.UI.Workspace.Toggle("riverglades")
-    elseif cmd == "ui" and (tabArg == "gold" or tabArg == "mount") and ns.UI and ns.UI.Workspace then
+      ns.UI.Workspace.Toggle("advisor")
+    elseif cmd == "ui" and (tabArg == "gold" or tabArg == "mount" or tabArg == "farms") and ns.UI and ns.UI.Workspace then
       if ns.UI.Crates and ns.UI.Crates.EnsureInitialized then
         ns.UI.Crates.EnsureInitialized()
       end
@@ -1989,8 +2381,27 @@ local function handleSlashCommand(msg)
   elseif cmd == "rg" or cmd == "riverglades" then
     Events.HandleRivergladesSubcommand(rest)
     return
+  elseif cmd == "st" or cmd == "sunkentemple" then
+    Events.HandleSunkenTempleSubcommand(rest)
+    return
   elseif cmd == "gold" or cmd == "farm" or cmd == "farms" then
     Events.HandleGoldSubcommand(rest)
+    return
+  elseif cmd == "probe" then
+    Events.RunProbeCommand(rest)
+    return
+  elseif cmd == "discovery" then
+    Events.HandleDiscoverySubcommand(rest)
+    return
+  elseif cmd == "market" or cmd == "mk" then
+    Events.HandleMarketSubcommand(rest)
+    return
+  elseif cmd == "research" then
+    if ns.UI and ns.UI.ResearchView and ns.UI.ResearchView.Toggle then
+      ns.UI.ResearchView.Toggle()
+    elseif ns.UI and ns.UI.Workspace and ns.UI.Workspace.Toggle then
+      ns.UI.Workspace.Toggle("research")
+    end
     return
   elseif cmd == "mount" then
     Events.HandleMountCommand(rest)
@@ -2032,18 +2443,30 @@ local function handleSlashCommand(msg)
     end
     return
   else
-    ns.Compat.Print("Commands: /fh | /fh minimap [show|hide|reset] | /fh arrow [on|off|lock|unlock|scale <0.6-2.0>|style <auto|custom|classic>|reset] | /fh gold [...] | /fh rg [...] | /fh mount | /fh doctor | /fh selftest")
+    ns.Compat.Print("Commands: /fh | /fh minimap [show|hide|reset] | /fh arrow [on|off|dock|undock|lock|unlock|scale <0.6-2.0>|style <auto|custom|classic>|reset] | /fh gold [...] | /fh mount | /fh doctor | /fh selftest")
   end
 end
 
 local eventFrame = CreateFrame and CreateFrame("Frame")
 if eventFrame then
-  eventFrame:RegisterEvent("ADDON_LOADED")
-  eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-  eventFrame:RegisterEvent("BAG_UPDATE_DELAYED")
-  eventFrame:RegisterEvent("BANKFRAME_OPENED")
-  eventFrame:RegisterEvent("BANKFRAME_CLOSED")
-  eventFrame:RegisterEvent("MODIFIER_STATE_CHANGED")
+  local function safeReg(evName)
+    if ns.Compat and type(ns.Compat.SafeRegisterFrameEvent) == "function" then
+      ns.Compat.SafeRegisterFrameEvent(eventFrame, evName)
+    elseif type(eventFrame.RegisterEvent) == "function" then
+      pcall(eventFrame.RegisterEvent, eventFrame, evName)
+    end
+  end
+
+  safeReg("ADDON_LOADED")
+  safeReg("PLAYER_ENTERING_WORLD")
+  safeReg("BAG_UPDATE_DELAYED")
+  safeReg("BANKFRAME_OPENED")
+  safeReg("BANKFRAME_CLOSED")
+  safeReg("MODIFIER_STATE_CHANGED")
+  -- NOTE: `COMBAT_LOG_EVENT_UNFILTERED` is NEVER registered here — in Interface 16001
+  -- (`CombatLogDocumentation.lua`: `HasRestrictions = true, CallbackEvent = true`), calling
+  -- `Frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")` fires C++ `ADDON_ACTION_FORBIDDEN`
+  -- even inside `pcall` and taints `Enum.ForbiddenAspect.EventRegistrations` on `eventFrame`!
   for _, optEvent in ipairs({
     "BANK_TABS_CHANGED",
     "PLAYERBANKSLOTS_CHANGED",
@@ -2063,30 +2486,138 @@ if eventFrame then
     "GET_ITEM_INFO_RECEIVED",
     "PLAYER_MONEY",
     "MAIL_SHOW",
+    "MAIL_INBOX_UPDATE",
+    "SEND_MAIL_MONEY_CHANGED",
+    "SEND_MAIL_COD_CHANGED",
     "MAIL_CLOSED",
     "AUCTION_HOUSE_SHOW",
+    "AUCTION_ITEM_LIST_UPDATE",
+    "NEW_AUCTION_UPDATE",
+    "AUCTION_MULTISELL_UPDATE",
     "AUCTION_HOUSE_CLOSED",
     "MERCHANT_SHOW",
     "MERCHANT_CLOSED",
+    "UPDATE_INVENTORY_DURABILITY",
     "TRADE_SHOW",
     "TRADE_CLOSED",
     "TRAINER_SHOW",
     "TRAINER_CLOSED",
+    "SKILL_LINES_CHANGED",
+    "TRADE_SKILL_SHOW",
+    "TRADE_SKILL_UPDATE",
+    "TRADE_SKILL_CLOSE",
+    "CRAFT_SHOW",
+    "CRAFT_UPDATE",
+    "CRAFT_CLOSE",
+    "BAG_UPDATE_COOLDOWN",
     "GOSSIP_SHOW",
     "GOSSIP_CLOSED",
     "PLAYER_REGEN_DISABLED",
     "PLAYER_REGEN_ENABLED",
+    "UPDATE_MACROS",
+    "PLAYER_TARGET_CHANGED",
+    "PLAYER_XP_UPDATE",
+    "PLAYER_LEVEL_UP",
+    "UPDATE_EXHAUSTION",
+    "CHAT_MSG_COMBAT_XP_GAIN",
     "ZONE_CHANGED_NEW_AREA",
     "DISPLAY_SIZE_CHANGED",
     "UI_SCALE_CHANGED",
     "PLAYER_LOGOUT",
   }) do
-    pcall(function()
-      eventFrame:RegisterEvent(optEvent)
-    end)
+    safeReg(optEvent)
+  end
+  if ns.Domain and ns.Domain.SunkenTempleCoach and type(ns.Domain.SunkenTempleCoach.AttachEventRegistrations) == "function" then
+    pcall(ns.Domain.SunkenTempleCoach.AttachEventRegistrations, eventFrame)
   end
 
-  eventFrame:SetScript("OnEvent", function(self, event, arg1, arg2)
+  local function isFiniteNonNeg(v)
+    return type(v) == "number" and v == v and v >= 0 and v <= 9007199254740991 and math.floor(v) == v
+  end
+
+  local function scanLiveMailInboxRows()
+    local rows = {}
+    local getNum = _G.GetInboxNumItems
+    local getHdr = _G.GetInboxHeaderInfo
+    local getInv = _G.GetInboxInvoiceInfo
+    if type(getNum) ~= "function" or type(getHdr) ~= "function" then
+      return rows
+    end
+    local okN, count = pcall(getNum)
+    local n = (okN and type(count) == "number") and math.min(100, math.max(0, math.floor(count))) or 0
+    for idx = 1, n do
+      local okH, _, _, sender, subject, money, codAmount, _, hasItem = pcall(getHdr, idx)
+      if not okH then
+        table.insert(rows, { mailIndex = idx, headerLoaded = false })
+      else
+        local headerLoaded = (sender ~= nil or subject ~= nil)
+        local invType, itemName, playerName, bid, buyout, deposit, consignment = nil, nil, nil, nil, nil, nil, nil
+        if type(getInv) == "function" then
+          local okI, it, iName, py, b, bo, dep, cons = pcall(getInv, idx)
+          if okI then
+            invType, itemName, playerName, bid, buyout, deposit, consignment = it, iName, py, b, bo, dep, cons
+          end
+        end
+        local isAuctionMail = (invType ~= nil and invType ~= "")
+        local invoiceFieldsComplete = true
+        if isAuctionMail then
+          if invType == "seller" or invType == "seller_temp_invoice" then
+            invoiceFieldsComplete = headerLoaded
+              and (type(itemName) == "string" and itemName ~= "")
+              and isFiniteNonNeg(bid)
+              and isFiniteNonNeg(buyout)
+              and isFiniteNonNeg(deposit)
+              and isFiniteNonNeg(consignment)
+              and isFiniteNonNeg(money)
+          elseif invType == "buyer" then
+            invoiceFieldsComplete = headerLoaded
+              and (type(itemName) == "string" and itemName ~= "")
+              and isFiniteNonNeg(bid)
+              and isFiniteNonNeg(buyout)
+          else
+            invoiceFieldsComplete = false
+          end
+        end
+        -- Astra `P0-2`: Preserve raw `nil`/missing invoice fields; NEVER coerce `nil` to `0` before completeness verification!
+        table.insert(rows, {
+          mailIndex = idx,
+          headerLoaded = headerLoaded,
+          sender = sender,
+          subject = subject,
+          hasItem = hasItem,
+          isAuctionMail = isAuctionMail,
+          invoiceLoaded = isAuctionMail,
+          fieldsComplete = invoiceFieldsComplete,
+          invoiceFieldsComplete = invoiceFieldsComplete,
+          invoiceType = invType,
+          itemName = itemName,
+          counterpartyPresent = (playerName ~= nil and playerName ~= ""),
+          rawBid = bid,
+          rawBuyout = buyout,
+          rawDeposit = deposit,
+          rawConsignment = consignment,
+          rawMoney = money,
+          rawCODAmount = codAmount,
+          bid = (invoiceFieldsComplete and isFiniteNonNeg(bid)) and bid or nil,
+          buyout = (invoiceFieldsComplete and isFiniteNonNeg(buyout)) and buyout or nil,
+          deposit = (invoiceFieldsComplete and isFiniteNonNeg(deposit)) and deposit or nil,
+          consignment = (invoiceFieldsComplete and isFiniteNonNeg(consignment)) and consignment or nil,
+          money = isFiniteNonNeg(money) and money or nil,
+          codAmountCopper = isFiniteNonNeg(codAmount) and codAmount or nil,
+        })
+      end
+    end
+    return rows
+  end
+
+  local function syncLiveProfessionSnapshot()
+    if ns.Compat and type(ns.Compat.CaptureProfessionSnapshot) == "function" and ns.State and type(ns.State.UpdateProfessionSnapshot) == "function" then
+      local snap = ns.Compat.CaptureProfessionSnapshot()
+      ns.State.UpdateProfessionSnapshot(snap)
+    end
+  end
+
+  eventFrame:SetScript("OnEvent", function(self, event, arg1, arg2, arg3)
     if event == "ADDON_LOADED" and arg1 == ns.name then
       ns.State.Init(true)
       if ns.UI and ns.UI.Tooltips then
@@ -2109,7 +2640,30 @@ if eventFrame then
         end
       end
       ns.State.CaptureSessionMoneyBaselineIfUnset()
+      syncLiveProfessionSnapshot()
+      local instTransPEW = nil
+      if ns.Domain and ns.Domain.InstanceLedger and ns.Domain.InstanceLedger.ObserveTransition then
+        local okIT, resIT = pcall(ns.Domain.InstanceLedger.ObserveTransition, { trigger = "PLAYER_ENTERING_WORLD" })
+        if okIT then
+          instTransPEW = resIT
+        end
+      end
+      if ns.Domain and ns.Domain.SunkenTempleCoach then
+        if ns.Domain.SunkenTempleCoach.EnsureEventFrame then
+          pcall(ns.Domain.SunkenTempleCoach.EnsureEventFrame)
+        end
+        if ns.Domain.SunkenTempleCoach.ObserveEnvironmentTransition then
+          pcall(ns.Domain.SunkenTempleCoach.ObserveEnvironmentTransition, {
+            trigger = "PLAYER_ENTERING_WORLD",
+            resumedExistingRun = instTransPEW and instTransPEW.resumedExistingRun == true,
+            ledgerActiveRunID = instTransPEW and instTransPEW.activeRunID or nil,
+          })
+        end
+      end
       if ns.Providers and ns.Providers.Auctionator then
+        if ns.Providers.Auctionator.EnsurePassiveQueryHookInstalled then
+          ns.Providers.Auctionator.EnsurePassiveQueryHookInstalled()
+        end
         ns.Providers.Auctionator.RegisterDBUpdateCallback(function()
           if ns.UI and ns.UI.Crates then
             ns.UI.Crates.RefreshIfShown()
@@ -2118,6 +2672,16 @@ if eventFrame then
       end
       ns.State.BumpInventoryRevision()
       recordInventoryTraceIfEnabled("PLAYER_ENTERING_WORLD")
+      if ns.Compat and ns.Compat.InvalidateMapWorldSizeCache then
+        ns.Compat.InvalidateMapWorldSizeCache()
+      end
+      if ns.Domain and ns.Domain.SpawnRadar and ns.Domain.SpawnRadar.BumpWorldSessionEpoch then
+        ns.Domain.SpawnRadar.BumpWorldSessionEpoch("PLAYER_ENTERING_WORLD")
+      end
+      do
+        local curPos = ns.Compat and ns.Compat.GetPlayerPosition01 and ns.Compat.GetPlayerPosition01()
+        Events._lastObservedPlayerUiMapID = (curPos and curPos.status == "ok") and tonumber(curPos.uiMapID) or nil
+      end
       if ns.UI and ns.UI.Navigation and ns.UI.Navigation.InvalidateTargetAnchor then
         ns.UI.Navigation.InvalidateTargetAnchor()
       end
@@ -2127,17 +2691,24 @@ if eventFrame then
       if ns.Compat and ns.Compat.ScanLiveQuestLog then
         ns.Compat.ScanLiveQuestLog(true)
       end
-      Events.SeedObjectiveTelemetryBaseline()
-      Events.ScheduleRouteReconcile()
+      if ns.UI and ns.UI.Navigation and ns.UI.Navigation.FlushDeferredIfReady then
+        ns.UI.Navigation.FlushDeferredIfReady()
+      end
       local gProg = ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
       -- Astra P1-9 & Gate 7: Telemetry ALWAYS stays paused after `/reload` until user explicitly runs `/fh gold start`.
       if gProg and gProg.mode ~= "paused" and ns.UI and ns.UI.Navigation then
         local gEval = ns.Domain.GoldFarms.Reconcile(nil, gProg)
         ns.UI.Navigation.SyncFromGoldFarmEvaluation(gEval, gProg)
+        if ns.Domain and ns.Domain.SpawnRadar and ns.Domain.SpawnRadar.SyncExistingOwnedTargetMacro then
+          ns.Domain.SpawnRadar.SyncExistingOwnedTargetMacro("PLAYER_ENTERING_WORLD")
+        end
       end
     elseif event == "PLAYER_LOGOUT" then
       if ns.State and ns.State.CheckpointGoldFarmTelemetry then
         ns.State.CheckpointGoldFarmTelemetry(nil, nil, true)
+      end
+      if ns.Domain and ns.Domain.MarketAccounting and ns.Domain.MarketAccounting.OnPlayerLogout then
+        ns.Domain.MarketAccounting.OnPlayerLogout()
       end
     elseif event == "MODIFIER_STATE_CHANGED" then
       if (arg1 == "LSHIFT" or arg1 == "RSHIFT") and ns.UI and ns.UI.Tooltips and ns.UI.Tooltips.RefreshActiveTooltips then
@@ -2145,28 +2716,116 @@ if eventFrame then
       end
     elseif event == "MAIL_SHOW" then
       ns.State.mailOpen = true
+      if ns.State.merchantOpen and ns.Domain and ns.Domain.TransactionJournal and ns.Domain.TransactionJournal.MarkMerchantExternalContamination then
+        ns.Domain.TransactionJournal.MarkMerchantExternalContamination("mail_opened_during_merchant")
+      end
+      local inboxRows = scanLiveMailInboxRows()
+      if ns.Domain and ns.Domain.TransactionJournal and ns.Domain.TransactionJournal.CaptureInboxSnapshot then
+        local curMoney = (type(GetMoney) == "function") and GetMoney() or nil
+        ns.Domain.TransactionJournal.CaptureInboxSnapshot(inboxRows, { moneyCopper = curMoney })
+      end
+      if ns.Domain and ns.Domain.MarketAccounting and ns.Domain.MarketAccounting.ReconcileInboxInvoiceBatch then
+        pcall(ns.Domain.MarketAccounting.ReconcileInboxInvoiceBatch, inboxRows)
+      end
+      if ns.UI and ns.UI.MailAdvisor and ns.UI.MailAdvisor.OnMailShow then
+        ns.UI.MailAdvisor.OnMailShow()
+      end
       if ns.State.OnNonFarmMoneyWindowOpened then
         ns.State.OnNonFarmMoneyWindowOpened("mail")
       end
+    elseif event == "MAIL_INBOX_UPDATE" then
+      if ns.State.mailOpen then
+        local inboxRows = scanLiveMailInboxRows()
+        if ns.Domain and ns.Domain.TransactionJournal then
+          local curMoney = (type(GetMoney) == "function") and GetMoney() or nil
+          local prevSession = ns.Domain.TransactionJournal.__mailSession
+          if prevSession and prevSession.baselineMoneyCopper and curMoney and curMoney > prevSession.baselineMoneyCopper and ns.Domain.TransactionJournal.ReconcileMailCashCollection then
+            ns.Domain.TransactionJournal.ReconcileMailCashCollection(inboxRows, curMoney)
+          end
+          if ns.Domain.TransactionJournal.CaptureInboxSnapshot then
+            ns.Domain.TransactionJournal.CaptureInboxSnapshot(inboxRows, { moneyCopper = curMoney })
+          end
+        end
+        if ns.Domain and ns.Domain.MarketAccounting and ns.Domain.MarketAccounting.ReconcileInboxInvoiceBatch then
+          pcall(ns.Domain.MarketAccounting.ReconcileInboxInvoiceBatch, inboxRows)
+        end
+        if ns.UI and ns.UI.MailAdvisor and ns.UI.MailAdvisor.OnMailUpdated then
+          ns.UI.MailAdvisor.OnMailUpdated()
+        end
+      end
+    elseif event == "SEND_MAIL_MONEY_CHANGED" or event == "SEND_MAIL_COD_CHANGED" then
+      if ns.State.mailOpen and ns.UI and ns.UI.MailAdvisor and ns.UI.MailAdvisor.OnMailUpdated then
+        ns.UI.MailAdvisor.OnMailUpdated()
+      end
     elseif event == "MAIL_CLOSED" then
       ns.State.mailOpen = false
+      if ns.UI and ns.UI.MailAdvisor and ns.UI.MailAdvisor.OnMailClosed then
+        ns.UI.MailAdvisor.OnMailClosed()
+      end
       if ns.State.OnNonFarmMoneyWindowClosed then
         ns.State.OnNonFarmMoneyWindowClosed("mail")
       end
     elseif event == "AUCTION_HOUSE_SHOW" then
       ns.State.ahOpen = true
+      if ns.State.merchantOpen and ns.Domain and ns.Domain.TransactionJournal and ns.Domain.TransactionJournal.MarkMerchantExternalContamination then
+        ns.Domain.TransactionJournal.MarkMerchantExternalContamination("auction_house_opened_during_merchant")
+      end
+      if ns.Providers and ns.Providers.Auctionator and ns.Providers.Auctionator.OnAuctionHouseShow then
+        ns.Providers.Auctionator.OnAuctionHouseShow()
+      end
+      if ns.UI and ns.UI.AuctionPostAdvisor and ns.UI.AuctionPostAdvisor.OnAuctionHouseShow then
+        ns.UI.AuctionPostAdvisor.OnAuctionHouseShow()
+      end
       if ns.State.OnNonFarmMoneyWindowOpened then
         ns.State.OnNonFarmMoneyWindowOpened("auction_house")
       end
+    elseif event == "AUCTION_ITEM_LIST_UPDATE" then
+      if ns.State.ahOpen and ns.Providers and ns.Providers.Auctionator and ns.Providers.Auctionator.CapturePassiveLegacyAuctionPage then
+        ns.Providers.Auctionator.CapturePassiveLegacyAuctionPage()
+        Events.ScheduleCoalescedDeckRefresh()
+      end
+    elseif event == "NEW_AUCTION_UPDATE" or event == "AUCTION_MULTISELL_UPDATE" then
+      if ns.State.ahOpen and ns.UI and ns.UI.AuctionPostAdvisor and ns.UI.AuctionPostAdvisor.OnAuctionSellSelectionChanged then
+        ns.UI.AuctionPostAdvisor.OnAuctionSellSelectionChanged()
+      end
     elseif event == "AUCTION_HOUSE_CLOSED" then
       ns.State.ahOpen = false
+      if ns.UI and ns.UI.AuctionPostAdvisor and ns.UI.AuctionPostAdvisor.OnAuctionHouseClosed then
+        ns.UI.AuctionPostAdvisor.OnAuctionHouseClosed()
+      end
+      if ns.Providers and ns.Providers.Auctionator and ns.Providers.Auctionator.OnAuctionHouseClosed then
+        ns.Providers.Auctionator.OnAuctionHouseClosed()
+      end
       if ns.State.OnNonFarmMoneyWindowClosed then
         ns.State.OnNonFarmMoneyWindowClosed("auction_house")
       end
     elseif event == "MERCHANT_SHOW" then
       ns.State.merchantOpen = true
+      if ns.Domain and ns.Domain.TransactionJournal and ns.Domain.TransactionJournal.BeginMerchantSession then
+        local curMoney = (type(GetMoney) == "function") and GetMoney() or nil
+        local bagSlots = (ns.Compat and ns.Compat.SnapshotDetailedPlayerBagSlots and ns.Compat.SnapshotDetailedPlayerBagSlots()) or {}
+        ns.Domain.TransactionJournal.BeginMerchantSession({
+          moneyCopper = curMoney,
+          bagSlots = bagSlots,
+        })
+      end
+      if ns.UI and ns.UI.MerchantAdvisor and ns.UI.MerchantAdvisor.OnMerchantShow then
+        ns.UI.MerchantAdvisor.OnMerchantShow()
+      end
     elseif event == "MERCHANT_CLOSED" then
       ns.State.merchantOpen = false
+      if ns.UI and ns.UI.MerchantAdvisor and ns.UI.MerchantAdvisor.OnMerchantClosed then
+        ns.UI.MerchantAdvisor.OnMerchantClosed()
+      end
+      if ns.Domain and ns.Domain.TransactionJournal and ns.Domain.TransactionJournal.FinalizeMerchantSession then
+        local endMoney = (type(GetMoney) == "function") and GetMoney() or nil
+        local endSlots = (ns.Compat and ns.Compat.SnapshotDetailedPlayerBagSlots and ns.Compat.SnapshotDetailedPlayerBagSlots()) or {}
+        ns.Domain.TransactionJournal.FinalizeMerchantSession({
+          moneyCopper = endMoney,
+          bagSlots = endSlots,
+        })
+        Events.ScheduleCoalescedDeckRefresh()
+      end
       if ns.Domain and ns.Domain.GoldFarms and ns.Domain.GoldFarms.CompleteVendorStepIfNear then
         local gProg = ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
         local completedVendor, afterEval = ns.Domain.GoldFarms.CompleteVendorStepIfNear(nil, gProg)
@@ -2179,6 +2838,9 @@ if eventFrame then
       end
     elseif event == "TRADE_SHOW" then
       ns.State.tradeOpen = true
+      if ns.State.merchantOpen and ns.Domain and ns.Domain.TransactionJournal and ns.Domain.TransactionJournal.MarkMerchantExternalContamination then
+        ns.Domain.TransactionJournal.MarkMerchantExternalContamination("trade_opened_during_merchant")
+      end
       if ns.State.OnNonFarmMoneyWindowOpened then
         ns.State.OnNonFarmMoneyWindowOpened("trade")
       end
@@ -2189,13 +2851,57 @@ if eventFrame then
       end
     elseif event == "TRAINER_SHOW" then
       ns.State.trainerOpen = true
+      if ns.UI and ns.UI.TrainerAdvisor and ns.UI.TrainerAdvisor.OnTrainerShow then
+        ns.UI.TrainerAdvisor.OnTrainerShow()
+      end
       if ns.State.OnNonFarmMoneyWindowOpened then
         ns.State.OnNonFarmMoneyWindowOpened("trainer")
       end
     elseif event == "TRAINER_CLOSED" then
       ns.State.trainerOpen = false
+      if ns.UI and ns.UI.TrainerAdvisor and ns.UI.TrainerAdvisor.OnTrainerClosed then
+        ns.UI.TrainerAdvisor.OnTrainerClosed()
+      end
       if ns.State.OnNonFarmMoneyWindowClosed then
         ns.State.OnNonFarmMoneyWindowClosed("trainer")
+      end
+    elseif event == "SKILL_LINES_CHANGED" then
+      syncLiveProfessionSnapshot()
+      Events.ScheduleCoalescedDeckRefresh()
+    elseif event == "TRADE_SKILL_SHOW" or event == "CRAFT_SHOW" then
+      syncLiveProfessionSnapshot()
+      if ns.UI and ns.UI.TradeSkillAdvisor and ns.UI.TradeSkillAdvisor.OnTradeSkillShow then
+        ns.UI.TradeSkillAdvisor.OnTradeSkillShow(event == "CRAFT_SHOW" and "craft" or "tradeskill")
+      end
+    elseif event == "TRADE_SKILL_UPDATE" or event == "CRAFT_UPDATE" then
+      if ns.UI and ns.UI.TradeSkillAdvisor and ns.UI.TradeSkillAdvisor.OnTradeSkillUpdate then
+        ns.UI.TradeSkillAdvisor.OnTradeSkillUpdate(event == "CRAFT_UPDATE" and "craft" or "tradeskill")
+      end
+    elseif event == "TRADE_SKILL_CLOSE" or event == "CRAFT_CLOSE" then
+      if ns.UI and ns.UI.TradeSkillAdvisor and ns.UI.TradeSkillAdvisor.OnTradeSkillClosed then
+        ns.UI.TradeSkillAdvisor.OnTradeSkillClosed()
+      end
+    elseif event == "BAG_UPDATE_COOLDOWN" then
+      if ns.Compat and ns.Compat.NormalizeItemCooldownToServerEpoch and ns.State and ns.State.RecordObservedCooldown then
+        local getItemCD = (C_Container and type(C_Container.GetContainerItemCooldown) == "function" and C_Container.GetContainerItemCooldown)
+          or _G.GetContainerItemCooldown
+        if type(getItemCD) == "function" then
+          for bagID = 0, 4 do
+            local numSlots = ns.Compat.GetContainerNumSlots(bagID)
+            for slotID = 1, numSlots do
+              local info = ns.Compat.GetContainerItemInfo(bagID, slotID)
+              if info and info.hasItem and tonumber(info.itemID) == 15846 then
+                local okCD, startT, dur, en = pcall(getItemCD, bagID, slotID)
+                if okCD then
+                  local norm = ns.Compat.NormalizeItemCooldownToServerEpoch(startT, dur, en)
+                  if norm and (norm.status == "READY_OBSERVED" or norm.status == "ON_COOLDOWN_OBSERVED") then
+                    ns.State.RecordObservedCooldown("lw_salt_shaker", norm)
+                  end
+                end
+              end
+            end
+          end
+        end
       end
     elseif event == "GOSSIP_SHOW" then
       ns.State.gossipOpen = true
@@ -2205,15 +2911,74 @@ if eventFrame then
       if ns.Providers and ns.Providers.Inventory and ns.Providers.Inventory.CancelBankCollection then
         ns.Providers.Inventory.CancelBankCollection("combat", "Bank collection stopped because you entered combat.")
       end
+      if ns.Domain and ns.Domain.InstanceLedger and ns.Domain.InstanceLedger.RecordOutsideCombatActivity then
+        pcall(ns.Domain.InstanceLedger.RecordOutsideCombatActivity)
+      end
+      if ns.Domain and ns.Domain.SunkenTempleCoach and ns.Domain.SunkenTempleCoach.OnCombatStart then
+        pcall(ns.Domain.SunkenTempleCoach.OnCombatStart)
+      end
+      Events.OnGoldFarmTargetOrCombatPull()
+    elseif event == "PLAYER_TARGET_CHANGED" then
+      if ns.Domain and ns.Domain.SunkenTempleCoach and ns.Domain.SunkenTempleCoach.OnTargetChangedSample then
+        pcall(ns.Domain.SunkenTempleCoach.OnTargetChangedSample)
+      end
+      Events.OnGoldFarmTargetOrCombatPull()
     elseif event == "PLAYER_REGEN_ENABLED" then
+      if ns.Domain and ns.Domain.SunkenTempleCoach and ns.Domain.SunkenTempleCoach.OnCombatEnd then
+        pcall(ns.Domain.SunkenTempleCoach.OnCombatEnd)
+      end
       if ns.UI and ns.UI.Navigation and ns.UI.Navigation.FlushDeferredIfReady then
         ns.UI.Navigation.FlushDeferredIfReady()
       end
-      local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-      if rProg and rProg.mode ~= "paused" then
-        Events.ScheduleObjectiveVerificationReconciles()
+      if ns.Domain and ns.Domain.SpawnRadar and ns.Domain.SpawnRadar.FlushPendingMacroSync then
+        local mRes = ns.Domain.SpawnRadar.FlushPendingMacroSync()
+        if mRes ~= nil and ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+          ns.UI.GoldFarms.RefreshIfShown()
+        end
+      end
+      for _, advName in ipairs({ "MerchantAdvisor", "TrainerAdvisor", "TradeSkillAdvisor", "AuctionPostAdvisor", "MailAdvisor" }) do
+        local adv = ns.UI and ns.UI[advName]
+        if adv and type(adv.FlushDeferredIfReady) == "function" then
+          pcall(adv.FlushDeferredIfReady)
+        end
+      end
+    elseif event == "UPDATE_MACROS" then
+      -- Read-only macro ownership/status inspection on external /macro edits (never calls EditMacro/CreateMacro -> zero loop risk)
+      local SR = ns.Domain and ns.Domain.SpawnRadar
+      if SR and not (SR.macroSyncState and SR.macroSyncState.inMutationGuard == true) and type(SR.InspectMacroSyncStatus) == "function" then
+        SR.InspectMacroSyncStatus()
+        if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+          ns.UI.GoldFarms.RefreshIfShown()
+        end
       end
     elseif event == "ZONE_CHANGED_NEW_AREA" then
+      local instTransZC = nil
+      if ns.Domain and ns.Domain.InstanceLedger and ns.Domain.InstanceLedger.ObserveTransition then
+        local okZC, resZC = pcall(ns.Domain.InstanceLedger.ObserveTransition, { trigger = "ZONE_CHANGED_NEW_AREA" })
+        if okZC then
+          instTransZC = resZC
+        end
+      end
+      if ns.Domain and ns.Domain.SunkenTempleCoach and ns.Domain.SunkenTempleCoach.ObserveEnvironmentTransition then
+        pcall(ns.Domain.SunkenTempleCoach.ObserveEnvironmentTransition, {
+          trigger = "ZONE_CHANGED_NEW_AREA",
+          resumedExistingRun = instTransZC and instTransZC.resumedExistingRun == true,
+          ledgerActiveRunID = instTransZC and instTransZC.activeRunID or nil,
+        })
+      end
+      if ns.Compat and ns.Compat.InvalidateMapWorldSizeCache then
+        ns.Compat.InvalidateMapWorldSizeCache()
+      end
+      do
+        local curPos = ns.Compat and ns.Compat.GetPlayerPosition01 and ns.Compat.GetPlayerPosition01()
+        local curMapID = (curPos and curPos.status == "ok") and tonumber(curPos.uiMapID) or nil
+        if curMapID ~= Events._lastObservedPlayerUiMapID then
+          Events._lastObservedPlayerUiMapID = curMapID
+          if ns.Domain and ns.Domain.SpawnRadar and ns.Domain.SpawnRadar.BumpWorldSessionEpoch then
+            ns.Domain.SpawnRadar.BumpWorldSessionEpoch("ZONE_CHANGED_NEW_AREA")
+          end
+        end
+      end
       if ns.UI and ns.UI.Navigation and ns.UI.Navigation.InvalidateTargetAnchor then
         ns.UI.Navigation.InvalidateTargetAnchor()
       end
@@ -2232,6 +2997,30 @@ if eventFrame then
       end
       if ns.UI and ns.UI.Workspace and ns.UI.Workspace.RefreshIfShown then
         ns.UI.Workspace.RefreshIfShown()
+      end
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+      if ns.Domain and ns.Domain.SunkenTempleCoach and ns.Domain.SunkenTempleCoach.OnUnitSpellcastSucceeded then
+        pcall(ns.Domain.SunkenTempleCoach.OnUnitSpellcastSucceeded, arg1, arg2, arg3)
+      end
+    elseif event == "CHAT_MSG_MONSTER_YELL" then
+      if ns.Domain and ns.Domain.SunkenTempleCoach and ns.Domain.SunkenTempleCoach.OnMonsterChatEvent then
+        pcall(ns.Domain.SunkenTempleCoach.OnMonsterChatEvent, "YELL", arg1, arg2)
+      end
+    elseif event == "CHAT_MSG_MONSTER_EMOTE" then
+      if ns.Domain and ns.Domain.SunkenTempleCoach and ns.Domain.SunkenTempleCoach.OnMonsterChatEvent then
+        pcall(ns.Domain.SunkenTempleCoach.OnMonsterChatEvent, "EMOTE", arg1, arg2)
+      end
+    elseif event == "PLAYER_DEAD" then
+      if ns.Domain and ns.Domain.SunkenTempleCoach and ns.Domain.SunkenTempleCoach.OnPlayerDead then
+        pcall(ns.Domain.SunkenTempleCoach.OnPlayerDead)
+      end
+    elseif event == "PLAYER_ALIVE" or event == "PLAYER_UNGHOST" then
+      if ns.Domain and ns.Domain.SunkenTempleCoach and ns.Domain.SunkenTempleCoach.ObserveEnvironmentTransition then
+        pcall(ns.Domain.SunkenTempleCoach.ObserveEnvironmentTransition, { trigger = event })
+      end
+    elseif event == "ZONE_CHANGED" or event == "ZONE_CHANGED_INDOORS" then
+      if ns.Domain and ns.Domain.SunkenTempleCoach and ns.Domain.SunkenTempleCoach.AnnotateSubZoneSample then
+        pcall(ns.Domain.SunkenTempleCoach.AnnotateSubZoneSample)
       end
     elseif event == "QUEST_COMPLETE" then
       if ns.Compat and ns.Compat.CaptureQuestDialogIdentity then
@@ -2256,12 +3045,22 @@ if eventFrame then
         ns.UI.RewardAdvisor.OnQuestFinished()
       end
     elseif event == "GET_ITEM_INFO_RECEIVED" then
+      if ns.UI and ns.UI.Tooltips and ns.UI.Tooltips.BumpVendorMetadataRevision then
+        ns.UI.Tooltips.BumpVendorMetadataRevision()
+      end
+      if ns.UI and ns.UI.MerchantAdvisor and ns.UI.MerchantAdvisor.RefreshIfActive then
+        ns.UI.MerchantAdvisor.RefreshIfActive()
+      end
       if ns.UI and ns.UI.RewardAdvisor then
         ns.UI.RewardAdvisor.OnItemInfoReceived(arg1, arg2)
       end
       if ns.UI and ns.UI.Crates and ns.UI.Crates.OnItemInfoReceived then
         ns.UI.Crates.OnItemInfoReceived(arg1, arg2)
       end
+      if ns.UI and ns.UI.AuctionPostAdvisor and ns.UI.AuctionPostAdvisor.active and ns.UI.AuctionPostAdvisor.OnAuctionSellSelectionChanged then
+        ns.UI.AuctionPostAdvisor.OnAuctionSellSelectionChanged()
+      end
+      Events.ScheduleCoalescedDeckRefresh()
     elseif event == "PLAYER_MONEY" then
       ns.State.CaptureSessionMoneyBaselineIfUnset()
       if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
@@ -2270,6 +3069,25 @@ if eventFrame then
       if ns.UI and ns.UI.Workspace and ns.UI.Workspace.RefreshIfShown then
         ns.UI.Workspace.RefreshIfShown()
       end
+    elseif event == "PLAYER_XP_UPDATE" or event == "PLAYER_LEVEL_UP" or event == "UPDATE_EXHAUSTION" then
+      if ns.State and ns.State.ReconcileGoldFarmXPSnapshot then
+        local newLvl = nil
+        if event == "PLAYER_LEVEL_UP" and not (ns.Compat and ns.Compat.IsSecretOrRestrictedValue and ns.Compat.IsSecretOrRestrictedValue(arg1)) then
+          newLvl = tonumber(arg1)
+        end
+        ns.State.ReconcileGoldFarmXPSnapshot({
+          trigger = event,
+          newLevel = newLvl,
+        })
+      end
+      if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+        ns.UI.GoldFarms.RefreshIfShown()
+      end
+      if ns.UI and ns.UI.Workspace and ns.UI.Workspace.RefreshIfShown then
+        ns.UI.Workspace.RefreshIfShown()
+      end
+    elseif event == "CHAT_MSG_COMBAT_XP_GAIN" then
+      Events.OnGoldFarmCombatOrLootEvent(event, arg1)
     elseif event == "QUEST_LOG_UPDATE" or event == "QUEST_WATCH_UPDATE" or event == "QUEST_AUTOCOMPLETE" then
       if ns.Compat and ns.Compat.InvalidateQuestStateCaches then
         ns.Compat.InvalidateQuestStateCaches()
@@ -2287,13 +3105,8 @@ if eventFrame then
         Events.ScheduleObjectiveVerificationReconciles()
       end
     elseif event == "CRITERIA_UPDATE" then
-      local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-      if rProg and rProg.mode ~= "paused" then
-        if ns.Compat and ns.Compat.InvalidateQuestStateCaches then
-          ns.Compat.InvalidateQuestStateCaches()
-        end
-        Events.CaptureQuestFieldTelemetry("objective_scan")
-        Events.ScheduleObjectiveVerificationReconciles()
+      if ns.Compat and ns.Compat.InvalidateQuestStateCaches then
+        ns.Compat.InvalidateQuestStateCaches()
       end
     elseif event == "CHAT_MSG_SYSTEM" then
       if ns.Compat and ns.Compat.ParseSystemQuestCompletedMessage then
@@ -2327,6 +3140,13 @@ if eventFrame then
       Events.ScheduleVerificationReconciles()
     elseif event == "QUEST_TURNED_IN" then
       local qID = tonumber(arg1)
+      if ns.State and ns.State.RecordGoldFarmQuestTurnInXP then
+        local xpRew = nil
+        if not (ns.Compat and ns.Compat.IsSecretOrRestrictedValue and ns.Compat.IsSecretOrRestrictedValue(arg2)) then
+          xpRew = tonumber(arg2)
+        end
+        ns.State.RecordGoldFarmQuestTurnInXP(qID, xpRew)
+      end
       if ns.Compat and ns.Compat.RecordRecentQuestTurnedIn then
         ns.Compat.RecordRecentQuestTurnedIn(qID, nil)
       end
@@ -2336,6 +3156,9 @@ if eventFrame then
       end
       if ns.UI and ns.UI.Crates then
         ns.UI.Crates.RefreshIfShown()
+      end
+      if ns.UI and ns.UI.GoldFarms and ns.UI.GoldFarms.RefreshIfShown then
+        ns.UI.GoldFarms.RefreshIfShown()
       end
       Events.ScheduleVerificationReconciles()
     elseif event == "QUEST_REMOVED" then
@@ -2350,10 +3173,6 @@ if eventFrame then
         pcall(C_Timer.After, 1.00, function()
           if ns.Compat and ns.Compat.RecordRecentQuestRemoved and ns.Compat.RecordRecentQuestRemoved(qID) == true then
             Events.CaptureQuestFieldTelemetry("quest_turned_in", qID)
-            local curProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-            if curProg and curProg.mode ~= "paused" then
-              Events.FlushRouteReconcileNow()
-            end
           end
         end)
       end
@@ -2407,10 +3226,6 @@ if eventFrame then
         ns.UI.Workspace.RefreshIfShown()
       elseif ns.UI and ns.UI.Crates then
         ns.UI.Crates.RefreshIfShown()
-      end
-      local rProg = ns.State and ns.State.GetRouteProgress and ns.State.GetRouteProgress()
-      if rProg and rProg.mode ~= "paused" then
-        Events.ScheduleObjectiveVerificationReconciles()
       end
     end
   end)

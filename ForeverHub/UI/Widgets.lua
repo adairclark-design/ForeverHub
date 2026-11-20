@@ -1206,6 +1206,9 @@ function Widgets.CreateTabBar(parent, tabs, onSelectTab)
   bar.__tabs = {}
   bar.__selectedKey = nil
   bar.__onSelectTab = onSelectTab
+  bar.__availableWidth = Theme.METRICS.workspaceDefaultWidth - 2
+  bar.__isCompactSelector = false
+  bar.__menuOpen = false
 
   local x = Theme.METRICS.workspacePadding
   for idx, t in ipairs(tabs or {}) do
@@ -1297,6 +1300,7 @@ function Widgets.CreateTabBar(parent, tabs, onSelectTab)
 
       if type(b.SetScript) == "function" then
         b:SetScript("OnClick", function()
+          bar.__menuOpen = false
           if bar.__selectedKey ~= t.key then
             bar.__selectedKey = t.key
             bar:RefreshVisualState()
@@ -1309,6 +1313,127 @@ function Widgets.CreateTabBar(parent, tabs, onSelectTab)
 
       bar.__tabs[idx] = b
       x = x + w + 8
+    end
+  end
+
+  -- Responsive Compact Section Selector (Astra Round-3 P0.6: prevents 6-tab horizontal overflow at 760px @ 1.25x)
+  local compactWrap = Widgets.CreatePanel(bar, nil, nil)
+  if compactWrap then
+    Widgets.SafeSetPoint(compactWrap, "TOPLEFT", bar, "TOPLEFT", Theme.METRICS.workspacePadding, -4)
+    Widgets.SafeSetPoint(compactWrap, "BOTTOMRIGHT", bar, "BOTTOMRIGHT", -Theme.METRICS.workspacePadding, 4)
+
+    local secPrefix = Widgets.SafeCreateFontString(compactWrap, "dense", "text.muted")
+    if secPrefix then
+      Widgets.SafeSetPoint(secPrefix, "LEFT", compactWrap, "LEFT", 0, 0)
+      if type(secPrefix.SetText) == "function" then
+        secPrefix:SetText("Section:")
+      end
+    end
+    compactWrap.prefix = secPrefix
+
+    local prevBtn = Widgets.CreateGhostButton(compactWrap, 28, "◀", 26)
+    if prevBtn then
+      Widgets.SafeSetPoint(prevBtn, "LEFT", compactWrap, "LEFT", 62, 0)
+      prevBtn:SetOnClick(function()
+        bar.__menuOpen = false
+        bar:CycleSelected(-1)
+      end)
+    end
+    compactWrap.prevBtn = prevBtn
+
+    local selectorBtn = Widgets.CreateSecondaryButton(compactWrap, 310, "Section ▾", 26)
+    if selectorBtn then
+      Widgets.SafeSetPoint(selectorBtn, "LEFT", prevBtn or compactWrap, prevBtn and "RIGHT" or "LEFT", 6, 0)
+      selectorBtn:SetOnClick(function()
+        bar.__menuOpen = not (bar.__menuOpen == true)
+        bar:RefreshVisualState()
+      end)
+    end
+    compactWrap.selectorBtn = selectorBtn
+
+    local nextBtn = Widgets.CreateGhostButton(compactWrap, 28, "▶", 26)
+    if nextBtn then
+      Widgets.SafeSetPoint(nextBtn, "LEFT", selectorBtn or compactWrap, selectorBtn and "RIGHT" or "LEFT", 6, 0)
+      nextBtn:SetOnClick(function()
+        bar.__menuOpen = false
+        bar:CycleSelected(1)
+      end)
+    end
+    compactWrap.nextBtn = nextBtn
+
+    local posLabel = Widgets.SafeCreateFontString(compactWrap, "dense", "text.muted")
+    if posLabel then
+      Widgets.SafeSetPoint(posLabel, "LEFT", nextBtn or compactWrap, nextBtn and "RIGHT" or "LEFT", 10, 0)
+    end
+    compactWrap.posLabel = posLabel
+
+    local flyout = Widgets.CreatePanel(bar, "surface.elevated", "border.default")
+    if flyout then
+      Widgets.SafeSetPoint(flyout, "TOPLEFT", bar, "BOTTOMLEFT", Theme.METRICS.workspacePadding + 62, -2)
+      if type(flyout.SetFrameLevel) == "function" and type(bar.GetFrameLevel) == "function" then
+        pcall(flyout.SetFrameLevel, flyout, (bar:GetFrameLevel() or 10) + 40)
+      end
+      if type(flyout.EnableMouse) == "function" then
+        pcall(flyout.EnableMouse, flyout, true)
+      end
+      flyout.rows = {}
+      for idx, b in ipairs(bar.__tabs) do
+        local rBtn = Widgets.CreateGhostButton(flyout, 320, tostring(b.__title or ""), 26)
+        if rBtn then
+          Widgets.SafeSetPoint(rBtn, "TOPLEFT", flyout, "TOPLEFT", 6, -6 - ((idx - 1) * 28))
+          local targetKey = b.__key
+          rBtn:SetOnClick(function()
+            bar.__menuOpen = false
+            if bar.__selectedKey ~= targetKey then
+              bar.__selectedKey = targetKey
+              bar:RefreshVisualState()
+              if type(bar.__onSelectTab) == "function" then
+                bar.__onSelectTab(targetKey)
+              end
+            else
+              bar:RefreshVisualState()
+            end
+          end)
+          flyout.rows[idx] = rBtn
+        end
+      end
+      Widgets.SafeSetSize(flyout, 332, 12 + (#bar.__tabs * 28))
+      Widgets.SafeShow(flyout, false)
+    end
+    compactWrap.flyout = flyout
+    Widgets.SafeShow(compactWrap, false)
+  end
+  bar.compactSelector = compactWrap
+
+  function bar:CycleSelected(delta)
+    local count = #self.__tabs
+    if count == 0 then
+      return
+    end
+    local curIdx = 1
+    for i, b in ipairs(self.__tabs) do
+      if b.__key == self.__selectedKey then
+        curIdx = i
+        break
+      end
+    end
+    local step = (tonumber(delta) or 1) >= 0 and 1 or -1
+    local nextIdx = ((curIdx - 1 + step) % count) + 1
+    local nextTab = self.__tabs[nextIdx]
+    if nextTab and nextTab.__key ~= self.__selectedKey then
+      self.__selectedKey = nextTab.__key
+      self:RefreshVisualState()
+      if type(self.__onSelectTab) == "function" then
+        self.__onSelectTab(nextTab.__key)
+      end
+    end
+  end
+
+  function bar:SetAvailableWidth(availW)
+    local w = tonumber(availW)
+    if w and w > 0 then
+      self.__availableWidth = math.floor(w + 0.5)
+      self:RefreshVisualState()
     end
   end
 
@@ -1326,8 +1451,15 @@ function Widgets.CreateTabBar(parent, tabs, onSelectTab)
 
   function bar:RefreshVisualState()
     local cursorTabX = Theme.METRICS.workspacePadding
-    for _, b in ipairs(self.__tabs) do
+    local selectedIdx = 1
+    local selectedTab = self.__tabs[1]
+
+    for idx, b in ipairs(self.__tabs) do
       local sel = (b.__key == self.__selectedKey)
+      if sel then
+        selectedIdx = idx
+        selectedTab = b
+      end
       local feat = (b.__featured == true)
 
       if b.bg then
@@ -1438,10 +1570,62 @@ function Widgets.CreateTabBar(parent, tabs, onSelectTab)
 
       cursorTabX = cursorTabX + effectiveW + 8
     end
+
+    local totalHorizontalRightEdge = math.max(0, cursorTabX - 8 + Theme.METRICS.workspacePadding)
+    self.__measuredTotalHorizontalWidth = totalHorizontalRightEdge
+    local availW = tonumber(self.__availableWidth) or (Theme.METRICS.workspaceDefaultWidth - 2)
+    local useCompactSelector = (totalHorizontalRightEdge > availW)
+
+    self.__isCompactSelector = useCompactSelector
+    for _, b in ipairs(self.__tabs) do
+      Widgets.SafeShow(b, not useCompactSelector)
+    end
+
+    if self.compactSelector then
+      Widgets.SafeShow(self.compactSelector, useCompactSelector)
+      if useCompactSelector then
+        local cs = self.compactSelector
+        if cs.prefix then
+          Theme.ApplyFont(cs.prefix, "dense", "text.muted")
+        end
+        local selTitle = selectedTab and tostring(selectedTab.__title or "Section") or "Section"
+        local selBadge = selectedTab and tostring(selectedTab.__badgeText or "") or ""
+        local btnWidth = math.max(180, math.min(340, availW - (Theme.METRICS.workspacePadding * 2) - 210))
+        if cs.selectorBtn then
+          Widgets.SafeSetSize(cs.selectorBtn, btnWidth, 26)
+          local fullLabel = (selBadge ~= "") and string.format("%s  (%s)  ▾", selTitle, selBadge) or (selTitle .. "  ▾")
+          cs.selectorBtn:SetLabel(fullLabel)
+        end
+        if cs.posLabel and type(cs.posLabel.SetText) == "function" then
+          Theme.ApplyFont(cs.posLabel, "dense", "text.muted")
+          cs.posLabel:SetText(string.format("%d / %d", selectedIdx, #self.__tabs))
+        end
+        if cs.flyout then
+          local flyoutW = math.max(220, math.min(360, btnWidth + 32))
+          Widgets.SafeSetSize(cs.flyout, flyoutW, 12 + (#self.__tabs * 28))
+          for idx, b in ipairs(self.__tabs) do
+            local rBtn = cs.flyout.rows and cs.flyout.rows[idx]
+            if rBtn then
+              Widgets.SafeSetSize(rBtn, flyoutW - 12, 26)
+              local bBadge = tostring(b.__badgeText or "")
+              local rowTitle = (bBadge ~= "") and string.format("%s  ·  %s", tostring(b.__title or ""), bBadge) or tostring(b.__title or "")
+              rBtn:SetLabel(rowTitle)
+              rBtn.__isSelected = (b.__key == self.__selectedKey)
+              rBtn:RefreshVisualState()
+            end
+          end
+          Widgets.SafeShow(cs.flyout, self.__menuOpen == true)
+        end
+      elseif self.compactSelector.flyout then
+        self.__menuOpen = false
+        Widgets.SafeShow(self.compactSelector.flyout, false)
+      end
+    end
   end
 
   function bar:SetSelected(key)
     self.__selectedKey = key
+    self.__menuOpen = false
     self:RefreshVisualState()
   end
 

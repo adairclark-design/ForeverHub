@@ -31,6 +31,38 @@ local function isHigherPriority(resA, cutoffPriority, cutoffGoalKey)
   return tostring(resA.goalKey or resA.goalID) < tostring(cutoffGoalKey)
 end
 
+local function isPositiveInt(v)
+  return type(v) == "number" and v == v and v >= 1 and v < 9007199254740992 and math.floor(v) == v
+end
+
+-- Stage 7B.1 (`P0-8`): Incomplete or linked `craft` reservations fail closed and NEVER allocate or shop!
+local function isExecutableCraftReservation(res)
+  if type(res) ~= "table" then
+    return false
+  end
+  if res.kind ~= "craft" then
+    return true
+  end
+  if res.scanComplete ~= true or res.learnedRecipeVerified ~= true then
+    return false
+  end
+  if not isPositiveInt(tonumber(res.skillLineID)) or not isPositiveInt(tonumber(res.spellID or res.spellOrRecipeID)) then
+    return false
+  end
+  local mats = (type(res.unitMaterials) == "table" and #res.unitMaterials > 0 and res.unitMaterials)
+    or (type(res.materials) == "table" and #res.materials > 0 and res.materials)
+    or nil
+  if not mats then
+    return false
+  end
+  for _, m in ipairs(mats) do
+    if type(m) ~= "table" or not isPositiveInt(tonumber(m.itemID)) or not isPositiveInt(tonumber(m.quantity or m.unitQuantity)) then
+      return false
+    end
+  end
+  return true
+end
+
 -- Computes deterministic priority-ordered reservation ledger.
 -- If `upToPriorityGoalKey` (e.g. "crate:248684") is provided:
 --   * If `upToPriorityGoalKey` is already reserved at priority P, ONLY goals strictly higher priority than (P, goalKey)
@@ -113,8 +145,8 @@ function Reservations.BuildAllocationLedger(inventorySnapshot, orderedReservatio
   for _, res in ipairs(orderedReservations) do
     if type(res) == "table" then
       local gKey = res.goalKey or string.format("%s:%d", tostring(res.kind or "crate"), tonumber(res.targetItemID) or 0)
-      local shouldInclude = true
-      if upToPriorityGoalKey ~= nil then
+      local shouldInclude = isExecutableCraftReservation(res)
+      if shouldInclude and upToPriorityGoalKey ~= nil then
         if gKey == upToPriorityGoalKey then
           shouldInclude = false
         elseif cutoffPriority ~= nil and not isHigherPriority(res, cutoffPriority, cutoffGoalKey) then
@@ -590,26 +622,45 @@ function Reservations.BuildReadySummary(inventorySnapshot, orderedReservations, 
         matReadyTransfer = math.min(matReadyTransfer, math.floor(aTotal / unitReq))
       end
 
-      -- Ready turn-ins in bags require BOTH possession of the crate/writ in bags AND allocated materials in bags
-      local readyInBagsNow = math.min(plannedQty, bagTarget, matReadyBags)
-      local readyAfterBank = math.min(plannedQty, charOwnedTarget, matReadyBank)
-
-      local excessOverOwned = math.max(0, plannedQty - charOwnedTarget)
+      local readyInBagsNow = 0
+      local readyAfterBank = 0
+      local excessOverOwned = 0
       local canReduceToOwned = false
       local reduceBlockReason = nil
+      local craftBlockedReason = nil
 
-      if excessOverOwned > 0 then
-        if not bankOwnershipCertain then
-          reduceBlockReason = "Bank ownership is unverified; visit your bank before reducing plans."
-        elseif kind == "crate" and sealedCratesTotal > 0 then
-          reduceBlockReason = string.format(
-            "You have %d Sealed Crate(s) awaiting delivery; deliver them before reducing crate plans.",
-            sealedCratesTotal
-          )
-        elseif kind == "writ" and writQuestActive then
-          reduceBlockReason = "This writ quest is currently active in your quest log."
+      if kind == "craft" then
+        -- Stage 7B.1 (`P0-8`): Craft readiness NEVER requires possession of `targetItemID` (`outputItemID`)!
+        -- Depends strictly on complete own-character recipe, allocated consumed reagents, required tool/station, and cooldown.
+        if not isExecutableCraftReservation(res) then
+          craftBlockedReason = "incomplete_or_unverified_recipe"
+        elseif res.requiredToolsPresent == false or res.requiredStationPresent == false then
+          craftBlockedReason = "missing_required_tool_or_station"
+        elseif res.cooldownStatus == "ON_COOLDOWN_OBSERVED" then
+          craftBlockedReason = "recipe_on_cooldown"
         else
-          canReduceToOwned = true
+          readyInBagsNow = math.min(plannedQty, matReadyBags)
+          readyAfterBank = math.min(plannedQty, matReadyBank)
+        end
+      else
+        -- Ready turn-ins in bags require BOTH possession of the crate/writ in bags AND allocated materials in bags
+        readyInBagsNow = math.min(plannedQty, bagTarget, matReadyBags)
+        readyAfterBank = math.min(plannedQty, charOwnedTarget, matReadyBank)
+        excessOverOwned = math.max(0, plannedQty - charOwnedTarget)
+
+        if excessOverOwned > 0 then
+          if not bankOwnershipCertain then
+            reduceBlockReason = "Bank ownership is unverified; visit your bank before reducing plans."
+          elseif kind == "crate" and sealedCratesTotal > 0 then
+            reduceBlockReason = string.format(
+              "You have %d Sealed Crate(s) awaiting delivery; deliver them before reducing crate plans.",
+              sealedCratesTotal
+            )
+          elseif kind == "writ" and writQuestActive then
+            reduceBlockReason = "This writ quest is currently active in your quest log."
+          else
+            canReduceToOwned = true
+          end
         end
       end
 
@@ -621,6 +672,8 @@ function Reservations.BuildReadySummary(inventorySnapshot, orderedReservations, 
       table.insert(goals, {
         goalKey = gKey,
         kind = kind,
+        skillLineID = (kind == "craft") and tonumber(res.skillLineID) or nil,
+        spellID = (kind == "craft") and tonumber(res.spellID) or nil,
         targetItemID = targetID,
         targetName = res.targetName or gKey,
         priority = tonumber(res.priority) or 1,
@@ -638,6 +691,7 @@ function Reservations.BuildReadySummary(inventorySnapshot, orderedReservations, 
         excessOverOwned = excessOverOwned,
         canReduceToOwned = canReduceToOwned,
         reduceBlockReason = reduceBlockReason,
+        craftBlockedReason = craftBlockedReason,
       })
     end
   end
@@ -670,7 +724,7 @@ function Reservations.BuildBankCollectionPlan(inventorySnapshot, orderedReservat
   local totalTargetUnits = 0
 
   for _, res in ipairs(orderedReservations) do
-    if type(res) == "table" then
+    if type(res) == "table" and res.kind ~= "craft" then
       local targetID = tonumber(res.targetItemID)
       local plannedQty = math.max(1, math.floor(tonumber(res.quantity) or 1))
       if targetID and not seenTarget[targetID] then
