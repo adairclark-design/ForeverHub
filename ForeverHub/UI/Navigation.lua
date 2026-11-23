@@ -1599,6 +1599,21 @@ local function ensureHUDFrame()
 
     f.nextBtn = createHudMenuRowButton(overflowMenu, -6, "Next hop", function()
       closeMenu()
+      if Navigation.activeContext == "raid_ready" and ns.Domain and ns.Domain.RaidReadinessCoach then
+        local RRC = ns.Domain.RaidReadinessCoach
+        local ev = RRC.lastEvaluation or RRC.Evaluate()
+        local step = ev and ev.activeStep or nil
+        if step and step.optional == true then
+          RRC.SetStepSkipped(step.stepID, true)
+          RRC.RequestCoalescedRefresh(false)
+        else
+          RRC.RequestCoalescedRefresh(false)
+          if ns.Compat and ns.Compat.Print then
+            ns.Compat.Print("Mandatory attunement step cannot be skipped; refreshed server quest state.")
+          end
+        end
+        return
+      end
       if ns.Events and ns.Events.HandleGoldSubcommand then
         ns.Events.HandleGoldSubcommand("next")
       end
@@ -1606,6 +1621,13 @@ local function ensureHUDFrame()
 
     f.prevBtn = createHudMenuRowButton(overflowMenu, -32, "Previous step", function()
       closeMenu()
+      if Navigation.activeContext == "raid_ready" and ns.Domain and ns.Domain.RaidReadinessCoach then
+        local RRC = ns.Domain.RaidReadinessCoach
+        local cfg = RRC.GetPersistedConfig()
+        local nextTrack = (cfg.activeTrack == "linken_solo") and "core_attune" or "linken_solo"
+        Navigation.StartRaidReadinessCoach(nextTrack)
+        return
+      end
       if ns.Events and ns.Events.HandleGoldSubcommand then
         ns.Events.HandleGoldSubcommand("prev")
       end
@@ -1613,6 +1635,10 @@ local function ensureHUDFrame()
 
     f.pauseToggleBtn = createHudMenuRowButton(overflowMenu, -58, "Pause navigation", function()
       closeMenu()
+      if Navigation.activeContext == "raid_ready" then
+        Navigation.StopRaidReadinessCoach()
+        return
+      end
       local isPausedNow = (f.viewModel and f.viewModel.stateKey == "paused")
       local subcmd = isPausedNow and "start" or "pause"
       if ns.Events and ns.Events.HandleGoldSubcommand then
@@ -1641,7 +1667,7 @@ local function ensureHUDFrame()
     f.openWorkspaceBtn = createHudMenuRowButton(overflowMenu, -136, "Open Workspace", function()
       closeMenu()
       if ns.UI and ns.UI.Workspace and ns.UI.Workspace.Show then
-        ns.UI.Workspace.Show("gold")
+        ns.UI.Workspace.Show(Navigation.activeContext == "raid_ready" and "advisor" or "gold")
       end
     end)
 
@@ -1657,6 +1683,10 @@ local function ensureHUDFrame()
 
     f.closeBtn = createHudMenuRowButton(overflowMenu, -188, "Stop navigation", function()
       closeMenu()
+      if Navigation.activeContext == "raid_ready" then
+        Navigation.StopRaidReadinessCoach()
+        return
+      end
       if ns.Events and ns.Events.HandleGoldSubcommand then
         ns.Events.HandleGoldSubcommand("stop")
       end
@@ -3244,6 +3274,17 @@ function Navigation.OnInstancePortalEntry(progress)
     hasDirectionalArrow = false,
     deferred = (not relOk),
   }
+
+  local RRC = ns.Domain and ns.Domain.RaidReadinessCoach
+  local rrcStore = RRC and type(RRC.GetPersistedConfig) == "function" and RRC.GetPersistedConfig() or nil
+  if Navigation.activeContext == "raid_ready" and rrcStore and rrcStore.coachEnabled == true then
+    -- Astra P0: For raid_ready coach, keep the 240x48 tracker visible in INSTANCE_OBJECTIVE mode
+    -- (arrow and distance suppressed, objective text and LBRS/UBRS wing guidance shown).
+    local eval = RRC.Evaluate({ inInstance = true })
+    Navigation.SyncFromRaidReadinessCoach(eval, Navigation.owner.generation)
+    return relOk, relReason
+  end
+
   if Navigation.frame and Navigation.frame.Hide then
     if Navigation.frame.overflowMenu and Navigation.frame.overflowMenu.Hide then
       Navigation.frame.overflowMenu:Hide()
@@ -3263,8 +3304,12 @@ function Navigation.OnInstancePortalExit(expectedGeneration, explicitIsCorpse)
     return false, "still_inside_instance"
   end
 
+  local RRC = ns.Domain and ns.Domain.RaidReadinessCoach
+  local rrcStore = RRC and type(RRC.GetPersistedConfig) == "function" and RRC.GetPersistedConfig() or nil
+  local isRaidReadyContext = (Navigation.activeContext == "raid_ready" and rrcStore and rrcStore.coachEnabled == true)
+
   local isCorpse = (explicitIsCorpse == true) or Navigation.IsPlayerCorpseOrGhost()
-  if isCorpse then
+  if isCorpse and not isRaidReadyContext then
     Navigation.StopTravelTicker()
     Navigation.ClearArrowTarget()
     Navigation.owner.pendingDestination = nil
@@ -3281,6 +3326,12 @@ function Navigation.OnInstancePortalExit(expectedGeneration, explicitIsCorpse)
       updateDeferredMirror()
       return false, relReason or "previous_owner_release_pending"
     end
+  end
+
+  if isRaidReadyContext then
+    local rEval = RRC.Evaluate({ inInstance = false })
+    Navigation.SyncFromRaidReadinessCoach(rEval, Navigation.owner.generation)
+    return true, "reacquired_raid_ready_route"
   end
 
   local gProg = ns.State and ns.State.GetGoldFarmProgress and ns.State.GetGoldFarmProgress()
@@ -3559,11 +3610,12 @@ function Navigation.FlushDeferredIfReady()
     end
   end
 
-  -- Reject stale or cancelled pending destination (or reacquire while inside dungeon/raid or corpse-running, ST-03)
+  -- Reject stale or cancelled pending destination (or reacquire while inside dungeon/raid or corpse-running unless raid_ready ghost step, ST-03)
+  local allowGhostOnRaidReady = (pending and pending.context == "raid_ready")
   if not pending
     or not Navigation.IsGenerationCurrent(pending.generation)
     or Navigation.IsPlayerInDungeonOrRaidInstance()
-    or Navigation.IsPlayerCorpseOrGhost()
+    or (Navigation.IsPlayerCorpseOrGhost() and not allowGhostOnRaidReady)
   then
     Navigation.owner.pendingDestination = nil
     syncProgressMirrorsAndPersist()
@@ -3576,9 +3628,235 @@ function Navigation.FlushDeferredIfReady()
       local gEval = ns.Domain.GoldFarms.ReconcileActive(nil, gProg)
       return Navigation.SyncFromGoldFarmEvaluation(gEval, gProg)
     end
+  elseif pending.context == "raid_ready" then
+    local RRC = ns.Domain and ns.Domain.RaidReadinessCoach
+    local rrcStore = RRC and type(RRC.GetPersistedConfig) == "function" and RRC.GetPersistedConfig() or nil
+    if RRC and rrcStore and rrcStore.coachEnabled == true then
+      local rEval = RRC.Evaluate()
+      return Navigation.SyncFromRaidReadinessCoach(rEval, Navigation.owner.generation)
+    end
   end
 
   Navigation.owner.pendingDestination = nil
   syncProgressMirrorsAndPersist()
   return Navigation.lastStatus
+end
+
+function Navigation.SyncFromRaidReadinessCoach(eval, expectedGeneration)
+  Navigation.HydrateOwnerFromSavedStateIfUnset()
+  if expectedGeneration ~= nil and not Navigation.IsGenerationCurrent(expectedGeneration) then
+    return Navigation.lastStatus, "stale_generation_discarded"
+  end
+
+  local RRC = ns.Domain and ns.Domain.RaidReadinessCoach
+  eval = type(eval) == "table" and eval or (RRC and type(RRC.Evaluate) == "function" and RRC.Evaluate() or nil)
+  if not eval or type(eval.activeStep) ~= "table" then
+    return Navigation.lastStatus, "missing_raid_ready_evaluation"
+  end
+
+  Navigation.activeContext = "raid_ready"
+  local step = eval.activeStep
+  local isIndoorOrInstance = (step.effectiveNavigationMode == "INSTANCE_OBJECTIVE")
+    or Navigation.IsPlayerInDungeonOrRaidInstance()
+    or (type(step.destination) ~= "table")
+
+  local f = ensureHUDFrame()
+  local profText = eval.professionStatus and eval.professionStatus.summaryText or ""
+  local extraNote = (profText ~= "" and eval.travelNote) and (profText .. " • " .. tostring(eval.travelNote)) or profText
+
+  if isIndoorOrInstance then
+    Navigation.StopTravelTicker()
+    Navigation.ClearArrowTarget()
+    Navigation.owner.pendingDestination = nil
+    local relOk, relReason = true, "already_clean"
+    if Navigation.owner.provider ~= "none" or Navigation.owner.pendingRelease == true then
+      relOk, relReason = Navigation.TryReleaseOwnedResource()
+    end
+    updateDeferredMirror()
+
+    local subLineText = step.brsWingHint or step.detailText or eval.onyxiaStatusLabel or "Inside Instance • Follow Objective"
+    if f then
+      f.viewModel = {
+        context = "raid_ready",
+        mode = "raid_ready",
+        stateKey = step.isRecoveryStep and "hazard" or "normal",
+        showNeutralDockedMarker = true,
+        titleText = tostring(step.shortTitle or "Raid-Ready Objective"),
+        fullInstruction = tostring(step.detailText or step.shortTitle or ""),
+        headerSummary = tostring(eval.onyxiaStatusLabel or ""),
+        extraNote = extraNote,
+      }
+      f.__lastLine2Text = tostring(subLineText)
+      layoutHUDFrame(f, Navigation.lastStatus)
+      if f.stepText and f.stepText.SetText then
+        f.stepText:SetText(tostring(step.shortTitle or "Raid-Ready Objective"))
+      end
+      if f.subText and f.subText.SetText then
+        f.subText:SetText(tostring(subLineText))
+      end
+      if f.Show then
+        f:Show()
+      end
+    end
+
+    Navigation.lastStatus = {
+      activeProvider = "instance_objective",
+      navigationLabel = tostring(step.shortTitle or "Instance Objective"),
+      cleanupReason = (not relOk) and relReason or nil,
+      hasDirectionalArrow = false,
+      deferred = (not relOk),
+      activeStepID = step.stepID,
+      brsWing = step.brsWing,
+    }
+    return Navigation.lastStatus
+  end
+
+  local dest = step.destination
+  local ttTitle = string.format("ForeverHub: %s", tostring(step.shortTitle or step.stepID or "Raid-Ready"))
+  local gen = Navigation.BumpGeneration()
+
+  if ns.Compat.IsInCombat() then
+    if Navigation.owner.provider ~= "none" and Navigation.owner.ownerContext ~= "raid_ready" then
+      Navigation.owner.pendingRelease = true
+    end
+    Navigation.owner.pendingDestination = {
+      context = "raid_ready",
+      generation = gen,
+      destination = dest,
+      title = ttTitle,
+    }
+    syncProgressMirrorsAndPersist()
+    local cOk, cVec = Navigation.SetArrowTarget(
+      "raid_ready",
+      dest,
+      ttTitle,
+      step.shortTitle,
+      tonumber(step.arrivalRadiusYards) or 20,
+      "deferred",
+      nil,
+      nil,
+      "quest",
+      "deferred_in_combat",
+      true,
+      "Raid-Ready Coach"
+    )
+    Navigation.lastStatus = buildProviderStatus("deferred", dest, "deferred_in_combat", cOk, cVec and cVec.status or nil)
+    Navigation.lastStatus.activeStepID = step.stepID
+    if f then
+      local subT = string.format("%s (%.1f, %.1f) • Deferred in Combat", tostring(dest.zoneName or ""), (dest.x01 or 0) * 100, (dest.y01 or 0) * 100)
+      f.viewModel = {
+        context = "raid_ready",
+        mode = "raid_ready",
+        stateKey = "normal",
+        titleText = tostring(step.shortTitle or "Raid-Ready Step"),
+        fullInstruction = tostring(step.detailText or step.shortTitle or ""),
+        headerSummary = tostring(eval.onyxiaStatusLabel or ""),
+        coordSummary = string.format("%s (%.1f, %.1f)", tostring(dest.zoneName or ""), (dest.x01 or 0) * 100, (dest.y01 or 0) * 100),
+        extraNote = extraNote,
+      }
+      f.__lastLine2Text = subT
+      layoutHUDFrame(f, Navigation.lastStatus)
+      if f.stepText and f.stepText.SetText then
+        f.stepText:SetText(tostring(step.shortTitle or "Raid-Ready Step"))
+      end
+      if f.subText and f.subText.SetText then
+        f.subText:SetText(subT)
+      end
+      if f.Show then f:Show() end
+    end
+    return Navigation.lastStatus
+  end
+
+  Navigation.owner.pendingDestination = nil
+  updateDeferredMirror()
+
+  local okAcq, provider, acqReason = tryAcquireDestinationForContext("raid_ready", dest, ttTitle)
+  local queuedDeferred = shouldQueuePendingDestination(okAcq, acqReason)
+  if queuedDeferred then
+    Navigation.owner.pendingDestination = {
+      context = "raid_ready",
+      generation = gen,
+      destination = dest,
+      title = ttTitle,
+    }
+  end
+  syncProgressMirrorsAndPersist()
+  local effProvider = okAcq and provider or "text_manual"
+  local arrowOk, vec = Navigation.SetArrowTarget(
+    "raid_ready",
+    dest,
+    ttTitle,
+    step.shortTitle,
+    tonumber(step.arrivalRadiusYards) or 20,
+    effProvider,
+    nil,
+    nil,
+    "quest",
+    acqReason,
+    queuedDeferred,
+    "Raid-Ready Coach"
+  )
+  Navigation.lastStatus = buildProviderStatus(effProvider, dest, acqReason, arrowOk, vec and vec.status or nil)
+  Navigation.lastStatus.activeStepID = step.stepID
+  if queuedDeferred then
+    Navigation.lastStatus.deferred = true
+  end
+
+  if f then
+    local distLabel = (vec and type(vec.distanceYards) == "number")
+      and string.format("%d yd • %s (%.1f, %.1f)", math.floor(vec.distanceYards + 0.5), tostring(dest.zoneName or ""), (dest.x01 or 0) * 100, (dest.y01 or 0) * 100)
+      or string.format("%s (%.1f, %.1f) • %s", tostring(dest.zoneName or ""), (dest.x01 or 0) * 100, (dest.y01 or 0) * 100, tostring(eval.onyxiaStatusLabel or ""))
+    f.viewModel = {
+      context = "raid_ready",
+      mode = "raid_ready",
+      stateKey = step.isRecoveryStep and "hazard" or "normal",
+      titleText = tostring(step.shortTitle or "Raid-Ready Step"),
+      fullInstruction = tostring(step.detailText or step.shortTitle or ""),
+      headerSummary = tostring(eval.onyxiaStatusLabel or ""),
+      coordSummary = string.format("%s (%.1f, %.1f)", tostring(dest.zoneName or ""), (dest.x01 or 0) * 100, (dest.y01 or 0) * 100),
+      extraNote = extraNote,
+    }
+    f.__lastLine2Text = distLabel
+    layoutHUDFrame(f, Navigation.lastStatus)
+    if f.stepText and f.stepText.SetText then
+      f.stepText:SetText(tostring(step.shortTitle or "Raid-Ready Step"))
+    end
+    if f.subText and f.subText.SetText then
+      f.subText:SetText(distLabel)
+    end
+    if f.Show then
+      f:Show()
+    end
+  end
+
+  return Navigation.lastStatus
+end
+
+function Navigation.StartRaidReadinessCoach(trackKey)
+  local RRC = ns.Domain and ns.Domain.RaidReadinessCoach
+  if not RRC then
+    return nil, "raid_readiness_coach_unavailable"
+  end
+  local store = RRC.GetPersistedConfig()
+  store.coachEnabled = true
+  if trackKey == "linken_solo" or trackKey == "core_attune" then
+    RRC.SetActiveTrack(trackKey)
+  end
+  local eval = RRC.Evaluate()
+  return Navigation.SyncFromRaidReadinessCoach(eval)
+end
+
+function Navigation.StopRaidReadinessCoach()
+  local RRC = ns.Domain and ns.Domain.RaidReadinessCoach
+  if RRC and type(RRC.GetPersistedConfig) == "function" then
+    local store = RRC.GetPersistedConfig()
+    store.coachEnabled = false
+  end
+  Navigation.StopTravelTicker()
+  Navigation.ClearArrowTarget()
+  local ok, reason = Navigation.CleanupOwnedWaypoint()
+  if Navigation.frame and Navigation.frame.Hide then
+    Navigation.frame:Hide()
+  end
+  return ok, reason
 end

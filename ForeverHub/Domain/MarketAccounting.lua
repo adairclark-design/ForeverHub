@@ -989,7 +989,7 @@ function MarketAccounting.EnsureMarketExportInitialized()
   if type(db.marketExport) ~= "table" or db.marketExport.schemaVersion ~= MarketAccounting.EXPORT_SCHEMA_VERSION then
     db.marketExport = {
       schemaVersion = MarketAccounting.EXPORT_SCHEMA_VERSION,
-      addonVersion = tostring(ns.version or "0.8.9"),
+      addonVersion = tostring(ns.version or "0.9.0"),
       installationSeq = 0,
       persistedAt = nil,
       capabilityMatrix = nil,
@@ -999,7 +999,7 @@ function MarketAccounting.EnsureMarketExportInitialized()
     }
   end
   local me = db.marketExport
-  me.addonVersion = tostring(ns.version or "0.8.9")
+  me.addonVersion = tostring(ns.version or "0.9.0")
   me.installationSeq = math.max(0, math.floor(tonumber(me.installationSeq) or 0))
   me.observations = type(me.observations) == "table" and me.observations or {}
   me.depositQuotes = type(me.depositQuotes) == "table" and me.depositQuotes or {}

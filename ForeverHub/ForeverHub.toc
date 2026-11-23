@@ -2,7 +2,7 @@
 ## Title: ForeverHub |cff00ccffCrate, Writ, Gold & Grind Advisor|r
 ## Notes: Reservation-aware Waylaid Crate & Writ advisor, Level 40-60 Gold & Arcane ST Grind Radar, market advisor, and quest reward vendor-value helper for WoW: Forever.
 ## Author: ForeverHub
-## Version: 0.8.9
+## Version: 0.9.0
 ## IconTexture: Interface\AddOns\ForeverHub\Textures\NavigationArrow
 ## AddonCompartmentFunc: ForeverHub_OnAddonCompartmentClick
 ## AddonCompartmentFuncOnEnter: ForeverHub_OnAddonCompartmentEnter

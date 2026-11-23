@@ -238,6 +238,13 @@ function CommandDeckPresenter.CaptureSnapshot(overrides)
     end
   end
 
+  local raidReadiness = nil
+  if ns.Domain and ns.Domain.RaidReadinessCoach and type(ns.Domain.RaidReadinessCoach.Evaluate) == "function" then
+    raidReadiness = ns.Domain.RaidReadinessCoach.Evaluate({
+      tailoringSkill = (type(learnedSkills) == "table" and tonumber(learnedSkills.TAILORING)) or 214,
+    })
+  end
+
   return {
     nowSeconds = nowSec,
     level = level,
@@ -265,6 +272,7 @@ function CommandDeckPresenter.CaptureSnapshot(overrides)
     professionSnapshotStatus = snapshotStatus,
     professionPlan = professionPlan,
     portfolioTriage = portfolioTriage,
+    raidReadiness = raidReadiness,
   }
 end
 

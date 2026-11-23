@@ -74,7 +74,7 @@ local function showMinimapTooltip(ownerFrame, anchorMode)
   if type(tip.ClearLines) == "function" then
     pcall(tip.ClearLines, tip)
   end
-  local title = string.format("ForeverHub v%s", tostring(ns.version or "0.8.9"))
+  local title = string.format("ForeverHub v%s", tostring(ns.version or "0.9.0"))
   if type(tip.SetText) == "function" then
     pcall(tip.SetText, tip, title, 0.91, 0.79, 0.50)
   elseif type(tip.AddLine) == "function" then

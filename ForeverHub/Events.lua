@@ -47,7 +47,7 @@ function Events.RunSelfTestCommand()
     ns.Compat.Print(
       string.format(
         "=== ForeverHub v%s Workspace UI Self-Tests (%d/%d PASSED) ===",
-        tostring(ns.version or "0.8.9"),
+        tostring(ns.version or "0.9.0"),
         uiReport.passed,
         uiReport.total
       )
@@ -65,7 +65,7 @@ function Events.RunSelfTestCommand()
     ns.Compat.Print(
       string.format(
         "=== ForeverHub v%s Phase 0 Market Self-Tests (%d/%d PASSED) ===",
-        tostring(ns.version or "0.8.9"),
+        tostring(ns.version or "0.9.0"),
         mkReport.passed,
         mkReport.total
       )
@@ -83,7 +83,7 @@ function Events.RunSelfTestCommand()
     ns.Compat.Print(
       string.format(
         "=== ForeverHub v%s Arcane Grind & Spawn Radar Self-Tests (%d/%d PASSED) ===",
-        tostring(ns.version or "0.8.9"),
+        tostring(ns.version or "0.9.0"),
         srReport.passed,
         srReport.total
       )
@@ -101,7 +101,7 @@ function Events.RunSelfTestCommand()
     ns.Compat.Print(
       string.format(
         "=== ForeverHub v%s Sunken Temple Coach RC1 Self-Tests (%d/%d PASSED) ===",
-        tostring(ns.version or "0.8.9"),
+        tostring(ns.version or "0.9.0"),
         stReport.passed,
         stReport.total
       )
@@ -2442,8 +2442,66 @@ local function handleSlashCommand(msg)
       ns.Compat.Print(nextHidden and "Minimap button hidden. Type /fh minimap to show it again." or "Minimap button shown.")
     end
     return
+  elseif cmd == "raidready" or cmd == "rr" or cmd == "attune" then
+    local RRC = ns.Domain and ns.Domain.RaidReadinessCoach
+    local Nav = ns.UI and ns.UI.Navigation
+    if not RRC then
+      ns.Compat.Print("RaidReadinessCoach unavailable.")
+      return
+    end
+    local sub, arg2 = string.match(rest or "", "^(%S+)%s*(.-)$")
+    sub = string.lower(sub or "start")
+    arg2 = string.gsub(arg2 or "", "^%s*(.-)%s*$", "%1")
+    if sub == "stop" or sub == "off" then
+      if Nav and Nav.StopRaidReadinessCoach then
+        Nav.StopRaidReadinessCoach()
+      end
+      ns.Compat.Print("Raid-Ready & Attunement Arrow stopped.")
+    elseif sub == "linken" then
+      if Nav and Nav.StartRaidReadinessCoach then
+        Nav.StartRaidReadinessCoach("linken_solo")
+      end
+      local ev = RRC.Evaluate()
+      ns.Compat.Print("Raid-Ready Arrow (Linken Track): " .. tostring(ev.activeStep and ev.activeStep.shortTitle or ""))
+    elseif sub == "core" or sub == "start" or sub == "on" then
+      if Nav and Nav.StartRaidReadinessCoach then
+        Nav.StartRaidReadinessCoach("core_attune")
+      end
+      local ev = RRC.Evaluate()
+      ns.Compat.Print("Raid-Ready Arrow (Core Onyxia/Princess Spine): " .. tostring(ev.activeStep and ev.activeStep.shortTitle or ""))
+    elseif sub == "skip" and arg2 ~= "" then
+      local ok, reason = RRC.SetStepSkipped(arg2, true)
+      if ok then
+        local ev = RRC.RequestCoalescedRefresh(false)
+        ns.Compat.Print("Skipped optional step " .. arg2 .. " -> Next: " .. tostring(ev.activeStep and ev.activeStep.shortTitle or ""))
+      else
+        ns.Compat.Print("Cannot skip step " .. arg2 .. ": " .. tostring(reason))
+      end
+    elseif sub == "unskip" and arg2 ~= "" then
+      local ok, reason = RRC.SetStepSkipped(arg2, false)
+      if ok then
+        local ev = RRC.RequestCoalescedRefresh(false)
+        ns.Compat.Print("Unskipped step " .. arg2 .. " -> Next: " .. tostring(ev.activeStep and ev.activeStep.shortTitle or ""))
+      else
+        ns.Compat.Print("Cannot unskip step " .. arg2 .. ": " .. tostring(reason))
+      end
+    elseif sub == "reset" then
+      RRC.ClearAllSkips()
+      local ev = RRC.RequestCoalescedRefresh(false)
+      ns.Compat.Print("Cleared optional skips -> Next: " .. tostring(ev.activeStep and ev.activeStep.shortTitle or ""))
+    else
+      local ev = RRC.Evaluate()
+      ns.Compat.Print(string.format(
+        "Raid-Ready Status: %s | Next (%s): %s | %s",
+        tostring(ev.onyxiaStatusLabel),
+        tostring(ev.activeTrack),
+        tostring(ev.activeStep and ev.activeStep.shortTitle or ""),
+        tostring(ev.professionStatus and ev.professionStatus.summaryText or "")
+      ))
+    end
+    return
   else
-    ns.Compat.Print("Commands: /fh | /fh minimap [show|hide|reset] | /fh arrow [on|off|dock|undock|lock|unlock|scale <0.6-2.0>|style <auto|custom|classic>|reset] | /fh gold [...] | /fh mount | /fh doctor | /fh selftest")
+    ns.Compat.Print("Commands: /fh | /fh raidready [start|stop|core|linken|skip <id>|unskip <id>|reset|status] | /fh minimap [show|hide|reset] | /fh arrow [...] | /fh gold [...] | /fh mount | /fh doctor | /fh selftest")
   end
 end
 
@@ -2484,6 +2542,7 @@ if eventFrame then
     "QUEST_FINISHED",
     "QUEST_DETAIL",
     "GET_ITEM_INFO_RECEIVED",
+    "PLAYER_EQUIPMENT_CHANGED",
     "PLAYER_MONEY",
     "MAIL_SHOW",
     "MAIL_INBOX_UPDATE",
@@ -2521,6 +2580,12 @@ if eventFrame then
     "UPDATE_EXHAUSTION",
     "CHAT_MSG_COMBAT_XP_GAIN",
     "ZONE_CHANGED_NEW_AREA",
+    "ZONE_CHANGED",
+    "ZONE_CHANGED_INDOORS",
+    "MINIMAP_ZONE_CHANGED",
+    "PLAYER_DEAD",
+    "PLAYER_ALIVE",
+    "PLAYER_UNGHOST",
     "DISPLAY_SIZE_CHANGED",
     "UI_SCALE_CHANGED",
     "PLAYER_LOGOUT",
@@ -3226,6 +3291,38 @@ if eventFrame then
         ns.UI.Workspace.RefreshIfShown()
       elseif ns.UI and ns.UI.Crates then
         ns.UI.Crates.RefreshIfShown()
+      end
+    end
+
+    local RRC = ns.Domain and ns.Domain.RaidReadinessCoach
+    if RRC and type(RRC.RequestCoalescedRefresh) == "function" then
+      local isWorldTrans = (event == "PLAYER_ENTERING_WORLD" or event == "ZONE_CHANGED_NEW_AREA")
+      local isRrcEvent = isWorldTrans
+        or event == "ZONE_CHANGED"
+        or event == "ZONE_CHANGED_INDOORS"
+        or event == "MINIMAP_ZONE_CHANGED"
+        or event == "QUEST_LOG_UPDATE"
+        or event == "QUEST_ACCEPTED"
+        or event == "QUEST_TURNED_IN"
+        or event == "QUEST_REMOVED"
+        or event == "QUEST_WATCH_UPDATE"
+        or event == "UNIT_QUEST_LOG_CHANGED"
+        or event == "BAG_UPDATE_DELAYED"
+        or event == "BANKFRAME_OPENED"
+        or event == "BANKFRAME_CLOSED"
+        or event == "PLAYERBANKSLOTS_CHANGED"
+        or event == "BANK_TABS_CHANGED"
+        or event == "PLAYER_EQUIPMENT_CHANGED"
+        or event == "GET_ITEM_INFO_RECEIVED"
+        or event == "SKILL_LINES_CHANGED"
+        or event == "TRADE_SKILL_UPDATE"
+        or event == "CRAFT_UPDATE"
+        or event == "PLAYER_DEAD"
+        or event == "PLAYER_ALIVE"
+        or event == "PLAYER_UNGHOST"
+        or event == "PLAYER_REGEN_ENABLED"
+      if isRrcEvent then
+        pcall(RRC.RequestCoalescedRefresh, isWorldTrans)
       end
     end
   end)

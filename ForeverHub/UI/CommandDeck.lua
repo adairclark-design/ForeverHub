@@ -197,6 +197,21 @@ function CommandDeck.Dispatch(actionType, payload)
       return true
     end
     return false, "workspace_unavailable"
+  elseif actionType == "START_RAID_READY_ARROW" then
+    local trackKey = tostring(payload.track or "core_attune")
+    if ns.UI and ns.UI.Navigation and type(ns.UI.Navigation.StartRaidReadinessCoach) == "function" then
+      ns.UI.Navigation.StartRaidReadinessCoach(trackKey)
+      CommandDeck.RefreshIfShown()
+      return true
+    end
+    return false, "navigation_unavailable"
+  elseif actionType == "STOP_RAID_READY_ARROW" then
+    if ns.UI and ns.UI.Navigation and type(ns.UI.Navigation.StopRaidReadinessCoach) == "function" then
+      ns.UI.Navigation.StopRaidReadinessCoach()
+      CommandDeck.RefreshIfShown()
+      return true
+    end
+    return false, "navigation_unavailable"
   end
 
   return false, "unknown_action"

@@ -234,7 +234,7 @@ local function createDiagnosticsDrawer(parent)
         end
       end
       if ns.Compat and type(ns.Compat.Print) == "function" then
-        ns.Compat.Print(string.format("Installed: v%s — Check website for updates: %s", tostring(ns.version or "0.8.9"), UPDATE_PORTAL_URL))
+        ns.Compat.Print(string.format("Installed: v%s — Check website for updates: %s", tostring(ns.version or "0.9.0"), UPDATE_PORTAL_URL))
       end
     end)
     drawer.updateCheckBtn = updateCheckBtn
@@ -256,7 +256,7 @@ local function createDiagnosticsDrawer(parent)
     end
     local hasAuc = (ns.Providers and ns.Providers.Auctionator and ns.Providers.Auctionator.IsAvailable and ns.Providers.Auctionator.IsAvailable()) or false
     local invName = (ns.Providers and ns.Providers.Syndicator and ns.Providers.Syndicator.GetActiveBackendName and ns.Providers.Syndicator.GetActiveBackendName()) or "None"
-    local curVer = tostring(ns.version or "0.8.9")
+    local curVer = tostring(ns.version or "0.9.0")
     local lines = {
       string.format("Installed: v%s  ·  Client %s (Build %s, TOC %s)", curVer, buildVer, buildNum, tocNum),
       string.format(
@@ -269,10 +269,10 @@ local function createDiagnosticsDrawer(parent)
       string.format("Providers: Auctionator=%s · AccountInv=%s", hasAuc and "OK" or "Missing", tostring(invName)),
       "",
       string.format("Changelog (v%s):", curVer),
+      "• Cross-PC Raid-Readiness & Attunement Arrow Coach (/fh raidready)",
+      "• Onyxia + BRD Princess spine & parallel Linken/Gizlock track on 240x48 HUD",
       "• Portfolio Triage Engine (6-bucket holdings actions + Top-20 raid watchlist)",
       "• 3-tier Profession Roadmap + optional read-only Blackthornes snapshot bridge",
-      "• Custom Forever Alchemy, Smelting & Legionite spreads + Dec 9, 2026 raid clock",
-      "• Lv 46–60 Arcane ST Grind Catalog (19 primary subcamps + 7 experimental)",
     }
     self.body:SetText(table.concat(lines, "\n"))
     if self.updateUrlBox and type(self.updateUrlBox.SetText) == "function" then
@@ -400,7 +400,7 @@ function Workspace.EnsureCreated()
   if subtitleText then
     Widgets.SafeSetPoint(subtitleText, "LEFT", titleText or titleBar or f, "RIGHT", 10, -1)
     if type(subtitleText.SetText) == "function" then
-      subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.9")))
+      subtitleText:SetText(string.format("Planning & Route Workspace  ·  Installed: v%s", tostring(ns.version or "0.9.0")))
     end
   end
   f.subtitleText = subtitleText
@@ -668,7 +668,7 @@ function Workspace.Refresh()
   if f.subtitleText then
     Theme.ApplyFont(f.subtitleText, "dense", "text.muted")
     if type(f.subtitleText.SetText) == "function" then
-      f.subtitleText:SetText(string.format("Economy & Grind Workspace  ·  Installed: v%s", tostring(ns.version or "0.8.9")))
+      f.subtitleText:SetText(string.format("Economy & Grind Workspace  ·  Installed: v%s", tostring(ns.version or "0.9.0")))
     end
   end
 

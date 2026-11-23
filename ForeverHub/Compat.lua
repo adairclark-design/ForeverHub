@@ -1618,7 +1618,159 @@ function Compat.IsQuestCompletedResult(questRef)
     end
     return { status = "unavailable", value = nil, reason = "legacy_api_error", identityConfidence = identityConfidence }
   end
-  return { status = "unavailable", value = nil, reason = "missing_quest_completion_api", identityConfidence = identityConfidence }
+  return {
+    status = "unavailable",
+    value = nil,
+    reason = "missing_quest_completion_api",
+    identityConfidence = identityConfidence,
+  }
+end
+
+-- Cross-PC server-authoritative 5-state quest resolver (Astra P0: never uses local `observed_id_history`).
+-- States: "unknown" | "absent" | "active" | "ready_to_turn_in" | "turned_in"
+function Compat.GetCrossPCQuestStateResult(questID, opts)
+  local qid = tonumber(questID)
+  if not qid or qid <= 0 or math.floor(qid) ~= qid then
+    return {
+      questID = questID,
+      state = "unknown",
+      reason = "invalid_numeric_quest_id",
+      fulfilledCount = 0,
+      requiredCount = 0,
+      objectives = {},
+      provenance = "invalid",
+    }
+  end
+  opts = type(opts) == "table" and opts or {}
+
+  -- 1) Explicit test/caller snapshot table override
+  local ovMap = type(opts.questStatesByID) == "table" and opts.questStatesByID
+    or (ns.State and type(ns.State.overrideServerQuestStates) == "table" and ns.State.overrideServerQuestStates)
+    or nil
+  if type(ovMap) == "table" and ovMap[qid] ~= nil then
+    local raw = ovMap[qid]
+    if type(raw) == "string" then
+      return {
+        questID = qid,
+        state = raw,
+        fulfilledCount = (raw == "ready_to_turn_in" or raw == "turned_in") and 1 or 0,
+        requiredCount = 1,
+        objectives = {},
+        provenance = "override_state",
+      }
+    elseif type(raw) == "table" then
+      return {
+        questID = qid,
+        state = tostring(raw.state or "unknown"),
+        fulfilledCount = tonumber(raw.fulfilledCount) or 0,
+        requiredCount = tonumber(raw.requiredCount) or 0,
+        objectives = type(raw.objectives) == "table" and raw.objectives or {},
+        summaryText = raw.summaryText,
+        provenance = raw.provenance or "override_table",
+      }
+    elseif type(raw) == "boolean" then
+      return {
+        questID = qid,
+        state = raw and "turned_in" or "absent",
+        fulfilledCount = raw and 1 or 0,
+        requiredCount = 1,
+        objectives = {},
+        provenance = "override_bool",
+      }
+    end
+  end
+
+  local now = Compat.NowSeconds()
+  if (Compat.recentQuestTurnedInByID[qid] or 0) > now then
+    return {
+      questID = qid,
+      state = "turned_in",
+      fulfilledCount = 1,
+      requiredCount = 1,
+      objectives = {},
+      provenance = "recent_turnin_event",
+    }
+  end
+
+  -- 2) Server completion flag check (strictly excludes local `observed_id_history`)
+  local serverCompletedStatus = "unavailable"
+  local serverCompletedVal = nil
+  if C_QuestLog and type(C_QuestLog.IsQuestFlaggedCompleted) == "function" then
+    local ok, done = pcall(C_QuestLog.IsQuestFlaggedCompleted, qid)
+    if ok and not Compat.IsSecretOrRestrictedValue(done) and type(done) == "boolean" then
+      serverCompletedStatus = "ok"
+      serverCompletedVal = (done == true) or Compat.CheckBulkQuestCompleted(qid)
+    elseif ok and Compat.IsSecretOrRestrictedValue(done) then
+      serverCompletedStatus = "restricted"
+    end
+  elseif type(IsQuestFlaggedCompleted) == "function" then
+    local ok, done = pcall(IsQuestFlaggedCompleted, qid)
+    if ok and not Compat.IsSecretOrRestrictedValue(done) then
+      serverCompletedStatus = "ok"
+      serverCompletedVal = (done == true or done == 1) or Compat.CheckBulkQuestCompleted(qid)
+    elseif ok and Compat.IsSecretOrRestrictedValue(done) then
+      serverCompletedStatus = "restricted"
+    end
+  end
+
+  if serverCompletedStatus == "ok" and serverCompletedVal == true then
+    return {
+      questID = qid,
+      state = "turned_in",
+      fulfilledCount = 1,
+      requiredCount = 1,
+      objectives = {},
+      provenance = "server_completion_api",
+    }
+  end
+
+  -- 3) Active quest log & live objective counters
+  local onRes = Compat.IsOnQuestResult(qid)
+  if onRes.status == "ok" and onRes.value == true then
+    local objRes = Compat.GetQuestObjectivesResult(qid, opts)
+    local objectives = (type(objRes) == "table" and type(objRes.objectives) == "table") and objRes.objectives or {}
+    local fSum, rSum = 0, 0
+    for _, row in ipairs(objectives) do
+      if type(row) == "table" then
+        fSum = fSum + (tonumber(row.numFulfilled) or (row.finished and 1 or 0))
+        rSum = rSum + (tonumber(row.numRequired) or 1)
+      end
+    end
+    local minReq = tonumber(opts.requiredObjectiveCount)
+    local allDone = (type(objRes) == "table" and objRes.allFinished == true)
+      or (minReq and minReq > 0 and fSum >= minReq)
+      or (rSum > 0 and fSum >= rSum and #objectives > 0)
+    return {
+      questID = qid,
+      state = allDone and "ready_to_turn_in" or "active",
+      fulfilledCount = fSum,
+      requiredCount = math.max(rSum, minReq or 0),
+      objectives = objectives,
+      summaryText = type(objRes) == "table" and objRes.summaryText or nil,
+      provenance = "live_quest_log",
+    }
+  end
+
+  if serverCompletedStatus ~= "ok" or (onRes.status ~= "ok" and onRes.status ~= "unavailable") then
+    return {
+      questID = qid,
+      state = "unknown",
+      reason = onRes.reason or serverCompletedStatus,
+      fulfilledCount = 0,
+      requiredCount = 0,
+      objectives = {},
+      provenance = "unhydrated",
+    }
+  end
+
+  return {
+    questID = qid,
+    state = "absent",
+    fulfilledCount = 0,
+    requiredCount = 0,
+    objectives = {},
+    provenance = "server_verified_absent",
+  }
 end
 
 function Compat.IsOnQuestResult(questRef)
